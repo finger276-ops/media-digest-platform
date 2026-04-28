@@ -437,6 +437,20 @@ def delete_period(project_id: str, period_id: str, *, hard: bool = False) -> Non
         update_period_metadata(project_id, period_id, status="hidden")
 
 
+
+def list_manual(project_id: str, table_name: str | None = None) -> pd.DataFrame:
+    filters: dict[str, Any] = {"project_id": project_id}
+    if table_name:
+        filters["table_name"] = table_name
+    rows = _fetch_all(get_supabase_client(), "platform_manual_rows", filters=filters, order="updated_at")
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    if "updated_at" in df.columns:
+        df["updated_at"] = pd.to_datetime(df["updated_at"], errors="coerce")
+    return df
+
+
 def save_manual(project_id: str, table_name: str, row_key: str, payload: dict[str, Any]) -> None:
     get_supabase_client().table("platform_manual_rows").upsert({
         "project_id": project_id,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import tempfile
+import uuid
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -26,13 +27,14 @@ from platform_store import (
     delete_period,
     save_uploaded_file_to_storage,
     get_manual,
+    list_manual,
     save_manual,
     delete_manual,
 )
 from preprocess import run_preprocess_from_dataframe
 
 APP_TITLE = "Платформа дайджестов"
-APP_VERSION = "3.0-alpha: отдельная мультипроектная платформа с изолированными данными"
+APP_VERSION = "3.1-alpha: мультипроектная платформа с ручной модерацией инфоповодов"
 
 
 def parse_args() -> argparse.Namespace:
@@ -389,7 +391,7 @@ def aggregate_events(events: pd.DataFrame) -> pd.DataFrame:
         row = {
             "group_key": key,
             "title": group["title"].iloc[0],
-            "description": build_event_description(group),
+            "description": pick_event_description(group),
             "tags": " | ".join(sorted(set("|".join(group.get("main_tags", pd.Series(dtype=str)).fillna("").astype(str)).split("|")) - {""})),
             "start_date": pd.to_datetime(group.get("start_date"), errors="coerce").min(),
             "end_date": pd.to_datetime(group.get("end_date"), errors="coerce").max(),
@@ -427,6 +429,255 @@ def build_event_description(group: pd.DataFrame) -> str:
         tags = " | ".join(sorted(set("|".join(group.get("main_tags", pd.Series(dtype=str)).fillna("").astype(str)).split("|")) - {""}))
         return f"В теме обсуждались: {tags}." if tags else "В теме обсуждались связанные сообщения выбранного периода."
     return "В теме обсуждались: " + "; ".join(signals[:5]) + "."
+
+
+
+def pick_event_description(group: pd.DataFrame) -> str:
+    """Return manual description if present; otherwise build an automatic one."""
+    for col in ["display_description", "manual_description", "event_description"]:
+        if col in group.columns:
+            vals = [str(x).strip() for x in group[col].fillna("").tolist() if str(x).strip()]
+            if vals:
+                return vals[0]
+    return build_event_description(group)
+
+
+def manual_payloads(manual_df: pd.DataFrame, table_name: str) -> list[dict[str, Any]]:
+    if manual_df is None or manual_df.empty or "table_name" not in manual_df.columns:
+        return []
+    rows = manual_df[manual_df["table_name"].astype(str) == table_name]
+    payloads: list[dict[str, Any]] = []
+    for _, row in rows.iterrows():
+        payload = row.get("payload") or {}
+        if isinstance(payload, dict):
+            payload = dict(payload)
+            payload.setdefault("_row_key", str(row.get("row_key") or ""))
+            payloads.append(payload)
+    return payloads
+
+
+def get_manual_state(project_id: str) -> dict[str, Any]:
+    try:
+        manual_df = list_manual(project_id)
+    except Exception:
+        manual_df = pd.DataFrame()
+
+    hidden_messages: set[str] = set()
+    hidden_message_keys: dict[str, str] = {}
+    for payload in manual_payloads(manual_df, "message_hidden"):
+        message_id = str(payload.get("message_id") or payload.get("_row_key", "").replace("message_hidden::", ""))
+        if message_id:
+            hidden_messages.add(message_id)
+            hidden_message_keys[message_id] = str(payload.get("_row_key") or f"message_hidden::{message_id}")
+
+    irrelevant_pairs: set[tuple[str, str]] = set()
+    irrelevant_keys: dict[tuple[str, str], str] = {}
+    for payload in manual_payloads(manual_df, "message_irrelevant"):
+        event_id = str(payload.get("event_id") or "")
+        message_id = str(payload.get("message_id") or "")
+        if event_id and message_id:
+            pair = (event_id, message_id)
+            irrelevant_pairs.add(pair)
+            irrelevant_keys[pair] = str(payload.get("_row_key") or f"message_irrelevant::{event_id}::{message_id}")
+
+    move_map: dict[str, str] = {}
+    for payload in manual_payloads(manual_df, "message_moves"):
+        message_id = str(payload.get("message_id") or payload.get("_row_key", "").replace("message_move::", ""))
+        target_event_id = str(payload.get("target_event_id") or "")
+        if message_id and target_event_id:
+            move_map[message_id] = target_event_id
+
+    event_edits: dict[str, dict[str, Any]] = {}
+    for payload in manual_payloads(manual_df, "event_edits"):
+        event_id = str(payload.get("event_id") or payload.get("_row_key", "").replace("event_edit::", ""))
+        if event_id:
+            event_edits[event_id] = payload
+
+    event_merges: dict[str, str] = {}
+    for payload in manual_payloads(manual_df, "event_merges"):
+        source_event_id = str(payload.get("source_event_id") or payload.get("_row_key", "").replace("event_merge::", ""))
+        target_event_id = str(payload.get("target_event_id") or "")
+        if source_event_id and target_event_id:
+            event_merges[source_event_id] = target_event_id
+
+    manual_events = manual_payloads(manual_df, "manual_events")
+
+    return {
+        "manual_df": manual_df,
+        "hidden_messages": hidden_messages,
+        "hidden_message_keys": hidden_message_keys,
+        "irrelevant_pairs": irrelevant_pairs,
+        "irrelevant_keys": irrelevant_keys,
+        "move_map": move_map,
+        "event_edits": event_edits,
+        "event_merges": event_merges,
+        "manual_events": manual_events,
+    }
+
+
+def append_manual_events(events: pd.DataFrame, manual_events: list[dict[str, Any]]) -> pd.DataFrame:
+    if not manual_events:
+        return events
+    rows = []
+    for payload in manual_events:
+        event_id = str(payload.get("event_id") or "").strip()
+        title = str(payload.get("title") or "").strip()
+        if not event_id or not title:
+            continue
+        rows.append({
+            "event_id": event_id,
+            "event_title": title,
+            "event_summary": str(payload.get("description") or ""),
+            "display_description": str(payload.get("description") or ""),
+            "main_tags": str(payload.get("tags") or "Ручной инфоповод"),
+            "start_date": pd.NaT,
+            "end_date": pd.NaT,
+            "message_count": 0,
+            "chat_count": 0,
+            "negative_count": 0,
+            "importance_score": 0,
+            "status": str(payload.get("status") or "active"),
+            "is_manual_event": True,
+        })
+    if not rows:
+        return events
+    extra = pd.DataFrame(rows)
+    if events is None or events.empty:
+        return extra
+    return pd.concat([events, extra], ignore_index=True, sort=False)
+
+
+def recompute_event_counts(events: pd.DataFrame, messages: pd.DataFrame) -> pd.DataFrame:
+    if events is None or events.empty or messages is None or messages.empty or "event_id" not in messages.columns:
+        return events
+    out = events.copy()
+    msg = messages.copy()
+    msg["event_id"] = msg["event_id"].fillna("").astype(str)
+    msg = msg[msg["event_id"].str.strip() != ""]
+    if msg.empty:
+        return out
+    grouped = msg.groupby("event_id", dropna=False)
+    for event_id, group in grouped:
+        mask = out["event_id"].astype(str) == str(event_id)
+        if not mask.any():
+            continue
+        out.loc[mask, "message_count"] = int(len(group))
+        if "chat_title" in group.columns:
+            out.loc[mask, "chat_count"] = int(group["chat_title"].fillna("").astype(str).replace("", pd.NA).dropna().nunique())
+        elif "chat_id" in group.columns:
+            out.loc[mask, "chat_count"] = int(group["chat_id"].fillna("").astype(str).replace("", pd.NA).dropna().nunique())
+        if "sentiment" in group.columns:
+            out.loc[mask, "negative_count"] = int(group["sentiment"].fillna("").astype(str).str.lower().str.contains("нег").sum())
+        if "datetime" in group.columns:
+            dt = pd.to_datetime(group["datetime"], errors="coerce").dropna()
+            if not dt.empty:
+                out.loc[mask, "start_date"] = dt.min()
+                out.loc[mask, "end_date"] = dt.max()
+    return out
+
+
+def apply_manual_overrides(project_id: str, events: pd.DataFrame, messages: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
+    state = get_manual_state(project_id)
+    events_out = events.copy() if events is not None else pd.DataFrame()
+    messages_out = messages.copy() if messages is not None else pd.DataFrame()
+
+    events_out = append_manual_events(events_out, state["manual_events"])
+    if not events_out.empty:
+        for col in ["event_id", "event_title", "event_summary", "main_tags", "status", "display_description"]:
+            if col not in events_out.columns:
+                events_out[col] = ""
+
+    # Apply event-level manual edits.
+    if not events_out.empty:
+        for event_id, payload in state["event_edits"].items():
+            mask = events_out["event_id"].astype(str) == str(event_id)
+            if not mask.any():
+                continue
+            if str(payload.get("title") or "").strip():
+                events_out.loc[mask, "event_title"] = str(payload.get("title")).strip()
+            if "description" in payload:
+                events_out.loc[mask, "display_description"] = str(payload.get("description") or "").strip()
+                events_out.loc[mask, "event_summary"] = str(payload.get("description") or "").strip()
+            if str(payload.get("tags") or "").strip():
+                events_out.loc[mask, "main_tags"] = str(payload.get("tags")).strip()
+            if str(payload.get("status") or "").strip():
+                events_out.loc[mask, "status"] = str(payload.get("status")).strip()
+
+    # Merge events by redirecting source title to target title.
+    if not events_out.empty and state["event_merges"]:
+        title_map = {
+            str(row.get("event_id")): str(row.get("event_title") or "Без названия")
+            for _, row in events_out.iterrows()
+        }
+        summary_map = {
+            str(row.get("event_id")): str(row.get("display_description") or row.get("event_summary") or "")
+            for _, row in events_out.iterrows()
+        }
+        for source_event_id, target_event_id in state["event_merges"].items():
+            mask = events_out["event_id"].astype(str) == str(source_event_id)
+            if mask.any():
+                events_out.loc[mask, "event_title"] = title_map.get(str(target_event_id), str(target_event_id))
+                events_out.loc[mask, "display_description"] = summary_map.get(str(target_event_id), "")
+                events_out.loc[mask, "merged_into"] = str(target_event_id)
+
+    if not messages_out.empty:
+        if "message_id" not in messages_out.columns:
+            messages_out["message_id"] = messages_out.index.astype(str)
+        messages_out["message_id"] = messages_out["message_id"].fillna("").astype(str)
+
+        if state["hidden_messages"]:
+            messages_out = messages_out[~messages_out["message_id"].isin(state["hidden_messages"])].copy()
+
+        if "event_id" in messages_out.columns:
+            messages_out["event_id"] = messages_out["event_id"].fillna("").astype(str)
+            if state["event_merges"]:
+                messages_out["event_id"] = messages_out["event_id"].map(lambda x: state["event_merges"].get(str(x), str(x)))
+            if state["move_map"]:
+                messages_out["event_id"] = messages_out.apply(lambda r: state["move_map"].get(str(r.get("message_id")), str(r.get("event_id") or "")), axis=1)
+
+    # Refresh titles in messages after moves/merges.
+    if not events_out.empty and not messages_out.empty and "event_id" in messages_out.columns:
+        title_map = {
+            str(row.get("event_id")): str(row.get("event_title") or "Без названия")
+            for _, row in events_out.iterrows()
+        }
+        messages_out["event_title"] = messages_out["event_id"].fillna("").astype(str).map(title_map).fillna(messages_out.get("event_title", ""))
+
+    events_out = recompute_event_counts(events_out, messages_out)
+
+    # Hide events after counts are recomputed.
+    if not events_out.empty and "status" in events_out.columns:
+        events_out = events_out[~events_out["status"].fillna("").astype(str).str.lower().isin(["hidden", "deleted", "archived"])].copy()
+
+    return events_out, messages_out, state
+
+
+def create_manual_event(project_id: str, title: str, description: str = "", tags: str = "", status: str = "active") -> str:
+    event_id = "manual_" + uuid.uuid4().hex[:12]
+    save_manual(project_id, "manual_events", f"manual_event::{event_id}", {
+        "event_id": event_id,
+        "title": title.strip(),
+        "description": description.strip(),
+        "tags": tags.strip() or "Ручной инфоповод",
+        "status": status,
+    })
+    return event_id
+
+
+def event_select_options(events_agg: pd.DataFrame, exclude_event_ids: set[str] | None = None) -> list[tuple[str, str]]:
+    exclude_event_ids = exclude_event_ids or set()
+    options: list[tuple[str, str]] = []
+    if events_agg is None or events_agg.empty:
+        return options
+    for _, row in events_agg.iterrows():
+        ids = [str(x) for x in row.get("event_ids", [])]
+        if not ids:
+            continue
+        if set(ids) & exclude_event_ids:
+            continue
+        label = f"{row.get('title') or ids[0]} · {int(row.get('message_count') or 0)} сообщ."
+        options.append((ids[0], label))
+    return options
 
 
 def build_auto_summary(messages: pd.DataFrame, events_agg: pd.DataFrame, periods: pd.DataFrame, selected_period_ids: list[str]) -> str:
@@ -506,14 +757,38 @@ def render_period_dynamics(messages: pd.DataFrame, periods: pd.DataFrame, period
     st.dataframe(summary.drop(columns=["sort_date"]), hide_index=True, use_container_width=True)
 
 
-def render_events(project_id: str, events_agg: pd.DataFrame, messages: pd.DataFrame, event_discussions: pd.DataFrame, discussion_messages: pd.DataFrame) -> None:
+
+def render_events(
+    project_id: str,
+    role: str,
+    events_agg: pd.DataFrame,
+    messages: pd.DataFrame,
+    manual_state: dict[str, Any],
+) -> None:
     st.subheader("Инфоповоды")
+    can_edit = role_rank(role) >= role_rank("editor")
+
+    if can_edit:
+        with st.expander("Создать инфоповод вручную", expanded=False):
+            title = st.text_input("Название нового инфоповода", key="new_manual_event_title")
+            description = st.text_area("Описание", key="new_manual_event_description")
+            tags = st.text_input("Теги", key="new_manual_event_tags")
+            if st.button("Создать инфоповод", type="primary", key="create_manual_event"):
+                if not title.strip():
+                    st.error("Укажите название инфоповода.")
+                else:
+                    create_manual_event(project_id, title, description, tags)
+                    st.success("Инфоповод создан.")
+                    st.rerun()
+
     if events_agg.empty:
         st.info("Инфоповоды не найдены.")
         return
+
     word = st.text_input("Фильтр по слову в сообщениях", placeholder="Например: коэффициент")
     filtered_events = events_agg.copy()
     filtered_messages = messages.copy()
+
     if word.strip() and "text" in filtered_messages.columns:
         mask = filtered_messages["text"].fillna("").astype(str).str.contains(word.strip(), case=False, regex=False)
         filtered_messages = filtered_messages[mask]
@@ -525,10 +800,25 @@ def render_events(project_id: str, events_agg: pd.DataFrame, messages: pd.DataFr
         if not msg_view.empty:
             msg_view["Дата"] = msg_view.get("datetime", "").apply(fmt_date)
             columns = [c for c in ["Дата", "chat_title", "author", "event_title", "text", "url"] if c in msg_view.columns]
-            st.dataframe(msg_view[columns].rename(columns={"chat_title": "Чат", "author": "Автор", "event_title": "Инфоповод", "text": "Текст", "url": "Ссылка"}).head(300), hide_index=True, use_container_width=True)
+            st.dataframe(
+                msg_view[columns].rename(columns={
+                    "chat_title": "Чат",
+                    "author": "Автор",
+                    "event_title": "Инфоповод",
+                    "text": "Текст",
+                    "url": "Ссылка",
+                }).head(500),
+                hide_index=True,
+                use_container_width=True,
+            )
 
     table = filtered_events.copy()
-    table["Период"] = table.apply(lambda r: f"{fmt_date(r.get('start_date'))}–{fmt_date(r.get('end_date'))}" if fmt_date(r.get('start_date')) != fmt_date(r.get('end_date')) else fmt_date(r.get('start_date')), axis=1)
+    table["Период"] = table.apply(
+        lambda r: f"{fmt_date(r.get('start_date'))}–{fmt_date(r.get('end_date'))}"
+        if fmt_date(r.get("start_date")) != fmt_date(r.get("end_date"))
+        else fmt_date(r.get("start_date")),
+        axis=1,
+    )
     table["Негатив"] = (table["negative_share"] * 100).round(1).astype(str) + "%"
     show = table[["title", "description", "tags", "Период", "message_count", "chat_count", "Негатив", "importance_score"]].rename(columns={
         "title": "Название",
@@ -542,23 +832,155 @@ def render_events(project_id: str, events_agg: pd.DataFrame, messages: pd.DataFr
     rows = getattr(event, "selection", {}).get("rows", []) if event is not None else []
     if not rows:
         return
+
     selected = filtered_events.iloc[rows[0]]
     selected_ids = set(map(str, selected.get("event_ids", [])))
     st.markdown(f"### {selected['title']}")
     st.write(selected.get("description", ""))
-    if not event_discussions.empty and not discussion_messages.empty:
-        disc_ids = event_discussions[event_discussions["event_id"].astype(str).isin(selected_ids)]["discussion_id"].astype(str).unique().tolist()
-        msg_ids = discussion_messages[discussion_messages["discussion_id"].astype(str).isin(disc_ids)]["message_id"].astype(str).unique().tolist()
-        topic_messages = messages[messages["message_id"].astype(str).isin(msg_ids)].copy()
-    else:
-        topic_messages = messages[messages.get("event_id", pd.Series(dtype=str)).astype(str).isin(selected_ids)].copy()
+
+    if can_edit:
+        with st.expander("Правка выбранного инфоповода", expanded=False):
+            new_title = st.text_input("Название", value=str(selected.get("title") or ""), key=f"edit_title_{selected.get('group_key')}")
+            new_desc = st.text_area("Описание", value=str(selected.get("description") or ""), height=160, key=f"edit_desc_{selected.get('group_key')}")
+            new_tags = st.text_input("Теги", value=str(selected.get("tags") or ""), key=f"edit_tags_{selected.get('group_key')}")
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                if st.button("Сохранить правки", key=f"save_event_edit_{selected.get('group_key')}"):
+                    for event_id in selected_ids:
+                        save_manual(project_id, "event_edits", f"event_edit::{event_id}", {
+                            "event_id": event_id,
+                            "title": new_title,
+                            "description": new_desc,
+                            "tags": new_tags,
+                            "status": "active",
+                        })
+                    st.success("Правки сохранены.")
+                    st.rerun()
+            with c2:
+                if st.button("Скрыть инфоповод", key=f"hide_event_{selected.get('group_key')}"):
+                    for event_id in selected_ids:
+                        save_manual(project_id, "event_edits", f"event_edit::{event_id}", {
+                            "event_id": event_id,
+                            "title": new_title,
+                            "description": new_desc,
+                            "tags": new_tags,
+                            "status": "hidden",
+                        })
+                    st.success("Инфоповод скрыт.")
+                    st.rerun()
+            with c3:
+                options = event_select_options(events_agg, exclude_event_ids=selected_ids)
+                if options:
+                    target = st.selectbox("Объединить с темой", options, format_func=lambda x: x[1], key=f"merge_target_{selected.get('group_key')}")
+                    if st.button("Объединить", key=f"merge_event_{selected.get('group_key')}"):
+                        target_event_id = target[0]
+                        for source_event_id in selected_ids:
+                            if source_event_id != target_event_id:
+                                save_manual(project_id, "event_merges", f"event_merge::{source_event_id}", {
+                                    "source_event_id": source_event_id,
+                                    "target_event_id": target_event_id,
+                                })
+                        st.success("Инфоповоды объединены.")
+                        st.rerun()
+
+    if messages.empty or "event_id" not in messages.columns:
+        st.info("Сообщения по выбранному инфоповоду не найдены.")
+        return
+
+    topic_messages = messages[messages["event_id"].fillna("").astype(str).isin(selected_ids)].copy()
     if topic_messages.empty:
         st.info("Сообщения по выбранному инфоповоду не найдены.")
         return
+
+    # Exclude messages marked as irrelevant for this event/group.
+    irrelevant_pairs: set[tuple[str, str]] = manual_state.get("irrelevant_pairs", set())
+    if irrelevant_pairs and "message_id" in topic_messages.columns:
+        topic_messages["__pair"] = topic_messages.apply(lambda r: (str(r.get("event_id") or ""), str(r.get("message_id") or "")), axis=1)
+        topic_messages = topic_messages[~topic_messages["__pair"].isin(irrelevant_pairs)].drop(columns=["__pair"], errors="ignore")
+
     topic_messages = topic_messages.sort_values("datetime") if "datetime" in topic_messages.columns else topic_messages
     topic_messages["Дата"] = topic_messages.get("datetime", "").apply(fmt_date)
     cols = [c for c in ["Дата", "chat_title", "author", "text", "url"] if c in topic_messages.columns]
-    st.dataframe(topic_messages[cols].rename(columns={"chat_title": "Чат", "author": "Автор", "text": "Текст", "url": "Ссылка"}), hide_index=True, use_container_width=True)
+    msg_show = topic_messages[cols].rename(columns={
+        "chat_title": "Чат",
+        "author": "Автор",
+        "text": "Текст",
+        "url": "Ссылка",
+    })
+    st.markdown("#### Сообщения инфоповода")
+    msg_event = st.dataframe(msg_show, hide_index=True, use_container_width=True, selection_mode="single-row", on_select="rerun")
+    msg_rows = getattr(msg_event, "selection", {}).get("rows", []) if msg_event is not None else []
+
+    if can_edit and msg_rows:
+        selected_msg = topic_messages.iloc[msg_rows[0]]
+        message_id = str(selected_msg.get("message_id") or "")
+        current_event_id = str(selected_msg.get("event_id") or "")
+        with st.expander("Действия с выбранным сообщением", expanded=True):
+            st.caption(str(selected_msg.get("text") or "")[:1000])
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                if st.button("Нерелевант к теме", key=f"irrelevant_{current_event_id}_{message_id}"):
+                    save_manual(project_id, "message_irrelevant", f"message_irrelevant::{current_event_id}::{message_id}", {
+                        "event_id": current_event_id,
+                        "message_id": message_id,
+                    })
+                    st.success("Сообщение исключено из этой темы.")
+                    st.rerun()
+            with c2:
+                if st.button("Скрыть сообщение", key=f"hide_msg_{message_id}"):
+                    save_manual(project_id, "message_hidden", f"message_hidden::{message_id}", {
+                        "message_id": message_id,
+                    })
+                    st.success("Сообщение скрыто.")
+                    st.rerun()
+            with c3:
+                options = event_select_options(events_agg, exclude_event_ids={current_event_id})
+                if options:
+                    target = st.selectbox("Перенести в тему", options, format_func=lambda x: x[1], key=f"move_target_{message_id}")
+                    if st.button("Перенести", key=f"move_msg_{message_id}"):
+                        save_manual(project_id, "message_moves", f"message_move::{message_id}", {
+                            "message_id": message_id,
+                            "source_event_id": current_event_id,
+                            "target_event_id": target[0],
+                        })
+                        st.success("Сообщение перенесено.")
+                        st.rerun()
+
+            st.markdown("**Создать новую тему из выбранного сообщения**")
+            new_topic_title = st.text_input("Название новой темы", key=f"new_topic_title_{message_id}")
+            new_topic_desc = st.text_area("Описание новой темы", key=f"new_topic_desc_{message_id}", height=120)
+            new_topic_tags = st.text_input("Теги новой темы", key=f"new_topic_tags_{message_id}")
+            if st.button("Создать и перенести сообщение", key=f"create_topic_from_msg_{message_id}"):
+                if not new_topic_title.strip():
+                    st.error("Укажите название новой темы.")
+                else:
+                    new_event_id = create_manual_event(project_id, new_topic_title, new_topic_desc, new_topic_tags)
+                    save_manual(project_id, "message_moves", f"message_move::{message_id}", {
+                        "message_id": message_id,
+                        "source_event_id": current_event_id,
+                        "target_event_id": new_event_id,
+                    })
+                    st.success("Новая тема создана, сообщение перенесено.")
+                    st.rerun()
+
+    if can_edit:
+        with st.expander("Нерелевантные сообщения по выбранной теме", expanded=False):
+            keys = manual_state.get("irrelevant_keys", {})
+            pairs_for_topic = [(event_id, message_id) for (event_id, message_id) in keys if event_id in selected_ids]
+            if not pairs_for_topic:
+                st.caption("Нет сообщений, исключенных из этой темы.")
+            else:
+                excluded_ids = [message_id for _, message_id in pairs_for_topic]
+                excluded = messages[messages["message_id"].astype(str).isin(excluded_ids)].copy() if "message_id" in messages.columns else pd.DataFrame()
+                if not excluded.empty:
+                    excluded["Дата"] = excluded.get("datetime", "").apply(fmt_date)
+                    view_cols = [c for c in ["Дата", "chat_title", "author", "text"] if c in excluded.columns]
+                    st.dataframe(excluded[view_cols].rename(columns={"chat_title": "Чат", "author": "Автор", "text": "Текст"}), hide_index=True, use_container_width=True)
+                for pair in pairs_for_topic[:20]:
+                    if st.button(f"Вернуть сообщение {pair[1]}", key=f"restore_irrel_{pair[0]}_{pair[1]}"):
+                        delete_manual(project_id, keys[pair])
+                        st.success("Сообщение возвращено в тему.")
+                        st.rerun()
 
 
 def main() -> None:
@@ -618,18 +1040,19 @@ def main() -> None:
     with st.spinner("Загружаю данные проекта..."):
         events, discussions, messages, discussion_messages, event_discussions = load_generated_tables(project_id, selected_period_ids)
     enriched_messages = enrich_messages(messages, event_discussions, discussion_messages, events)
+    events, enriched_messages, manual_state = apply_manual_overrides(project_id, events, enriched_messages)
     events_agg = aggregate_events(events)
 
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Сообщений", f"{len(messages):,}".replace(",", " "))
+    col1.metric("Сообщений", f"{len(enriched_messages):,}".replace(",", " "))
     col2.metric("Инфоповодов", f"{len(events_agg):,}".replace(",", " "))
-    col3.metric("Чатов", f"{messages['chat_title'].nunique() if 'chat_title' in messages.columns else 0:,}".replace(",", " "))
-    neg = int(messages.get("sentiment", pd.Series(dtype=str)).fillna("").astype(str).str.lower().str.contains("нег").sum()) if not messages.empty and "sentiment" in messages.columns else 0
+    col3.metric("Чатов", f"{enriched_messages['chat_title'].nunique() if 'chat_title' in enriched_messages.columns else 0:,}".replace(",", " "))
+    neg = int(enriched_messages.get("sentiment", pd.Series(dtype=str)).fillna("").astype(str).str.lower().str.contains("нег").sum()) if not enriched_messages.empty and "sentiment" in enriched_messages.columns else 0
     col4.metric("Негатив", f"{neg:,}".replace(",", " "))
 
-    render_summary(project_id, selected_period_ids, messages, events_agg, periods, role)
-    render_period_dynamics(messages, periods, selected_period_ids)
-    render_events(project_id, events_agg, enriched_messages, event_discussions, discussion_messages)
+    render_summary(project_id, selected_period_ids, enriched_messages, events_agg, periods, role)
+    render_period_dynamics(enriched_messages, periods, selected_period_ids)
+    render_events(project_id, role, events_agg, enriched_messages, manual_state)
 
 
 if __name__ == "__main__":
