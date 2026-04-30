@@ -524,7 +524,8 @@ def normalize_messages(raw: pd.DataFrame, tag_cols: list[str]) -> tuple[pd.DataF
         return pd.to_numeric(series, errors="coerce").fillna(0).astype(int)
 
     df["duplicate_count"] = as_int("Количество дублей", "Дублей")
-    df["views"] = as_int("Просмотры")
+    df["audience"] = as_int("Аудитория")
+    df["views"] = as_int("Просмотры", "Просмотров", "Охват")
     df["engagement"] = as_int("Вовлечённость", "Вовлеченность")
 
     sentiment_series = get_text_series(df, "Тональность", aliases=["sentiment", "Окраска", "Тон"])
@@ -564,6 +565,7 @@ def normalize_messages(raw: pd.DataFrame, tag_cols: list[str]) -> tuple[pd.DataF
         "Город": "city",
         "Количество дублей": "duplicate_count_raw",
         "duplicate_count": "duplicate_count",
+        "audience": "audience",
         "views": "views",
         "engagement": "engagement",
         "tags": "tags",

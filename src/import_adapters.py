@@ -33,6 +33,7 @@ CANONICAL_COLUMNS = [
     "Регион",
     "Город",
     "Количество дублей",
+    "Аудитория",
     "Просмотры",
     "Вовлечённость",
     "Лайки",
@@ -403,8 +404,9 @@ def canonicalize_table(raw: pd.DataFrame, source_file: str = "", source_system: 
     out["Регион"] = first_existing(df, ["Регион", "Region"])
     out["Город"] = first_existing(df, ["Город", "City"])
     out["Количество дублей"] = first_existing(df, ["Количество дублей", "Дублей", "Duplicates"])
-    out["Просмотры"] = first_existing(df, ["Просмотры", "Views"])
-    out["Вовлечённость"] = first_existing(df, ["Вовлечённость", "Вовлеченность", "Engagement"])
+    out["Аудитория"] = first_existing(df, ["Аудитория", "Audience", "audience"])
+    out["Просмотры"] = first_existing(df, ["Просмотры", "Просмотров", "Views", "views", "Охват", "Reach", "reach"])
+    out["Вовлечённость"] = first_existing(df, ["Вовлечённость", "Вовлеченность", "Engagement", "engagement"])
     out["Лайки"] = first_existing(df, ["Лайки", "Likes"])
     out["Комментарии"] = first_existing(df, ["Комментарии", "Комментариев", "Comments"])
     out["Репосты"] = first_existing(df, ["Репосты", "Reposts", "Shares"])

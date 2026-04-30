@@ -249,18 +249,20 @@ def render_overview_statistics(messages: pd.DataFrame) -> None:
     """Render top-level numbers for the start page."""
     st.subheader("Статистика")
     total_messages = int(len(messages)) if isinstance(messages, pd.DataFrame) else 0
-    views = int(numeric_series(messages, ["views", "Просмотры", "reach", "Охват"]).sum()) if total_messages else 0
+    audience = int(numeric_series(messages, ["audience", "Аудитория"]).sum()) if total_messages else 0
+    reach = int(numeric_series(messages, ["views", "Просмотры", "Просмотров", "reach", "Охват"]).sum()) if total_messages else 0
     engagement = int(numeric_series(messages, ["engagement", "Вовлечённость", "Вовлеченность", "engagement_count"]).sum()) if total_messages else 0
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Сообщений", format_int(total_messages))
-    c2.metric("Суммарная аудитория", format_int(views))
-    c3.metric("Суммарная вовлеченность", format_int(engagement))
+    c2.metric("Суммарная аудитория", format_int(audience))
+    c3.metric("Суммарный охват", format_int(reach))
+    c4.metric("Суммарная вовлеченность", format_int(engagement))
 
 
 def build_tag_statistics(messages: pd.DataFrame) -> pd.DataFrame:
     """Build tag-level analytics: messages, total views/reach and engagement."""
     if messages is None or messages.empty or "tags" not in messages.columns:
-        return pd.DataFrame(columns=["Тег", "Сообщений", "Просмотры", "Вовлеченность", "Негатив"])
+        return pd.DataFrame(columns=["Тег", "Сообщений", "Аудитория", "Охват", "Вовлеченность", "Негатив"])
 
     work = messages.copy()
     work["_tag"] = work["tags"].fillna("").astype(str).apply(split_pipe_values)
@@ -268,9 +270,10 @@ def build_tag_statistics(messages: pd.DataFrame) -> pd.DataFrame:
     work["_tag"] = work["_tag"].fillna("").astype(str).str.strip()
     work = work[work["_tag"] != ""]
     if work.empty:
-        return pd.DataFrame(columns=["Тег", "Сообщений", "Просмотры", "Вовлеченность", "Негатив"])
+        return pd.DataFrame(columns=["Тег", "Сообщений", "Аудитория", "Охват", "Вовлеченность", "Негатив"])
 
-    work["_views"] = numeric_series(work, ["views", "Просмотры", "reach", "Охват"])
+    work["_audience"] = numeric_series(work, ["audience", "Аудитория"])
+    work["_reach"] = numeric_series(work, ["views", "Просмотры", "Просмотров", "reach", "Охват"])
     work["_engagement"] = numeric_series(work, ["engagement", "Вовлечённость", "Вовлеченность", "engagement_count"])
     if "sentiment" in work.columns:
         work["_negative"] = work["sentiment"].fillna("").astype(str).str.lower().str.contains("нег", regex=True).astype(int)
@@ -281,17 +284,18 @@ def build_tag_statistics(messages: pd.DataFrame) -> pd.DataFrame:
         work.groupby("_tag", as_index=False)
         .agg(
             Сообщений=("message_id", "nunique") if "message_id" in work.columns else ("_tag", "size"),
-            Просмотры=("_views", "sum"),
+            Аудитория=("_audience", "sum"),
+            Охват=("_reach", "sum"),
             Вовлеченность=("_engagement", "sum"),
             Негатив=("_negative", "sum"),
         )
         .rename(columns={"_tag": "Тег"})
     )
-    for col in ["Сообщений", "Просмотры", "Вовлеченность", "Негатив"]:
+    for col in ["Сообщений", "Аудитория", "Охват", "Вовлеченность", "Негатив"]:
         if col in stats.columns:
             stats[col] = pd.to_numeric(stats[col], errors="coerce").fillna(0).astype(int)
     stats["Доля негатива"] = (stats["Негатив"] / stats["Сообщений"].replace(0, pd.NA) * 100).fillna(0).round(1)
-    return stats.sort_values(["Сообщений", "Просмотры", "Вовлеченность"], ascending=False).reset_index(drop=True)
+    return stats.sort_values(["Сообщений", "Аудитория", "Охват", "Вовлеченность"], ascending=False).reset_index(drop=True)
 
 
 def format_int(value: Any) -> str:
@@ -309,11 +313,11 @@ def render_tag_statistics(messages: pd.DataFrame) -> None:
     st.subheader("Статистика тегов")
     top = stats.head(30).copy()
     display = top.copy()
-    for col in ["Сообщений", "Просмотры", "Вовлеченность", "Негатив"]:
+    for col in ["Сообщений", "Аудитория", "Охват", "Вовлеченность", "Негатив"]:
         if col in display.columns:
             display[col] = display[col].apply(format_int)
     display["Доля негатива"] = display["Доля негатива"].astype(str) + "%"
-    st.caption("Теги берутся из системных колонок Brand Analytics после «Обработано». Просмотры и вовлеченность суммируются по сообщениям с выбранным тегом.")
+    st.caption("Теги берутся из системных колонок Brand Analytics после «Обработано». Аудитория, охват и вовлеченность суммируются по сообщениям с выбранным тегом.")
     st.dataframe(display, hide_index=True, use_container_width=True)
 
 
@@ -336,7 +340,7 @@ def render_tag_explorer(messages: pd.DataFrame, *, key_prefix: str = "tag_explor
     st.caption("Выберите тег, чтобы посмотреть все сообщения с этим тегом.")
     options = stats["Тег"].astype(str).tolist()
     labels = {
-        str(row["Тег"]): f"{row['Тег']} · {format_int(row['Сообщений'])} сообщ. · {format_int(row['Просмотры'])} просмотров · {format_int(row['Вовлеченность'])} вовлеч."
+        str(row["Тег"]): f"{row['Тег']} · {format_int(row['Сообщений'])} сообщ. · {format_int(row['Аудитория'])} аудитория · {format_int(row['Охват'])} охват · {format_int(row['Вовлеченность'])} вовлеч."
         for _, row in stats.iterrows()
     }
     selected_tag = st.selectbox(
@@ -351,9 +355,10 @@ def render_tag_explorer(messages: pd.DataFrame, *, key_prefix: str = "tag_explor
         return
     tag_messages = tag_messages.copy()
     tag_messages["Дата"] = tag_messages.get("datetime", "").apply(fmt_date)
-    tag_messages["Просмотры"] = numeric_series(tag_messages, ["views", "Просмотры", "reach", "Охват"]).astype(int)
+    tag_messages["Аудитория"] = numeric_series(tag_messages, ["audience", "Аудитория"]).astype(int)
+    tag_messages["Охват"] = numeric_series(tag_messages, ["views", "Просмотры", "Просмотров", "reach", "Охват"]).astype(int)
     tag_messages["Вовлеченность"] = numeric_series(tag_messages, ["engagement", "Вовлечённость", "Вовлеченность", "engagement_count"]).astype(int)
-    columns = [c for c in ["Дата", "chat_title", "author", "event_title", "text", "url", "Просмотры", "Вовлеченность"] if c in tag_messages.columns]
+    columns = [c for c in ["Дата", "chat_title", "author", "event_title", "text", "url", "Аудитория", "Охват", "Вовлеченность"] if c in tag_messages.columns]
     st.dataframe(
         tag_messages[columns].rename(columns={
             "chat_title": "Источник/площадка",
@@ -1264,13 +1269,14 @@ def _render_message_list(view: pd.DataFrame, *, text_col: str | None, link_col: 
         sentiment = _value_from_row(row, "sentiment", "Тональность")
         event_title = _value_from_row(row, "event_title", "source_main_topic", "Сюжет")
         tags = _value_from_row(row, "tags", "Теги").replace("|", ", ")
-        views = int(row.get("_views", 0) or 0)
+        audience = int(row.get("_audience", 0) or 0)
+        reach = int(row.get("_reach", 0) or 0)
         engagement = int(row.get("_engagement", 0) or 0)
         text = str(row.get(text_col, "") or "").strip() if text_col else ""
         link = str(row.get(link_col, "") or "").strip() if link_col else ""
 
         meta_parts = [part for part in [date_text, source, author, sentiment] if part]
-        metrics_parts = [f"аудитория: {format_int(views)}", f"вовлеченность: {format_int(engagement)}"]
+        metrics_parts = [f"аудитория: {format_int(audience)}", f"охват: {format_int(reach)}", f"вовлеченность: {format_int(engagement)}"]
 
         st.markdown("---")
         if meta_parts:
@@ -1302,12 +1308,13 @@ def render_messages_block(messages: pd.DataFrame) -> None:
     work = messages.copy()
     text_col = message_text_column(work)
     link_col = message_link_column(work)
-    work["_views"] = numeric_series(work, ["views", "Просмотры", "reach", "Охват"]).astype(int)
+    work["_audience"] = numeric_series(work, ["audience", "Аудитория"]).astype(int)
+    work["_reach"] = numeric_series(work, ["views", "Просмотры", "Просмотров", "reach", "Охват"]).astype(int)
     work["_engagement"] = numeric_series(work, ["engagement", "Вовлечённость", "Вовлеченность", "engagement_count"]).astype(int)
 
     if mode == "Ключевые сообщения":
-        st.caption("Показаны 15 сообщений с максимальной вовлеченностью. Если вовлеченность равна 0, дополнительным критерием выступает аудитория/просмотры.")
-        view = work.sort_values(["_engagement", "_views"], ascending=False).head(15).copy()
+        st.caption("Показаны 15 сообщений с максимальной вовлеченностью. Если вовлеченность равна 0, дополнительными критериями выступают охват и аудитория.")
+        view = work.sort_values(["_engagement", "_reach", "_audience"], ascending=False).head(15).copy()
     else:
         search = st.text_input("Поиск по всей ленте", placeholder="Введите слово или фразу", key="full_feed_search")
         view = work.copy()
