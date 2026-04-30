@@ -34,7 +34,7 @@ from platform_store import (
 from preprocess import run_preprocess_from_dataframe
 
 APP_TITLE = "Платформа дайджестов"
-APP_VERSION = "3.5-alpha: удаление выгрузок"
+APP_VERSION = "3.6-alpha: стартовая страница Brand Analytics"
 
 ALGORITHM_PROFILE_OPTIONS = {
     "universal": "Универсальный",
@@ -159,6 +159,102 @@ def numeric_series(df: pd.DataFrame, columns: list[str]) -> pd.Series:
                 .fillna(0)
             )
     return pd.Series([0] * len(df), index=df.index, dtype=float)
+
+
+AUTO_GENERATED_TAGS_TO_HIDE = {
+    "коэффициент", "законы и налоги", "яндекс", "wb такси", "фастен",
+    "приложение и сбои", "яндекс про", "забастовка", "аэропорты",
+    "детские кресла", "карты и навигация",
+    "проблемы, жалобы и негативный опыт", "цены, стоимость и условия",
+    "качество продукта или услуги", "наличие, поставки и логистика",
+    "монтаж, применение и эксплуатация", "документы, сертификаты и требования",
+    "безопасность и пожарные свойства", "безопасность и риски",
+    "экология и энергоэффективность", "конкуренты и сравнение на рынке",
+    "поддержка и клиентский сервис", "общие обсуждения", "прочие обсуждения", "без тега",
+}
+
+
+def normalize_tag_key(value: Any) -> str:
+    return str(value or "").strip().lower().replace("ё", "е")
+
+
+def declared_ba_tag_set(messages: pd.DataFrame) -> set[str]:
+    """Return Brand Analytics tag names declared in source_tag_columns."""
+    if messages is None or messages.empty or "source_tag_columns" not in messages.columns:
+        return set()
+    tags: set[str] = set()
+    for raw in messages["source_tag_columns"].dropna().astype(str).unique().tolist():
+        for item in str(raw or "").replace(";", "|").replace(",", "|").split("|"):
+            label = " ".join(str(item or "").split()).strip()
+            if label:
+                tags.add(normalize_tag_key(label))
+    return tags
+
+
+def is_brand_analytics_messages(messages: pd.DataFrame) -> bool:
+    if messages is None or messages.empty:
+        return False
+    if "source_system" in messages.columns:
+        values = messages["source_system"].fillna("").astype(str).str.lower()
+        if values.eq("brand_analytics").any():
+            return True
+    return bool(declared_ba_tag_set(messages))
+
+
+def clean_brand_analytics_tags(messages: pd.DataFrame) -> pd.DataFrame:
+    """Keep only real Brand Analytics tags from columns after `Обработано`."""
+    if messages is None or messages.empty or "tags" not in messages.columns:
+        return messages
+    if not is_brand_analytics_messages(messages):
+        return messages
+
+    allowed = declared_ba_tag_set(messages)
+    out = messages.copy()
+
+    def filter_tags(value: Any) -> str:
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for label in split_pipe_values(value):
+            key = normalize_tag_key(label)
+            if not key or key in seen:
+                continue
+            if key in AUTO_GENERATED_TAGS_TO_HIDE:
+                continue
+            if allowed and key not in allowed:
+                continue
+            seen.add(key)
+            cleaned.append(label)
+        return "|".join(cleaned)
+
+    out["tags"] = out["tags"].apply(filter_tags)
+    out["tag_count"] = out["tags"].apply(lambda x: len(split_pipe_values(x)))
+    return out
+
+
+def message_text_column(df: pd.DataFrame) -> str | None:
+    for col in ["text", "text_clean", "message_text", "message_raw", "Сообщение"]:
+        if col in df.columns:
+            return col
+    return None
+
+
+def message_link_column(df: pd.DataFrame) -> str | None:
+    for col in ["url", "message_link", "Ссылка"]:
+        if col in df.columns:
+            return col
+    return None
+
+
+def render_overview_statistics(messages: pd.DataFrame) -> None:
+    """Render top-level numbers for the start page."""
+    st.subheader("Статистика")
+    total_messages = int(len(messages)) if isinstance(messages, pd.DataFrame) else 0
+    views = int(numeric_series(messages, ["views", "Просмотры", "reach", "Охват"]).sum()) if total_messages else 0
+    engagement = int(numeric_series(messages, ["engagement", "Вовлечённость", "Вовлеченность", "engagement_count"]).sum()) if total_messages else 0
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Сообщений", format_int(total_messages))
+    c2.metric("Суммарная аудитория", format_int(views))
+    c3.metric("Суммарная вовлеченность", format_int(engagement))
 
 
 def build_tag_statistics(messages: pd.DataFrame) -> pd.DataFrame:
@@ -1043,8 +1139,9 @@ def render_events(
     filtered_events = events_agg.copy()
     filtered_messages = messages.copy()
 
-    if word.strip() and "text" in filtered_messages.columns:
-        mask = filtered_messages["text"].fillna("").astype(str).str.contains(word.strip(), case=False, regex=False)
+    text_col = message_text_column(filtered_messages)
+    if word.strip() and text_col:
+        mask = filtered_messages[text_col].fillna("").astype(str).str.contains(word.strip(), case=False, regex=False)
         filtered_messages = filtered_messages[mask]
         if "event_id" in filtered_messages.columns:
             allowed = set(filtered_messages["event_id"].dropna().astype(str))
@@ -1053,17 +1150,20 @@ def render_events(
         msg_view = filtered_messages.copy()
         if not msg_view.empty:
             msg_view["Дата"] = msg_view.get("datetime", "").apply(fmt_date)
-            columns = [c for c in ["Дата", "chat_title", "author", "event_title", "text", "url"] if c in msg_view.columns]
+            if text_col:
+                msg_view["Текст"] = msg_view[text_col].fillna("").astype(str).str.slice(0, 700)
+            link_col = message_link_column(msg_view)
+            msg_view["Ссылка"] = msg_view[link_col].fillna("").astype(str) if link_col else ""
+            columns = [c for c in ["Дата", "chat_title", "author", "event_title", "Текст", "Ссылка"] if c in msg_view.columns]
             st.dataframe(
                 msg_view[columns].rename(columns={
-                    "chat_title": "Чат",
+                    "chat_title": "Источник/площадка",
                     "author": "Автор",
                     "event_title": "Инфоповод",
-                    "text": "Текст",
-                    "url": "Ссылка",
                 }).head(500),
                 hide_index=True,
                 use_container_width=True,
+                column_config={"Ссылка": st.column_config.LinkColumn("Ссылка")},
             )
 
     table = filtered_events.copy()
@@ -1074,20 +1174,14 @@ def render_events(
         axis=1,
     )
     table["Негатив"] = (table["negative_share"] * 100).round(1).astype(str) + "%"
-    show = table[["title", "description", "tags", "Период", "message_count", "chat_count", "Негатив", "importance_score"]].rename(columns={
-        "title": "Название",
+    show = table[["title", "description", "Период", "message_count", "chat_count", "Негатив", "importance_score"]].rename(columns={
+        "title": "Сюжет / инфоповод",
         "description": "Описание",
-        "tags": "Теги",
         "message_count": "Сообщений",
-        "chat_count": "Чатов",
+        "chat_count": "Источников",
         "importance_score": "Важность",
     })
     event = st.dataframe(show, hide_index=True, use_container_width=True, selection_mode="single-row", on_select="rerun")
-
-    # Tag explorer lives under the information-events table. It is independent
-    # from event selection: tags are a separate Brand Analytics slice, while
-    # information events are based on `Сюжет`.
-    render_tag_explorer(filtered_messages, key_prefix="events_tags")
 
     rows = getattr(event, "selection", {}).get("rows", []) if event is not None else []
     if not rows:
@@ -1143,104 +1237,75 @@ def render_events(
                         st.success("Инфоповоды объединены.")
                         st.rerun()
 
-    if messages.empty or "event_id" not in messages.columns:
-        st.info("Сообщения по выбранному инфоповоду не найдены.")
+    st.caption("Сообщения доступны ниже в блоке «Ключевые сообщения / Вся лента».")
+
+
+
+def render_messages_block(messages: pd.DataFrame) -> None:
+    """Render global key messages and full feed."""
+    st.subheader("Ключевые сообщения")
+    if messages is None or messages.empty:
+        st.info("Сообщения не найдены.")
         return
 
-    topic_messages = messages[messages["event_id"].fillna("").astype(str).isin(selected_ids)].copy()
-    if topic_messages.empty:
-        st.info("Сообщения по выбранному инфоповоду не найдены.")
+    mode = st.radio(
+        "Режим просмотра сообщений",
+        ["Ключевые сообщения", "Вся лента"],
+        horizontal=True,
+        key="messages_block_mode",
+    )
+
+    work = messages.copy()
+    text_col = message_text_column(work)
+    link_col = message_link_column(work)
+    work["_views"] = numeric_series(work, ["views", "Просмотры", "reach", "Охват"]).astype(int)
+    work["_engagement"] = numeric_series(work, ["engagement", "Вовлечённость", "Вовлеченность", "engagement_count"]).astype(int)
+
+    if mode == "Ключевые сообщения":
+        st.caption("Показаны 15 сообщений с максимальной вовлеченностью. Если вовлеченность равна 0, дополнительным критерием выступает аудитория/просмотры.")
+        view = work.sort_values(["_engagement", "_views"], ascending=False).head(15).copy()
+    else:
+        search = st.text_input("Поиск по всей ленте", placeholder="Введите слово или фразу", key="full_feed_search")
+        view = work.copy()
+        if search.strip() and text_col:
+            view = view[view[text_col].fillna("").astype(str).str.contains(search.strip(), case=False, regex=False)]
+        feed_limit = int(st.number_input("Сколько сообщений показать", min_value=50, max_value=5000, value=500, step=50, key="full_feed_limit"))
+        view = view.sort_values("datetime", ascending=False) if "datetime" in view.columns else view
+        st.caption(f"Найдено сообщений: {format_int(len(view))}. Показано: {format_int(min(len(view), feed_limit))}.")
+        view = view.head(feed_limit).copy()
+
+    if view.empty:
+        st.info("Сообщений для показа нет.")
         return
 
-    # Exclude messages marked as irrelevant for this event/group.
-    irrelevant_pairs: set[tuple[str, str]] = manual_state.get("irrelevant_pairs", set())
-    if irrelevant_pairs and "message_id" in topic_messages.columns:
-        topic_messages["__pair"] = topic_messages.apply(lambda r: (str(r.get("event_id") or ""), str(r.get("message_id") or "")), axis=1)
-        topic_messages = topic_messages[~topic_messages["__pair"].isin(irrelevant_pairs)].drop(columns=["__pair"], errors="ignore")
+    view["Дата"] = view.get("datetime", "").apply(fmt_date)
+    view["Текст"] = view[text_col].fillna("").astype(str).str.slice(0, 1000) if text_col else ""
+    view["Ссылка"] = view[link_col].fillna("").astype(str) if link_col else ""
+    if "chat_title" in view.columns:
+        view["Источник/площадка"] = view["chat_title"].fillna("").astype(str)
+    elif "platform" in view.columns:
+        view["Источник/площадка"] = view["platform"].fillna("").astype(str)
+    else:
+        view["Источник/площадка"] = ""
+    view["Автор"] = view["author"].fillna("").astype(str) if "author" in view.columns else ""
+    if "event_title" in view.columns:
+        view["Инфоповод"] = view["event_title"].fillna("").astype(str)
+    elif "source_main_topic" in view.columns:
+        view["Инфоповод"] = view["source_main_topic"].fillna("").astype(str)
+    else:
+        view["Инфоповод"] = ""
+    view["Теги"] = view["tags"].fillna("").astype(str).str.replace("|", ", ", regex=False) if "tags" in view.columns else ""
+    view["Аудитория"] = view["_views"].astype(int)
+    view["Вовлеченность"] = view["_engagement"].astype(int)
 
-    topic_messages = topic_messages.sort_values("datetime") if "datetime" in topic_messages.columns else topic_messages
-    topic_messages["Дата"] = topic_messages.get("datetime", "").apply(fmt_date)
-    cols = [c for c in ["Дата", "chat_title", "author", "text", "url"] if c in topic_messages.columns]
-    msg_show = topic_messages[cols].rename(columns={
-        "chat_title": "Чат",
-        "author": "Автор",
-        "text": "Текст",
-        "url": "Ссылка",
-    })
-    st.markdown("#### Сообщения инфоповода")
-    msg_event = st.dataframe(msg_show, hide_index=True, use_container_width=True, selection_mode="single-row", on_select="rerun")
-    msg_rows = getattr(msg_event, "selection", {}).get("rows", []) if msg_event is not None else []
-
-    if can_edit and msg_rows:
-        selected_msg = topic_messages.iloc[msg_rows[0]]
-        message_id = str(selected_msg.get("message_id") or "")
-        current_event_id = str(selected_msg.get("event_id") or "")
-        with st.expander("Действия с выбранным сообщением", expanded=True):
-            st.caption(str(selected_msg.get("text") or "")[:1000])
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                if st.button("Нерелевант к теме", key=f"irrelevant_{current_event_id}_{message_id}"):
-                    save_manual(project_id, "message_irrelevant", f"message_irrelevant::{current_event_id}::{message_id}", {
-                        "event_id": current_event_id,
-                        "message_id": message_id,
-                    })
-                    st.success("Сообщение исключено из этой темы.")
-                    st.rerun()
-            with c2:
-                if st.button("Скрыть сообщение", key=f"hide_msg_{message_id}"):
-                    save_manual(project_id, "message_hidden", f"message_hidden::{message_id}", {
-                        "message_id": message_id,
-                    })
-                    st.success("Сообщение скрыто.")
-                    st.rerun()
-            with c3:
-                options = event_select_options(events_agg, exclude_event_ids={current_event_id})
-                if options:
-                    target = st.selectbox("Перенести в тему", options, format_func=lambda x: x[1], key=f"move_target_{message_id}")
-                    if st.button("Перенести", key=f"move_msg_{message_id}"):
-                        save_manual(project_id, "message_moves", f"message_move::{message_id}", {
-                            "message_id": message_id,
-                            "source_event_id": current_event_id,
-                            "target_event_id": target[0],
-                        })
-                        st.success("Сообщение перенесено.")
-                        st.rerun()
-
-            st.markdown("**Создать новую тему из выбранного сообщения**")
-            new_topic_title = st.text_input("Название новой темы", key=f"new_topic_title_{message_id}")
-            new_topic_desc = st.text_area("Описание новой темы", key=f"new_topic_desc_{message_id}", height=120)
-            new_topic_tags = st.text_input("Теги новой темы", key=f"new_topic_tags_{message_id}")
-            if st.button("Создать и перенести сообщение", key=f"create_topic_from_msg_{message_id}"):
-                if not new_topic_title.strip():
-                    st.error("Укажите название новой темы.")
-                else:
-                    new_event_id = create_manual_event(project_id, new_topic_title, new_topic_desc, new_topic_tags)
-                    save_manual(project_id, "message_moves", f"message_move::{message_id}", {
-                        "message_id": message_id,
-                        "source_event_id": current_event_id,
-                        "target_event_id": new_event_id,
-                    })
-                    st.success("Новая тема создана, сообщение перенесено.")
-                    st.rerun()
-
-    if can_edit:
-        with st.expander("Нерелевантные сообщения по выбранной теме", expanded=False):
-            keys = manual_state.get("irrelevant_keys", {})
-            pairs_for_topic = [(event_id, message_id) for (event_id, message_id) in keys if event_id in selected_ids]
-            if not pairs_for_topic:
-                st.caption("Нет сообщений, исключенных из этой темы.")
-            else:
-                excluded_ids = [message_id for _, message_id in pairs_for_topic]
-                excluded = messages[messages["message_id"].astype(str).isin(excluded_ids)].copy() if "message_id" in messages.columns else pd.DataFrame()
-                if not excluded.empty:
-                    excluded["Дата"] = excluded.get("datetime", "").apply(fmt_date)
-                    view_cols = [c for c in ["Дата", "chat_title", "author", "text"] if c in excluded.columns]
-                    st.dataframe(excluded[view_cols].rename(columns={"chat_title": "Чат", "author": "Автор", "text": "Текст"}), hide_index=True, use_container_width=True)
-                for pair in pairs_for_topic[:20]:
-                    if st.button(f"Вернуть сообщение {pair[1]}", key=f"restore_irrel_{pair[0]}_{pair[1]}"):
-                        delete_manual(project_id, keys[pair])
-                        st.success("Сообщение возвращено в тему.")
-                        st.rerun()
+    cols = ["Дата", "Источник/площадка", "Автор", "Инфоповод", "Теги", "Текст", "Ссылка", "Аудитория", "Вовлеченность"]
+    st.dataframe(
+        view[cols],
+        hide_index=True,
+        use_container_width=True,
+        height=520 if mode == "Вся лента" else 430,
+        column_config={"Ссылка": st.column_config.LinkColumn("Ссылка")},
+    )
 
 
 def main() -> None:
@@ -1303,17 +1368,20 @@ def main() -> None:
     events, enriched_messages, manual_state = apply_manual_overrides(project_id, events, enriched_messages)
     events_agg = aggregate_events(events)
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Сообщений", f"{len(enriched_messages):,}".replace(",", " "))
-    col2.metric("Инфоповодов", f"{len(events_agg):,}".replace(",", " "))
-    col3.metric("Чатов", f"{enriched_messages['chat_title'].nunique() if 'chat_title' in enriched_messages.columns else 0:,}".replace(",", " "))
-    neg = int(enriched_messages.get("sentiment", pd.Series(dtype=str)).fillna("").astype(str).str.lower().str.contains("нег").sum()) if not enriched_messages.empty and "sentiment" in enriched_messages.columns else 0
-    col4.metric("Негатив", f"{neg:,}".replace(",", " "))
+    # Brand Analytics projects must show only system tags from columns after
+    # `Обработано`. This prevents legacy taxi/generic labels from appearing
+    # in the tag block after algorithm updates.
+    enriched_messages = clean_brand_analytics_tags(enriched_messages)
 
-    render_tag_statistics(enriched_messages)
+    render_overview_statistics(enriched_messages)
     render_summary(project_id, selected_period_ids, enriched_messages, events_agg, periods, role)
-    render_period_dynamics(enriched_messages, periods, selected_period_ids)
+    render_tag_statistics(enriched_messages)
     render_events(project_id, role, events_agg, enriched_messages, manual_state)
+    render_messages_block(enriched_messages)
+
+    if len(selected_period_ids) >= 2:
+        with st.expander("Динамика по периодам", expanded=False):
+            render_period_dynamics(enriched_messages, periods, selected_period_ids)
 
 
 if __name__ == "__main__":

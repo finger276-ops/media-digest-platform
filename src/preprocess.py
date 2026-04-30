@@ -574,6 +574,7 @@ def normalize_messages(raw: pd.DataFrame, tag_cols: list[str]) -> tuple[pd.DataF
         "source_relevant": "source_relevant",
         "source_system": "source_system",
         "source_file": "source_file",
+        "source_tag_columns": "source_tag_columns",
         "is_negative": "is_negative",
         "is_toxic": "is_toxic",
     }
