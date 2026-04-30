@@ -471,6 +471,70 @@ def delete_manual_rows_for_period(project_id: str, period_id: str) -> int:
     return len(row_keys)
 
 
+def _api_error_message(exc: Exception) -> str:
+    """Return a compact readable message from a Supabase/PostgREST exception."""
+    try:
+        raw = getattr(exc, "args", None)
+        if raw:
+            return str(raw[0])[:1200]
+    except Exception:
+        pass
+    return str(exc)[:1200]
+
+
+def _fetch_table_row_keys_for_period(client: Client, project_id: str, period_id: str) -> list[dict[str, str]]:
+    """Fetch primary-key parts for generated rows of one upload/period."""
+    rows: list[dict[str, str]] = []
+    start = 0
+    while True:
+        response = (
+            client.table("platform_table_rows")
+            .select("table_name,row_id")
+            .eq("project_id", project_id)
+            .eq("period_id", period_id)
+            .range(start, start + PAGE_SIZE - 1)
+            .execute()
+        )
+        data = response.data or []
+        for row in data:
+            table_name = str(row.get("table_name") or "").strip()
+            row_id = str(row.get("row_id") or "").strip()
+            if table_name and row_id:
+                rows.append({"table_name": table_name, "row_id": row_id})
+        if len(data) < PAGE_SIZE:
+            break
+        start += PAGE_SIZE
+    return rows
+
+
+def delete_table_rows_for_period(project_id: str, period_id: str, *, batch_size: int = 150) -> int:
+    """Delete generated table rows for a period in small primary-key batches."""
+    client = get_supabase_client()
+    keys = _fetch_table_row_keys_for_period(client, project_id, period_id)
+    if not keys:
+        return 0
+
+    deleted = 0
+    by_table: dict[str, list[str]] = {}
+    for row in keys:
+        by_table.setdefault(row["table_name"], []).append(row["row_id"])
+
+    for table_name, row_ids in by_table.items():
+        unique_row_ids = list(dict.fromkeys(row_ids))
+        for batch in chunked(unique_row_ids, batch_size):
+            (
+                client.table("platform_table_rows")
+                .delete()
+                .eq("project_id", project_id)
+                .eq("period_id", period_id)
+                .eq("table_name", table_name)
+                .in_("row_id", batch)
+                .execute()
+            )
+            deleted += len(batch)
+    return deleted
+
+
 def delete_period(
     project_id: str,
     period_id: str,
@@ -479,27 +543,58 @@ def delete_period(
     delete_storage: bool = True,
     cleanup_manual: bool = True,
 ) -> dict[str, Any]:
-    """Hide or permanently delete a project upload/period."""
+    """Hide or permanently delete a project upload/period.
+
+    If Supabase rejects a physical delete, the period is hidden instead of
+    crashing the whole app.
+    """
     client = get_supabase_client()
     if not hard:
         update_period_metadata(project_id, period_id, status="hidden")
-        return {"mode": "soft", "manual_rows_deleted": 0, "storage_deleted": False}
+        return {"mode": "soft", "manual_rows_deleted": 0, "table_rows_deleted": 0, "storage_deleted": False}
 
     period = get_period(project_id, period_id) or {}
     manifest = period.get("manifest") if isinstance(period.get("manifest"), dict) else {}
     storage_path = str((manifest or {}).get("storage_path") or "").strip()
 
-    manual_deleted = delete_manual_rows_for_period(project_id, period_id) if cleanup_manual else 0
+    manual_deleted = 0
+    table_rows_deleted = 0
+    warnings: list[str] = []
 
-    client.table("platform_table_rows").delete().eq("project_id", project_id).eq("period_id", period_id).execute()
-    client.table("platform_periods").delete().eq("project_id", project_id).eq("period_id", period_id).execute()
+    try:
+        manual_deleted = delete_manual_rows_for_period(project_id, period_id) if cleanup_manual else 0
+    except Exception as exc:
+        warnings.append(f"Ручные правки не удалось очистить автоматически: {_api_error_message(exc)}")
+
+    try:
+        table_rows_deleted = delete_table_rows_for_period(project_id, period_id)
+        client.table("platform_periods").delete().eq("project_id", project_id).eq("period_id", period_id).execute()
+        mode = "hard"
+    except Exception as exc:
+        try:
+            update_period_metadata(project_id, period_id, status="hidden")
+        except Exception:
+            pass
+        return {
+            "mode": "soft_fallback",
+            "manual_rows_deleted": manual_deleted,
+            "table_rows_deleted": table_rows_deleted,
+            "storage_deleted": False,
+            "storage_path": storage_path,
+            "warnings": warnings + [
+                "Supabase не разрешил физически удалить строки выгрузки; период скрыт из интерфейса. "
+                f"Детали: {_api_error_message(exc)}"
+            ],
+        }
 
     storage_deleted = delete_uploaded_file_from_storage(storage_path) if delete_storage and storage_path else False
     return {
-        "mode": "hard",
+        "mode": mode,
         "manual_rows_deleted": manual_deleted,
+        "table_rows_deleted": table_rows_deleted,
         "storage_deleted": storage_deleted,
         "storage_path": storage_path,
+        "warnings": warnings,
     }
 
 

@@ -588,18 +588,31 @@ def render_period_history(project_id: str, role: str) -> None:
             )
             st.caption("Удаление запускается одной кнопкой. Действие необратимо.")
             if st.button("Удалить выгрузку", key=f"hard_delete_period_{period_id}", type="primary"):
-                result = delete_period(
-                    project_id,
-                    period_id,
-                    hard=True,
-                    delete_storage=delete_storage,
-                    cleanup_manual=True,
-                )
+                try:
+                    result = delete_period(
+                        project_id,
+                        period_id,
+                        hard=True,
+                        delete_storage=delete_storage,
+                        cleanup_manual=True,
+                    )
+                except Exception as exc:
+                    st.error("Не удалось удалить выгрузку.")
+                    st.exception(exc)
+                    return
+
                 manual_count = int(result.get("manual_rows_deleted") or 0) if isinstance(result, dict) else 0
+                table_count = int(result.get("table_rows_deleted") or 0) if isinstance(result, dict) else 0
                 storage_deleted = bool(result.get("storage_deleted")) if isinstance(result, dict) else False
-                if delete_storage and storage_path and not storage_deleted:
+                mode = str(result.get("mode") or "") if isinstance(result, dict) else ""
+                for warning in (result.get("warnings") or []) if isinstance(result, dict) else []:
+                    st.warning(str(warning))
+                if delete_storage and storage_path and not storage_deleted and mode != "soft_fallback":
                     st.warning("Выгрузка удалена из базы, но исходный файл в Storage удалить не удалось или он уже отсутствовал.")
-                st.success(f"Выгрузка удалена. Удалено связанных ручных правок: {manual_count}.")
+                if mode == "soft_fallback":
+                    st.warning("Физическое удаление не завершилось, поэтому период скрыт из интерфейса. Для полной очистки можно повторить удаление позже или выполнить очистку в Supabase.")
+                else:
+                    st.success(f"Выгрузка удалена. Удалено строк данных: {table_count}. Удалено связанных ручных правок: {manual_count}.")
                 st.cache_data.clear()
                 st.rerun()
 
