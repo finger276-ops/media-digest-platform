@@ -116,46 +116,7 @@ def parse_datetime(series: pd.Series) -> pd.Series:
 
 
 def detect_tag_columns(df: pd.DataFrame) -> list[str]:
-    """Detect boolean tag columns in a source export.
-
-    Earlier versions used only the taxi-specific hardcoded columns. For a
-    multi-project platform we keep those columns when they exist, but also
-    detect any project-specific binary tag columns exported by monitoring
-    systems: "Да/Нет", "true/false", "1/0", "+/-".
-    """
-    known = [col for col in TAG_COLUMNS_DEFAULT if col in df.columns]
-    service_cols = {
-        "№", "n", "id", "id сообщения", "hash сообщения", "дата", "время", "время публикации",
-        "сообщение", "текст", "текст сообщения", "заголовок", "ссылка", "url", "link",
-        "источник", "площадка", "автор", "кто пишет", "профиль автора", "url автора",
-        "блог", "где пишет", "место публикации", "профиль блога", "url места публикации",
-        "тип", "тип сообщения", "тип источника", "тональность", "токсичность", "wom",
-        "страна", "регион", "город", "просмотры", "вовлечённость", "вовлеченность",
-        "лайки", "комментарии", "репосты", "теги", "категории", "сюжет",
-        "основная тема", "все темы", "все темы (список)", "релевантное",
-        "source_system", "source_file",
-    }
-    positive_values = {"да", "yes", "true", "1", "+", "истина", "верно"}
-    bool_values = positive_values | {"нет", "no", "false", "0", "-", "ложь", "неверно", ""}
-
-    detected = list(known)
-    for col in df.columns:
-        if col in detected:
-            continue
-        key = str(col).strip().lower().replace("ё", "е")
-        if not key or key in service_cols:
-            continue
-        sample = df[col].fillna("").astype(str).str.strip().str.lower().replace({"nan": "", "none": ""})
-        if sample.empty:
-            continue
-        non_empty = sample[sample != ""]
-        if len(non_empty) < 3:
-            continue
-        boolish_share = float(sample.isin(bool_values).mean())
-        positive_count = int(sample.isin(positive_values).sum())
-        if boolish_share >= 0.92 and positive_count > 0:
-            detected.append(col)
-    return detected
+    return [col for col in TAG_COLUMNS_DEFAULT if col in df.columns]
 
 
 def split_tag_text(value: str) -> list[str]:
@@ -171,95 +132,15 @@ def split_tag_text(value: str) -> list[str]:
     return tags
 
 
-
-def split_source_topics(value: str) -> list[str]:
-    value = normalize_spaces(value)
-    if not value or value.lower() in {"nan", "none", "null", "нет", "n/a"}:
-        return []
-    value = value.strip("[]").replace("'", "").replace('"', "")
-    parts = re.split(r"[|;,\n]+", value)
-    topics = []
-    for part in parts:
-        topic = normalize_spaces(part)
-        if topic and topic not in topics:
-            topics.append(topic)
-    return topics
-
-
-def normalize_relevant(value: object, default: bool = True) -> bool:
-    s = normalize_spaces(value).lower().replace("ё", "е")
-    if not s:
-        return default
-    if s in {"true", "1", "да", "yes", "+", "истина", "верно", "relevant"}:
-        return True
-    if s in {"false", "0", "нет", "no", "-", "ложь", "неверно", "irrelevant", "нерелевант", "нерелевантное"}:
-        return False
-    return default
-
-
-def source_topic_bucket_value(value: str) -> str:
-    topic = normalize_spaces(value)
-    return topic if topic else "без_темы_источника"
-
-
-GENERIC_EMPTY_LABELS = {
-    "", "nan", "none", "null", "нет", "n/a", "не указано", "без темы", "без тега",
-    "прочее", "прочие", "other", "unknown", "общие", "общая тема",
-}
-
-
-def normalize_label(value: object) -> str:
-    """Clean a tag/topic label while preserving the human-readable wording."""
-    label = normalize_spaces(value)
-    label = label.strip(" .,:;!?'\"«»()[]{}")
-    if label.lower().replace("ё", "е") in GENERIC_EMPTY_LABELS:
-        return ""
-    # Very long analytical strings are usually snippets, not tags.
-    if len(label) > 90:
-        label = label[:87].rstrip() + "..."
-    return label
-
-
-def unique_labels(values: Iterable[object], limit: int = 8) -> list[str]:
-    result: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        for part in split_source_topics(str(value)) or split_tag_text(str(value)):
-            label = normalize_label(part)
-            key = label.lower().replace("ё", "е")
-            if label and key not in seen:
-                seen.add(key)
-                result.append(label)
-                if len(result) >= limit:
-                    return result
-    return result
-
-
-def label_microtopic(label: str) -> str:
-    """Stable technical bucket for arbitrary project-specific source topics."""
-    clean = normalize_label(label)
-    if not clean:
-        return "general"
-    return "label_" + stable_hash(clean.lower().replace("ё", "е"), prefix="")[:8]
-
 def row_tags(row: pd.Series, tag_cols: list[str]) -> list[str]:
-    """Return source-provided tags/topics for one message.
-
-    The function is intentionally source-agnostic: it uses explicit tag columns,
-    topic/story columns from monitoring systems, and multi-value fields. This is
-    what lets the same pipeline work for taxi, Knauf, retail, banks, medicine,
-    construction, and other projects.
-    """
-    tags: list[str] = []
+    tags = []
     for tag in tag_cols:
-        val = str(row.get(tag, "")).strip().lower().replace("ё", "е")
-        if val in {"да", "yes", "true", "1", "+", "истина", "верно"}:
-            label = normalize_label(tag)
-            if label and label not in tags:
-                tags.append(label)
+        val = str(row.get(tag, "")).strip().lower()
+        if val in {"да", "yes", "true", "1", "+"}:
+            tags.append(tag)
 
-    for col in ["Основная тема", "Все темы", "Все темы (список)", "Теги", "Категории", "Сюжет"]:
-        for tag in unique_labels([row.get(col, "")], limit=12):
+    for col in ["Теги", "Категории", "Сюжет"]:
+        for tag in split_tag_text(row.get(col, "")):
             if tag not in tags:
                 tags.append(tag)
 
@@ -267,54 +148,28 @@ def row_tags(row: pd.Series, tag_cols: list[str]) -> list[str]:
 
 
 def infer_display_tags(text: str, microtopic: str, source_tags: list[str]) -> list[str]:
-    """Build display tags without binding the platform to taxi-only dictionaries."""
-    tags: list[str] = []
-    seen: set[str] = set()
-    for tag in source_tags:
-        label = normalize_label(tag)
-        key = label.lower().replace("ё", "е")
-        if label and key not in seen:
-            seen.add(key)
-            tags.append(label)
-        if len(tags) >= 6:
-            break
-
+    tags = [tag for tag in source_tags if normalize_spaces(tag)]
     micro_map = {
-        # Taxi profile.
         "strike": ["Забастовка"],
         "wb_launch": ["WB Такси"],
         "fasten_service": ["Фастен"],
         "tax_law": ["Законы и налоги"],
         "app_bug": ["Приложение и сбои"],
         "app_orders": ["Приложение и сбои"],
-        "payments": ["Оплата, выплаты и деньги"],
+        "payments": ["Оплата и выплаты"],
         "account_block": ["Блокировки и доступ"],
         "child_seat": ["Детские кресла"],
         "coeff_priority": ["Коэффициент"],
         "airport": ["Аэропорты"],
         "gps_map": ["Карты и навигация"],
-        "support": ["Поддержка и клиентский сервис"],
+        "support": ["Поддержка и таксопарки"],
         "general_yandex": ["яндекс"],
-        # Generic profile.
-        "issue_problem": ["Проблемы, жалобы и негативный опыт"],
-        "price_terms": ["Цены, стоимость и условия"],
-        "product_quality": ["Качество продукта или услуги"],
-        "availability_supply": ["Наличие, поставки и логистика"],
-        "installation_usage": ["Монтаж, применение и эксплуатация"],
-        "documents_certificates": ["Документы, сертификаты и требования"],
-        "safety_fire": ["Безопасность и пожарные свойства"],
-        "sustainability_energy": ["Экология и энергоэффективность"],
-        "competitors_market": ["Конкуренты и сравнение на рынке"],
-        "customer_service": ["Поддержка и клиентский сервис"],
-        "general": ["Общие обсуждения"],
     }
     for tag in micro_map.get(str(microtopic or "other"), []):
-        key = tag.lower().replace("ё", "е")
-        if key not in seen:
+        if tag not in tags:
             tags.append(tag)
-            seen.add(key)
     if not tags:
-        tags.append("Прочие обсуждения")
+        tags.append("Без тега")
     return tags
 
 
@@ -400,36 +255,6 @@ def normalize_messages(raw: pd.DataFrame, tag_cols: list[str]) -> tuple[pd.DataF
 
     raw_tag_lists = df.apply(lambda r: row_tags(r, tag_cols), axis=1)
 
-    source_main_topic_series = get_text_series(
-        df,
-        "Основная тема",
-        aliases=["Главная тема", "Main topic", "Primary topic", "source_main_topic", "Сюжет", "Тема", "Topic"],
-    ).apply(normalize_spaces)
-    source_topics_series = get_text_series(
-        df,
-        "Все темы (список)",
-        aliases=["Все темы", "Темы", "Topics", "source_topics", "Сюжет", "Тема", "Topic"],
-    ).apply(lambda x: "; ".join(split_source_topics(x)))
-    # If there is no separate list of topics, keep the main source topic as a one-item list.
-    source_topics_series = source_topics_series.where(source_topics_series.str.strip() != "", source_main_topic_series)
-
-    # Add source topic/story labels to display tags. This is the main universal
-    # signal for non-taxi projects such as Knauf, where exported sheets often
-    # contain "Сюжет" instead of our old hardcoded taxi tags.
-    raw_tag_lists = pd.Series([
-        unique_labels(list(tags) + [main_topic, topics], limit=8)
-        for tags, main_topic, topics in zip(raw_tag_lists, source_main_topic_series, source_topics_series)
-    ], index=df.index, dtype="object")
-    relevant_series = get_text_series(
-        df,
-        "Релевантное",
-        aliases=["Релевантность", "Relevant", "Is relevant", "source_relevant"],
-    ).apply(lambda x: normalize_relevant(x, default=True))
-
-    df["source_main_topic"] = source_main_topic_series
-    df["source_topics"] = source_topics_series
-    df["source_relevant"] = relevant_series
-
     # Narrow rule-based topic used before clustering. For very short replies,
     # include a small parent-post context, but do not let parent text dominate.
     parent_context = get_text_series(
@@ -504,9 +329,6 @@ def normalize_messages(raw: pd.DataFrame, tag_cols: list[str]) -> tuple[pd.DataF
         "tags": "tags",
         "tag_count": "tag_count",
         "microtopic": "microtopic",
-        "source_main_topic": "source_main_topic",
-        "source_topics": "source_topics",
-        "source_relevant": "source_relevant",
         "source_system": "source_system",
         "source_file": "source_file",
         "is_negative": "is_negative",
@@ -545,87 +367,60 @@ def classify_microtopic(text: str, tags: str | Iterable[str] = "") -> str:
     """
     Rule-based microtopic layer.
 
-    The first block keeps the old taxi profile. The second block is universal
-    and works for any monitoring export. If the source file already contains
-    topics/tags, the most specific source label becomes a stable technical
-    microtopic bucket, so the platform no longer depends on taxi keywords.
+    Why it exists: broad tags like «яндекс» or «Коэффициент» are too coarse.
+    Before semantic/lexical clustering, we first assign every message/discussion
+    to a narrower microtopic and only then allow clustering inside that bucket.
+    This reduces unrelated messages inside one information event.
     """
     t = normalize_spaces(text).lower().replace("ё", "е")
     if isinstance(tags, str):
         tag_values = tag_set(tags)
     else:
         tag_values = {str(x).strip() for x in tags if str(x).strip()}
-    tag_values_clean = {normalize_label(x) for x in tag_values}
-    tag_values_clean = {x for x in tag_values_clean if x}
-    taxi_context = regex_any(t, [r"\bтакси\b", r"водител\w*", r"таксопарк\w*", r"яндекс\s+про", r"таксометр", r"агрегатор\w*", r"самозанят\w*", r"минтранс"])
 
-    # Taxi profile: preserved for existing taxi chat projects.
-    if "Забастовка" in tag_values_clean or regex_any(t, [r"\bзабастов\w*", r"\bбойкот\w*", r"\bстачк\w*", r"\bмитинг\w*", r"коллективн\w+\s+акци"]):
+    # Critical and highly specific topics first.
+    if "Забастовка" in tag_values or regex_any(t, [r"\bзабастов\w*", r"\bбойкот\w*", r"\bстачк\w*", r"\bмитинг\w*", r"коллективн\w+\s+акци"]):
         return "strike"
-    if "WB Такси" in tag_values_clean or regex_any(t, [r"wb\s*такси", r"вб\s*такси", r"wildberries\s*такси", r"вайлдбер\w*\s*такси"]):
+    if "WB Такси" in tag_values or regex_any(t, [r"\bwb\b", r"wildberries", r"\bвб\b", r"валбер", r"вайлдбер"]):
         return "wb_launch"
-    if "Фастен" in tag_values_clean or regex_any(t, [r"fasten", r"фаст[еэо]н", r"фастон"]):
+    if "Фастен" in tag_values or regex_any(t, [r"fasten", r"фаст[еэо]н", r"фастон"]):
         return "fasten_service"
-    if "Законы и налоги" in tag_values_clean or (taxi_context and regex_any(t, [r"налог\w*", r"патент\w*", r"самозанят\w*", r"минтранс", r"реестр\w*", r"закон\w*", r"разрешени\w*", r"лиценз\w*", r"штраф\w*", r"провер\w*"])):
+    if "Законы и налоги" in tag_values or regex_any(t, [r"налог\w*", r"патент\w*", r"самозанят\w*", r"минтранс", r"реестр\w*", r"закон\w*", r"разрешени\w*", r"лиценз\w*", r"штраф\w*", r"провер\w*"]):
         return "tax_law"
-    if regex_any(t, [r"не\s+работа\w*", r"не\s+открыва\w*", r"не\s+груз\w*", r"не\s+заход\w*", r"завис\w*", r"висит", r"\bсбой\w*", r"\bошибк\w*", r"глюк\w*", r"вылета\w*", r"приложени\w*", r"яндекс\s+про"]):
+
+    # Product/app operational issues.
+    if regex_any(t, [r"не\s+работа\w*", r"не\s+открыва\w*", r"не\s+груз\w*", r"не\s+заход\w*", r"завис\w*", r"висит", r"сбой\w*", r"ошибк\w*", r"глюк\w*", r"вылета\w*", r"приложени\w*", r"яндекс\s+про"]):
         if regex_any(t, [r"нет\s+заказ\w*", r"заказ\w*\s+не\s+приход", r"пропал\w*\s+заказ", r"заказ\w*\s+пропал", r"распределени\w*\s+заказ"]):
             return "app_orders"
         return "app_bug"
-    if taxi_context and regex_any(t, [r"\bоплат\w*", r"выплат\w*", r"деньг\w*", r"перевод\w*", r"задолж\w*", r"баланс\w*", r"комисс\w*"]):
+
+    # Money and account issues.
+    if regex_any(t, [r"оплат\w*", r"выплат\w*", r"деньг\w*", r"перевод\w*", r"задолж\w*", r"баланс\w*", r"комисс\w*"]):
         return "payments"
     if regex_any(t, [r"блокир\w*", r"заблок\w*", r"\bбан\b", r"аккаунт\w*", r"доступ\s+(?:к\s+)?(?:аккаунт\w*|профил\w*|яндекс\w*)", r"деактив\w*", r"профил\w*\s+(?:заблок|не\s+работ|отключ)", r"самозанят\w*\s+не\s+подтверж"]):
         return "account_block"
-    if regex_any(t, [r"детск\w*\s+кресл\w*", r"кресл\w*.{0,40}ребен\w*", r"ребен\w*.{0,40}кресл\w*", r"ребенк\w*.{0,40}кресл\w*", r"бустер\w*"]):
+
+    # Operational subtopics.
+    if regex_any(t, [r"кресл\w*", r"детск\w+", r"ребен\w*", r"ребенк\w*", r"бустер\w*"]):
         return "child_seat"
-    if "Коэффициент" in tag_values_clean or (taxi_context and regex_any(t, [r"коэф\w*", r"коэффициент\w*", r"\bкэф\w*", r"приоритет\w*", r"тариф\w*", r"ценник\w*", r"подач\w*"])):
+    if "Коэффициент" in tag_values or regex_any(t, [r"коэф\w*", r"коэффициент\w*", r"\bкэф\w*", r"приоритет\w*", r"тариф\w*", r"ценник\w*", r"подач\w*"]):
         return "coeff_priority"
     if regex_any(t, [r"аэропорт\w*", r"пулково", r"шереметьево", r"внуково", r"домодедово"]):
         return "airport"
-    if taxi_context and regex_any(t, [r"карт\w*", r"навигатор\w*", r"адрес\w*", r"геолокац\w*", r"gps", r"маршрут\w*"]):
+    if regex_any(t, [r"карт\w*", r"навигатор\w*", r"адрес\w*", r"геолокац\w*", r"локац\w*", r"подъезд\w*", r"maps", r"улиц\w*", r"маршрут\w*"]):
         return "gps_map"
-    if taxi_context and regex_any(t, [r"поддержк\w*", r"диспетчер\w*", r"парк\w*", r"таксопарк\w*", r"оператор\w*"]):
+    if regex_any(t, [r"поддержк\w*", r"диспетчер\w*", r"парк\w*", r"таксопарк\w*", r"оператор\w*"]):
         return "support"
-    if "яндекс" in {x.lower() for x in tag_values_clean} or regex_any(t, [r"яндекс", r"\bяши\b", r"\bяше\b", r"\bяшу\b", r"yandex"]):
+
+    if "яндекс" in tag_values or regex_any(t, [r"яндекс", r"\bяши\b", r"\bяше\b", r"\bяшу\b", r"yandex"]):
         return "general_yandex"
-
-    # Universal profile for non-taxi projects.
-    if regex_any(t, [r"\bпроблем\w*", r"\bжалоб\w*", r"\bнедоволь\w*", r"не\s+работа\w*", r"\bошибк\w*", r"\bсбой\w*", r"\bдефект\w*", r"\bбрак\w*", r"\bповрежд\w*", r"\bплох\w*", r"\bнегатив\w*"]):
-        return "issue_problem"
-    if regex_any(t, [r"\bцен\w*", r"\bстоимост\w*", r"\bпрайс\w*", r"тариф\w*", r"\bскидк\w*", r"\bакци(?:я|и|ю|ей|ями|онн\w*)?\b", r"\bдешев\w*", r"\bдорог\w*", r"\bоплат\w*", r"\bсчет\w*", r"\bсчёт\w*"]):
-        return "price_terms"
-    if regex_any(t, [r"\bкачеств\w*", r"\bхарактерист\w*", r"\bматериал\w*", r"\bпрочност\w*", r"\bплотност\w*", r"\bтолщин\w*", r"\bразмер\w*", r"\bупаковк\w*", r"плесен\w*", r"плесён\w*"]):
-        return "product_quality"
-    if regex_any(t, [r"\bналич\w*", r"\bсклад\w*", r"\bпоставк\w*", r"\bдоставк\w*", r"\bлогист\w*", r"\bотгруз\w*", r"\bсрок\w*", r"\bзаказ\w*", r"\bдефицит\w*"]):
-        return "availability_supply"
-    if regex_any(t, [r"\bмонтаж\w*", r"\bустанов\w*", r"\bприменен\w*", r"\bиспользован\w*", r"\bэксплуатац\w*", r"\bстроитель\w*", r"\bутепл\w*", r"\bизоляц\w*", r"\bкровл\w*", r"\bфасад\w*"]):
-        return "installation_usage"
-    if regex_any(t, [r"сертификат\w*", r"документ\w*", r"деклараци\w*", r"гост\w*", r"снип\w*", r"требован\w*", r"регламент\w*", r"стандарт\w*"]):
-        return "documents_certificates"
-    if regex_any(t, [r"пожар\w*", r"огне\w*", r"горюч\w*", r"негорюч\w*", r"безопасност\w*", r"опасн\w*", r"токсич\w*"]):
-        return "safety_fire"
-    if regex_any(t, [r"эколог\w*", r"переработ\w*", r"углерод\w*", r"энергоэффектив\w*", r"энергосбереж\w*", r"теплопотер\w*", r"устойчив\w*"]):
-        return "sustainability_energy"
-    if regex_any(t, [r"конкурент\w*", r"аналог\w*", r"сравнен\w*", r"рынок\w*", r"бренд\w*", r"rockwool", r"роквул", r"технониколь", r"ursa", r"изовер"]):
-        return "competitors_market"
-    if regex_any(t, [r"поддержк\w*", r"сервис\w*", r"менеджер\w*", r"дилер\w*", r"продавец\w*", r"магазин\w*", r"клиент\w*"]):
-        return "customer_service"
-
-    # Source-provided labels are the strongest universal signal. Use them as
-    # stable buckets after generic risk/problem buckets have had a chance to
-    # catch operational issues.
-    if tag_values_clean:
-        preferred = sorted(tag_values_clean, key=lambda x: (len(x), x.lower()))[0]
-        return label_microtopic(preferred)
-
-    return "general"
+    return "other"
 
 
 def topic_bucket_for(row: pd.Series) -> str:
     tag = main_tag([row.get("main_tags", row.get("tags", ""))])
     microtopic = str(row.get("microtopic", "other") or "other")
-    source_topic = source_topic_bucket_value(row.get("source_main_topic", ""))
-    return f"{source_topic}::{tag}::{microtopic}"
+    return f"{tag}::{microtopic}"
 
 
 def should_start_new_discussion(prev_row: pd.Series, row: pd.Series, window_minutes: int) -> bool:
@@ -634,11 +429,6 @@ def should_start_new_discussion(prev_row: pd.Series, row: pd.Series, window_minu
 
     gap = row["datetime"] - prev_row["datetime"]
     if gap > pd.Timedelta(minutes=window_minutes):
-        return True
-
-    prev_source_topic = normalize_spaces(prev_row.get("source_main_topic", ""))
-    curr_source_topic = normalize_spaces(row.get("source_main_topic", ""))
-    if prev_source_topic and curr_source_topic and prev_source_topic != curr_source_topic:
         return True
 
     prev_micro = str(prev_row.get("microtopic", "other") or "other")
@@ -710,18 +500,6 @@ def make_discussions(messages: pd.DataFrame, window_minutes: int = 60) -> tuple[
         else:
             discussion_text = normalize_spaces((messages_block + "\n" + parent_block[:180]).strip())
 
-        source_main_topic_counts = Counter(
-            normalize_spaces(x)
-            for x in group.get("source_main_topic", pd.Series(dtype=str)).fillna("").astype(str)
-            if normalize_spaces(x)
-        )
-        source_main_topic = source_main_topic_counts.most_common(1)[0][0] if source_main_topic_counts else ""
-        source_topic_values = []
-        for value in group.get("source_topics", pd.Series(dtype=str)).fillna("").astype(str):
-            for topic in split_source_topics(value):
-                if topic not in source_topic_values:
-                    source_topic_values.append(topic)
-
         microtopic_counts = Counter(group.get("microtopic", pd.Series(["other"])).fillna("other").astype(str))
         microtopic = microtopic_counts.most_common(1)[0][0] if microtopic_counts else "other"
 
@@ -741,9 +519,7 @@ def make_discussions(messages: pd.DataFrame, window_minutes: int = 60) -> tuple[
             "parent_link": group["parent_link"].iloc[0] if "parent_link" in group else "",
             "main_tags": "|".join(tags),
             "microtopic": microtopic,
-            "source_main_topic": source_main_topic,
-            "source_topics": "; ".join(source_topic_values),
-            "topic_bucket": source_topic_bucket_value(source_main_topic) + "::" + main_tag(["|".join(tags)]) + "::" + microtopic,
+            "topic_bucket": main_tag(["|".join(tags)]) + "::" + microtopic,
             "message_count": int(group["message_id"].nunique()),
             "author_count": int(group["author_id"].nunique()) if "author_id" in group else 0,
             "negative_count": int(group["is_negative"].astype(bool).sum()) if "is_negative" in group else 0,
@@ -820,26 +596,22 @@ def build_title(
     all_tags: Iterable[str] | None = None,
     microtopic: str = "other",
     phrases: list[str] | None = None,
-    source_main_topic: str = "",
-    source_topics: str = "",
 ) -> str:
-    """Build a human-readable event title for any project domain."""
-    all_tags = {normalize_label(x) for x in (all_tags or []) if normalize_label(x)}
+    all_tags = set(all_tags or [])
     kw = set(keywords)
     phrases = phrases or []
-    tag = normalize_label(tag) or "Прочие обсуждения"
-    source_main_topic = normalize_label(source_main_topic)
 
-    # Source-provided themes from Brand Analytics/Mediologia/etc. are usually
-    # better than any generic dictionary. Prefer them for non-empty values.
-    if source_main_topic:
-        return source_main_topic
+    # Microtopic is more precise than a broad tag. Prefer it when available.
+    if microtopic in MICROTOPIC_TITLES and microtopic != "other":
+        # Keep the title stable and clean. Specific clues are shown in the
+        # summary/keywords, not injected into the title where noisy OCR/chat words
+        # can make the table look unreliable.
+        return MICROTOPIC_TITLES[microtopic]
 
     for rule in TITLE_RULES:
         if all_tags & set(rule.get("tags", set())) and (not rule.get("keywords") or kw & set(rule.get("keywords", set()))):
             return rule["title"]
 
-    # Keep old taxi titles stable.
     if tag == "Забастовка":
         return "Призывы к забастовке или бойкоту"
     if tag == "Приложение и сбои":
@@ -854,6 +626,7 @@ def build_title(
         return "Запуск и обсуждение WB Такси"
     if tag == "Фастен":
         return "Обсуждение сервиса Фастен"
+
     if tag == "яндекс":
         if any(k in kw for k in ["дивиденды", "акции", "акционеры"]):
             return "Финансовые новости и обсуждение Яндекса"
@@ -861,23 +634,9 @@ def build_title(
             return "Детские кресла и требования к заказам"
         return "Общее обсуждение Яндекса"
 
-    # Generic microtopics are useful when the file has no human markup.
-    if microtopic in MICROTOPIC_TITLES and microtopic not in {"other", "general"}:
-        title = MICROTOPIC_TITLES[microtopic]
-        if tag and tag not in {"Прочие обсуждения", "Общие обсуждения", title} and not tag.startswith("label_"):
-            return tag
-        return title
-
-    if tag and tag not in {"Без тега", "Прочие обсуждения", "Общие обсуждения"}:
-        return tag
-
-    if phrases:
-        phrase = normalize_label(phrases[0])
-        if phrase:
-            return phrase[:1].upper() + phrase[1:]
     if keywords:
-        return f"Обсуждение: {', '.join(keywords[:3])}"
-    return "Прочие обсуждения"
+        return f"{tag}: {', '.join(keywords[:3])}"
+    return f"Обсуждение: {tag}"
 
 
 def summarize_event(group: pd.DataFrame, tag: str, keywords: list[str], phrases: list[str]) -> str:
@@ -927,7 +686,7 @@ def split_labels_by_fixed_time_window(
 
 def dynamic_threshold(bucket: str, base: float) -> float:
     """Stricter threshold for broad/noisy buckets."""
-    if "general_yandex" in bucket or "::general" in bucket or bucket.endswith("::other"):
+    if "general_yandex" in bucket or bucket.endswith("::other"):
         return min(0.72, base + 0.12)
     if "coeff_priority" in bucket:
         return min(0.68, base + 0.07)
@@ -1091,8 +850,7 @@ def refine_labels_by_tag(labels: pd.Series, discussions: pd.DataFrame) -> pd.Ser
     for i, row in discussions.iterrows():
         raw_label = int(labels.loc[i])
         mt = main_tag([row.get("main_tags", "")])
-        source_topic = source_topic_bucket_value(row.get("source_main_topic", ""))
-        key = (raw_label, source_topic, mt)
+        key = (raw_label, mt)
         if key not in label_map:
             label_map[key] = next_id
             next_id += 1
@@ -1159,18 +917,6 @@ def make_events(
         microtopic_counter = Counter(group.get("microtopic", pd.Series(["other"])).fillna("other").astype(str))
         microtopic = microtopic_counter.most_common(1)[0][0] if microtopic_counter else "other"
 
-        source_main_topic_counter = Counter(
-            normalize_spaces(x)
-            for x in group.get("source_main_topic", pd.Series(dtype=str)).fillna("").astype(str)
-            if normalize_spaces(x)
-        )
-        source_main_topic = source_main_topic_counter.most_common(1)[0][0] if source_main_topic_counter else ""
-        source_topic_values = []
-        for value in group.get("source_topics", pd.Series(dtype=str)).fillna("").astype(str):
-            for topic in split_source_topics(value):
-                if topic not in source_topic_values:
-                    source_topic_values.append(topic)
-
         start = pd.to_datetime(group["start_date"], errors="coerce").min()
         end = pd.to_datetime(group["end_date"], errors="coerce").max()
         msg_count = int(group["message_count"].sum())
@@ -1196,21 +942,11 @@ def make_events(
 
         rows.append({
             "event_id": event_id,
-            "event_title": build_title(
-                tag,
-                keywords,
-                all_tags,
-                microtopic=microtopic,
-                phrases=phrases,
-                source_main_topic=source_main_topic,
-                source_topics="; ".join(source_topic_values),
-            ),
-            "event_summary": summarize_event(group, source_main_topic or MICROTOPIC_TITLES.get(microtopic, tag), keywords, phrases),
+            "event_title": build_title(tag, keywords, all_tags, microtopic=microtopic, phrases=phrases),
+            "event_summary": summarize_event(group, MICROTOPIC_TITLES.get(microtopic, tag), keywords, phrases),
             "main_tag": tag,
             "microtopic": microtopic,
             "main_tags": "|".join(all_tags),
-            "source_main_topic": source_main_topic,
-            "source_topics": "; ".join(source_topic_values),
             "keywords": "|".join(keywords),
             "key_phrases": "|".join(phrases),
             "start_date": start,

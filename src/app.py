@@ -1,75 +1,50 @@
-"""
-Streamlit dashboard for taxi chat information events.
-
-Run locally:
-    python -m streamlit run src/app.py -- --data-dir data/processed --db-path data/manual_actions.sqlite
-"""
-
 from __future__ import annotations
 
 import argparse
-import hashlib
 import os
-import re
-from io import BytesIO
-from collections import Counter
-from datetime import date, datetime
+import tempfile
+import uuid
+from datetime import date
 from pathlib import Path
+from typing import Any
 
-import numpy as np
 import pandas as pd
 import streamlit as st
 
-from io_utils import read_table, read_source_csv
-from manual_db import (
-    connect,
-    load_all_manual_tables,
-    get_event_overrides,
-    get_event_merges,
-    get_message_overrides,
-    get_message_exclusions,
-    get_manual_events,
-    get_message_topic_overrides,
-    create_manual_event,
-    save_event_override,
-    merge_events,
-    move_message,
-    hide_message,
-    mark_message_irrelevant,
-    restore_message_relevance,
-    get_key_message_pins,
-    pin_key_message,
-    unpin_key_message,
-    save_message_topic_override,
-    get_dashboard_summary,
-    save_dashboard_summary,
-)
-from settings import STATUS_OPTIONS
-from preprocess import run_preprocess, run_preprocess_from_dataframe
-from persistent_store import (
+from import_adapters import read_source_table, get_excel_sheet_names
+from io_utils import read_table
+from platform_store import (
     supabase_configured,
+    list_projects,
+    create_project,
+    update_project,
+    resolve_project_access,
     list_periods,
-    load_generated_tables_from_supabase,
-    save_processed_tables_from_dir,
     make_period_id,
-    save_uploaded_csv_to_storage,
+    save_processed_tables,
+    load_generated_tables,
     update_period_metadata,
-    set_period_status,
     delete_period,
+    save_uploaded_file_to_storage,
+    get_manual,
+    list_manual,
+    save_manual,
+    delete_manual,
 )
+from preprocess import run_preprocess_from_dataframe
+
+APP_TITLE = "Платформа дайджестов"
+APP_VERSION = "3.1-alpha: мультипроектная платформа с ручной модерацией инфоповодов"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--data-dir", default=os.getenv("DASHBOARD_DATA_DIR", "data/processed"))
-    parser.add_argument("--db-path", default=os.getenv("DASHBOARD_DB_PATH", "data/manual_actions.sqlite"))
-    parser.add_argument("--upload-dir", default=os.getenv("DASHBOARD_UPLOAD_DIR", "data/uploads"))
+    parser.add_argument("--work-dir", default=os.getenv("PLATFORM_WORK_DIR", "data/work"))
     args, _ = parser.parse_known_args()
     return args
 
 
 def get_secret_value(name: str, default: str = "") -> str:
-    """Read Streamlit Secret first, then environment variable. Never expose values in UI."""
     try:
         value = st.secrets.get(name, default)
     except Exception:
@@ -77,4073 +52,1007 @@ def get_secret_value(name: str, default: str = "") -> str:
     return str(value or "").strip()
 
 
-def render_admin_mode() -> bool:
-    """Return True when user is allowed to upload files and edit/moderate data."""
-    admin_password = get_secret_value("ADMIN_PASSWORD", "")
-
-    if "is_admin" not in st.session_state:
-        st.session_state["is_admin"] = False
-
+def is_platform_admin() -> bool:
+    admin_password = get_secret_value("PLATFORM_ADMIN_PASSWORD") or get_secret_value("ADMIN_PASSWORD")
+    if "platform_is_admin" not in st.session_state:
+        st.session_state["platform_is_admin"] = False
     if not admin_password:
-        st.sidebar.warning(
-            "ADMIN_PASSWORD не настроен. Режим загрузки и правок пока доступен всем пользователям со ссылкой."
-        )
+        st.sidebar.warning("PLATFORM_ADMIN_PASSWORD не настроен: режим владельца временно доступен всем.")
         return True
-
-    if st.session_state.get("is_admin"):
-        st.sidebar.success("Режим: администратор")
-        if st.sidebar.button("Выйти из режима правок"):
-            st.session_state["is_admin"] = False
+    if st.session_state.get("platform_is_admin"):
+        st.sidebar.success("Режим: владелец платформы")
+        if st.sidebar.button("Выйти из режима владельца"):
+            st.session_state["platform_is_admin"] = False
             st.rerun()
         return True
-
-    st.sidebar.info("Режим: просмотр")
-    with st.sidebar.expander("Вход администратора", expanded=False):
-        entered = st.text_input("Пароль администратора", type="password", key="admin_password_input")
-        if st.button("Войти", key="admin_login_button"):
-            if entered == admin_password:
-                st.session_state["is_admin"] = True
-                st.success("Режим администратора включен.")
+    with st.sidebar.expander("Вход владельца платформы", expanded=False):
+        password = st.text_input("Пароль владельца", type="password", key="platform_admin_password")
+        if st.button("Войти", key="platform_admin_login"):
+            if password == admin_password:
+                st.session_state["platform_is_admin"] = True
                 st.rerun()
             else:
                 st.error("Неверный пароль.")
-
     return False
 
 
-@st.cache_data(show_spinner=False)
-def load_generated_tables(data_dir: str):
-    events = read_table(data_dir, "events")
-    discussions = read_table(data_dir, "discussions")
-    messages = read_table(data_dir, "messages")
-    discussion_messages = read_table(data_dir, "discussion_messages")
-    event_discussions = read_table(data_dir, "event_discussions")
-
-    for df, cols in [
-        (events, ["start_date", "end_date"]),
-        (discussions, ["start_date", "end_date"]),
-        (messages, ["datetime"]),
-    ]:
-        for col in cols:
-            if col in df.columns:
-                df[col] = pd.to_datetime(df[col], errors="coerce")
-
-    for col in ["is_hidden"]:
-        if col in events.columns:
-            events[col] = events[col].astype(str).str.lower().isin(["true", "1", "yes", "да"])
-
-    for col in ["message_count", "chat_count", "author_count", "negative_count", "toxic_count", "discussion_count"]:
-        if col in events.columns:
-            events[col] = pd.to_numeric(events[col], errors="coerce").fillna(0).astype(int)
-
-    for col in ["negative_share", "toxic_share", "importance_score"]:
-        if col in events.columns:
-            events[col] = pd.to_numeric(events[col], errors="coerce").fillna(0.0)
-
-    return events, discussions, messages, discussion_messages, event_discussions
+def role_rank(role: str) -> int:
+    return {"none": 0, "viewer": 1, "editor": 2, "owner": 3}.get(role, 0)
 
 
-def resolve_merge_map(merges: pd.DataFrame) -> dict[str, str]:
-    mapping = {}
-    if merges is None or merges.empty:
-        return mapping
-
-    raw = dict(zip(merges["source_event_id"], merges["target_event_id"]))
-
-    def resolve(x: str) -> str:
-        seen = set()
-        while x in raw and x not in seen:
-            seen.add(x)
-            x = raw[x]
-        return x
-
-    for source in raw:
-        mapping[source] = resolve(source)
-    return mapping
+def fmt_date(value: Any) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    try:
+        ts = pd.to_datetime(value, errors="coerce", dayfirst=True)
+        if pd.isna(ts):
+            return ""
+        return ts.strftime("%d.%m.%Y")
+    except Exception:
+        return ""
 
 
-def normalize_title_for_auto_merge(title: str) -> str:
-    """Normalize event title so visually identical topics are merged in the dashboard."""
-    value = str(title or "").strip().lower().replace("ё", "е")
-    value = re.sub(r"\s+", " ", value)
-    value = re.sub(r"\s*[—–-]\s*волна\s*\d+\s*$", "", value)
-    value = value.strip(" .,:;!?'\"«»()[]{}")
-    return value
-
-def normalize_manual_tags(tags: str) -> str:
-    """Return tags in the same pipe-separated format as generated events."""
-    raw = str(tags or "").replace(";", ",").replace("|", ",")
-    items = []
-    seen = set()
-    for item in raw.split(","):
-        item = re.sub(r"\s+", " ", item).strip()
-        if not item:
-            continue
-        key = item.lower().replace("ё", "е")
-        if key not in seen:
-            seen.add(key)
-            items.append(item)
-    return "|".join(items)
+def fmt_period(row: pd.Series) -> str:
+    start = fmt_date(row.get("date_from") or row.get("start_date"))
+    end = fmt_date(row.get("date_to") or row.get("end_date"))
+    if start and end and start != end:
+        return f"{start}–{end}"
+    return start or end
 
 
-def format_tags_for_display(tags: str) -> str:
-    """Human-friendly tag rendering for message/event tables."""
-    items = [
-        re.sub(r"\s+", " ", t).strip()
-        for t in re.split(r"[|;,]", str(tags or ""))
-        if re.sub(r"\s+", " ", t).strip()
-    ]
-    seen = []
-    for item in items:
-        if item not in seen:
-            seen.append(item)
-    return "; ".join(seen)
+def normalize_text(value: Any) -> str:
+    return str(value or "").strip()
 
 
-def collect_available_source_topics(events: pd.DataFrame, messages: pd.DataFrame) -> list[str]:
-    """Return source/main topics found in current data for manual assignment."""
-    values: list[str] = []
-    for df, cols in [
-        (events, ["source_main_topics", "source_topics", "source_main_topic"]),
-        (messages, ["source_main_topic", "source_topics"]),
-    ]:
-        if df is None or df.empty:
-            continue
-        for col in cols:
-            if col not in df.columns:
-                continue
-            for raw in df[col].fillna("").astype(str):
-                for item in re.split(r"[;|]", raw):
-                    item = re.sub(r"\s+", " ", item).strip()
-                    if item:
-                        values.append(item)
-    seen = {}
-    for value in values:
-        key = value.lower().replace("ё", "е")
-        if key not in seen:
-            seen[key] = value
-    return sorted(seen.values(), key=lambda x: x.lower().replace("ё", "е"))
+def render_project_access(is_admin: bool) -> tuple[str | None, str, pd.DataFrame]:
+    projects = list_projects(include_inactive=is_admin)
+    if projects.empty:
+        if is_admin:
+            st.info("Пока нет проектов. Создайте первый проект в блоке управления ниже.")
+        else:
+            st.warning("Пока нет доступных проектов.")
+        return None, "owner" if is_admin else "none", projects
+
+    if is_admin:
+        options = projects["project_id"].astype(str).tolist()
+        labels = {str(r["project_id"]): str(r.get("project_name") or r["project_id"]) for _, r in projects.iterrows()}
+        selected = st.sidebar.selectbox("Проект", options, format_func=lambda x: labels.get(x, x))
+        return selected, "owner", projects
+
+    if st.session_state.get("platform_project_id"):
+        project_id = st.session_state["platform_project_id"]
+        role = st.session_state.get("platform_project_role", "viewer")
+        project_row = projects[projects["project_id"].astype(str) == str(project_id)]
+        project_name = str(project_row.iloc[0].get("project_name") if not project_row.empty else project_id)
+        st.sidebar.success(f"Доступ: {project_name} · {role}")
+        if st.sidebar.button("Сменить проект / выйти"):
+            st.session_state.pop("platform_project_id", None)
+            st.session_state.pop("platform_project_role", None)
+            st.rerun()
+        return project_id, role, projects
+
+    st.sidebar.info("Введите код доступа к проекту")
+    access_code = st.sidebar.text_input("Код проекта", type="password", key="project_access_code")
+    if st.sidebar.button("Открыть проект"):
+        project_id, role = resolve_project_access(access_code)
+        if project_id:
+            st.session_state["platform_project_id"] = project_id
+            st.session_state["platform_project_role"] = role
+            st.rerun()
+        else:
+            st.sidebar.error("Код проекта не найден.")
+    return None, "none", projects
 
 
-def message_topic_display(row: pd.Series, fallback_event_title: str = "") -> str:
-    """Topic label shown in the full message feed."""
-    for col in ["source_main_topic", "source_topics"]:
-        value = str(row.get(col, "") or "").strip()
-        if value and value.lower() not in {"nan", "none", "nat", "<na>"}:
-            first = re.split(r"[;|]", value)[0].strip()
-            if first:
-                return first
-    return str(fallback_event_title or "").strip()
+def render_project_manager(projects: pd.DataFrame) -> None:
+    st.header("Управление проектами")
+    with st.expander("Создать проект", expanded=projects.empty):
+        name = st.text_input("Название проекта", key="new_project_name")
+        description = st.text_area("Описание проекта", key="new_project_description")
+        viewer_code = st.text_input("Код просмотра", type="password", key="new_viewer_code")
+        editor_code = st.text_input("Код редактора", type="password", key="new_editor_code")
+        if st.button("Создать проект", type="primary"):
+            if not name.strip():
+                st.error("Укажите название проекта.")
+            else:
+                project_id = create_project(project_name=name, description=description, viewer_code=viewer_code, editor_code=editor_code)
+                st.success(f"Проект создан: {project_id}")
+                st.rerun()
+
+    if projects.empty:
+        return
+    st.subheader("Существующие проекты")
+    view = projects.copy()
+    for col in ["created_at", "updated_at"]:
+        if col in view.columns:
+            view[col] = view[col].apply(fmt_date)
+    show = view[[c for c in ["project_name", "description", "status", "created_at", "updated_at", "project_id"] if c in view.columns]].rename(columns={
+        "project_name": "Проект",
+        "description": "Описание",
+        "status": "Статус",
+        "created_at": "Создан",
+        "updated_at": "Обновлен",
+        "project_id": "ID",
+    })
+    event = st.dataframe(show, hide_index=True, use_container_width=True, selection_mode="single-row", on_select="rerun")
+    rows = getattr(event, "selection", {}).get("rows", []) if event is not None else []
+    if rows:
+        row = projects.iloc[rows[0]]
+        project_id = str(row["project_id"])
+        with st.expander(f"Редактировать: {row.get('project_name')}", expanded=True):
+            new_name = st.text_input("Название", value=str(row.get("project_name") or ""), key=f"edit_project_name_{project_id}")
+            new_description = st.text_area("Описание", value=str(row.get("description") or ""), key=f"edit_project_description_{project_id}")
+            new_status = st.selectbox("Статус", ["active", "hidden", "archived"], index=["active", "hidden", "archived"].index(str(row.get("status") or "active")) if str(row.get("status") or "active") in ["active", "hidden", "archived"] else 0, key=f"edit_project_status_{project_id}")
+            st.caption("Коды доступа заполняйте только если хотите заменить текущие.")
+            new_viewer_code = st.text_input("Новый код просмотра", type="password", key=f"edit_viewer_code_{project_id}")
+            new_editor_code = st.text_input("Новый код редактора", type="password", key=f"edit_editor_code_{project_id}")
+            if st.button("Сохранить проект", key=f"save_project_{project_id}"):
+                update_project(project_id, project_name=new_name, description=new_description, status=new_status, viewer_code=new_viewer_code, editor_code=new_editor_code)
+                st.success("Проект обновлен.")
+                st.rerun()
 
 
-def append_manual_events(events: pd.DataFrame, manual_events: pd.DataFrame) -> pd.DataFrame:
-    """Append user-created information events to the generated event table."""
-    if manual_events is None or manual_events.empty:
+def render_period_selector(project_id: str) -> tuple[list[str], pd.DataFrame]:
+    periods = list_periods(project_id, include_inactive=False)
+    if periods.empty:
+        st.sidebar.warning("В проекте пока нет загруженных периодов.")
+        return [], periods
+    labels = {}
+    for _, r in periods.iterrows():
+        period_id = str(r["period_id"])
+        labels[period_id] = f"{r.get('period_name') or period_id} · {fmt_period(r)}"
+    default = periods["period_id"].astype(str).head(3).tolist()
+    selected = st.sidebar.multiselect("Периоды", periods["period_id"].astype(str).tolist(), default=default, format_func=lambda x: labels.get(x, x))
+    return selected, periods
+
+
+def read_uploaded_to_canonical(uploaded_file, source_system: str) -> pd.DataFrame:
+    suffix = Path(uploaded_file.name).suffix.lower() or ".csv"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(uploaded_file.getvalue())
+        tmp_path = tmp.name
+    try:
+        return read_source_table(tmp_path, source_system=source_system)
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
+def read_generated_tables_from_dir(output_dir: Path) -> dict[str, pd.DataFrame]:
+    return {name: read_table(str(output_dir), name) for name in ["events", "discussions", "messages", "discussion_messages", "event_discussions"]}
+
+
+def render_upload_page(project_id: str, role: str, work_dir: str) -> None:
+    st.header("Загрузка файла")
+    if role_rank(role) < role_rank("editor"):
+        st.info("Для загрузки файлов нужен доступ редактора или владельца.")
+        return
+
+    with st.form("upload_form"):
+        period_name = st.text_input("Название периода", placeholder="Например: 24.04.2026–30.04.2026")
+        date_col1, date_col2 = st.columns(2)
+        with date_col1:
+            date_from = st.date_input("Дата начала", value=None, format="DD.MM.YYYY")
+        with date_col2:
+            date_to = st.date_input("Дата окончания", value=None, format="DD.MM.YYYY")
+        source_system = st.selectbox("Источник", ["auto", "mediologia", "mediologia_excel", "brand_analytics", "generic"], format_func=lambda x: {
+            "auto": "Автоопределение",
+            "mediologia": "Медиалогия CSV",
+            "mediologia_excel": "Медиалогия Excel",
+            "brand_analytics": "Brand Analytics",
+            "generic": "Универсальный CSV/Excel",
+        }.get(x, x))
+        uploaded = st.file_uploader("CSV или Excel", type=["csv", "xlsx", "xls", "xlsm"])
+        st.caption("Алгоритм")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            threshold = st.slider("Похожесть", 0.10, 0.60, 0.30, 0.01)
+        with c2:
+            event_gap_hours = st.slider("Разрыв между волнами, часов", 1.0, 24.0, 3.0, 1.0)
+        with c3:
+            event_window_hours = st.slider("Макс. окно инфоповода, часов", 4.0, 72.0, 16.0, 4.0)
+        submitted = st.form_submit_button("Обработать и сохранить", type="primary")
+
+    if not submitted:
+        return
+    if uploaded is None:
+        st.error("Загрузите файл.")
+        return
+    if not period_name.strip():
+        st.error("Укажите название периода.")
+        return
+    if date_from and date_to and date_from > date_to:
+        st.error("Дата начала не может быть позже даты окончания.")
+        return
+
+    with st.spinner("Читаю файл и привожу к единому формату..."):
+        canonical = read_uploaded_to_canonical(uploaded, source_system)
+    st.success(f"Файл прочитан: {len(canonical):,} строк".replace(",", " "))
+    with st.expander("Предпросмотр распознанных колонок", expanded=False):
+        st.dataframe(canonical.head(20), use_container_width=True)
+
+    period_id = make_period_id(project_id, period_name, uploaded.name)
+    output_dir = Path(work_dir) / project_id / period_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with st.spinner("Собираю сообщения, обсуждения и инфоповоды..."):
+        manifest = run_preprocess_from_dataframe(
+            canonical,
+            output=output_dir,
+            source_file=uploaded.name,
+            similarity_threshold=float(threshold),
+            event_gap_hours=float(event_gap_hours),
+            event_window_hours=float(event_window_hours),
+        )
+        tables = read_generated_tables_from_dir(output_dir)
+
+    storage_path = ""
+    try:
+        storage_path = save_uploaded_file_to_storage(project_id, period_id, uploaded.name, uploaded.getvalue())
+    except Exception as exc:
+        st.warning(f"Обработанные данные сохраню в БД, но сырой файл не удалось сохранить в Storage: {exc}")
+
+    with st.spinner("Сохраняю данные проекта в Supabase..."):
+        manifest = dict(manifest or {})
+        manifest.update({"storage_path": storage_path, "source_system": source_system})
+        save_processed_tables(
+            project_id=project_id,
+            period_id=period_id,
+            period_name=period_name,
+            source_filename=uploaded.name,
+            tables=tables,
+            manifest=manifest,
+            date_from=date_from,
+            date_to=date_to,
+            replace=True,
+        )
+    st.success("Период сохранен в платформенной базе.")
+    st.cache_data.clear()
+
+
+def render_period_history(project_id: str, role: str) -> None:
+    st.header("История периодов")
+    if role_rank(role) < role_rank("editor"):
+        st.info("Для редактирования истории нужен доступ редактора или владельца.")
+        return
+    periods = list_periods(project_id, include_inactive=True)
+    if periods.empty:
+        st.info("Периодов пока нет.")
+        return
+    view = periods.copy()
+    view["Период"] = view.apply(fmt_period, axis=1)
+    show = view[[c for c in ["period_name", "Период", "source_filename", "status", "period_id"] if c in view.columns]].rename(columns={
+        "period_name": "Название",
+        "source_filename": "Файл",
+        "status": "Статус",
+        "period_id": "ID",
+    })
+    event = st.dataframe(show, hide_index=True, use_container_width=True, selection_mode="single-row", on_select="rerun")
+    rows = getattr(event, "selection", {}).get("rows", []) if event is not None else []
+    if not rows:
+        return
+    row = periods.iloc[rows[0]]
+    period_id = str(row["period_id"])
+    with st.expander("Редактировать период", expanded=True):
+        name = st.text_input("Название периода", value=str(row.get("period_name") or ""), key=f"period_name_{period_id}")
+        def to_date(v):
+            ts = pd.to_datetime(v, errors="coerce")
+            return None if pd.isna(ts) else ts.date()
+        date_from = st.date_input("Дата начала", value=to_date(row.get("date_from")), format="DD.MM.YYYY", key=f"date_from_{period_id}")
+        date_to = st.date_input("Дата окончания", value=to_date(row.get("date_to")), format="DD.MM.YYYY", key=f"date_to_{period_id}")
+        filename = st.text_input("Файл", value=str(row.get("source_filename") or ""), key=f"filename_{period_id}")
+        status = st.selectbox("Статус", ["active", "hidden", "archived"], index=["active", "hidden", "archived"].index(str(row.get("status") or "active")) if str(row.get("status") or "active") in ["active", "hidden", "archived"] else 0, key=f"status_{period_id}")
+        comment = st.text_area("Комментарий", value=str((row.get("manifest") or {}).get("comment", "")) if isinstance(row.get("manifest"), dict) else "", key=f"comment_{period_id}")
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("Сохранить изменения", key=f"save_period_{period_id}"):
+                if date_from and date_to and date_from > date_to:
+                    st.error("Дата начала не может быть позже даты окончания.")
+                else:
+                    update_period_metadata(project_id, period_id, period_name=name, date_from=date_from, date_to=date_to, source_filename=filename, status=status, manifest_updates={"comment": comment})
+                    st.success("Период обновлен.")
+                    st.rerun()
+        with c2:
+            if st.button("Скрыть период", key=f"hide_period_{period_id}"):
+                delete_period(project_id, period_id, hard=False)
+                st.success("Период скрыт.")
+                st.rerun()
+
+
+def enrich_messages(messages: pd.DataFrame, event_discussions: pd.DataFrame, discussion_messages: pd.DataFrame, events: pd.DataFrame) -> pd.DataFrame:
+    if messages.empty:
+        return messages
+    out = messages.copy()
+    if not event_discussions.empty and not discussion_messages.empty:
+        link = discussion_messages.merge(event_discussions, on="discussion_id", how="left")
+        if "message_id" in link.columns and "event_id" in link.columns:
+            msg_event = link[["message_id", "event_id"]].drop_duplicates("message_id")
+            out = out.merge(msg_event, on="message_id", how="left")
+    if not events.empty and "event_id" in events.columns:
+        titles = events[["event_id", "event_title"]].drop_duplicates("event_id")
+        out = out.merge(titles, on="event_id", how="left")
+    return out
+
+
+def aggregate_events(events: pd.DataFrame) -> pd.DataFrame:
+    if events.empty:
         return events
-
-    events = events.copy()
+    df = events.copy()
+    df["title"] = df.get("event_title", "").fillna("Без названия").astype(str).replace("", "Без названия")
+    df["group_key"] = df["title"].str.lower().str.strip()
     rows = []
-    existing_ids = set(events.get("event_id", pd.Series(dtype=str)).astype(str))
-    for _, row in manual_events.iterrows():
-        event_id = str(row.get("event_id", "")).strip()
-        if not event_id or event_id in existing_ids:
+    for key, group in df.groupby("group_key", dropna=False):
+        row = {
+            "group_key": key,
+            "title": group["title"].iloc[0],
+            "description": pick_event_description(group),
+            "tags": " | ".join(sorted(set("|".join(group.get("main_tags", pd.Series(dtype=str)).fillna("").astype(str)).split("|")) - {""})),
+            "start_date": pd.to_datetime(group.get("start_date"), errors="coerce").min(),
+            "end_date": pd.to_datetime(group.get("end_date"), errors="coerce").max(),
+            "message_count": int(pd.to_numeric(group.get("message_count", 0), errors="coerce").fillna(0).sum()),
+            "chat_count": int(pd.to_numeric(group.get("chat_count", 0), errors="coerce").fillna(0).sum()),
+            "negative_count": int(pd.to_numeric(group.get("negative_count", 0), errors="coerce").fillna(0).sum()),
+            "importance_score": float(pd.to_numeric(group.get("importance_score", 0), errors="coerce").fillna(0).max()),
+            "event_ids": list(group["event_id"].astype(str)) if "event_id" in group.columns else [],
+        }
+        row["negative_share"] = row["negative_count"] / row["message_count"] if row["message_count"] else 0
+        rows.append(row)
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        out = out.sort_values(["importance_score", "message_count"], ascending=False)
+    return out
+
+
+def build_event_description(group: pd.DataFrame) -> str:
+    text = " ".join(group.get("event_summary", pd.Series(dtype=str)).fillna("").astype(str).tolist())
+    signals = []
+    patterns = [
+        ("законопроекты и регулирование", ["закон", "регулир", "штраф", "налог", "патент"]),
+        ("коэффициенты, тарифы и приоритет", ["коэфф", "тариф", "приоритет", "цена"]),
+        ("сбои приложения и обновления", ["сбой", "ошиб", "прилож", "обнов", "загруз"]),
+        ("выплаты и оплата", ["выплат", "оплат", "деньг"]),
+        ("блокировки и доступ к аккаунту", ["блок", "доступ", "аккаунт"]),
+        ("забастовки и бойкоты", ["забаст", "бойкот"]),
+        ("карты, адреса и навигация", ["карта", "адрес", "навиг", "гео"]),
+    ]
+    low = text.lower()
+    for label, keys in patterns:
+        if any(k in low for k in keys):
+            signals.append(label)
+    if not signals:
+        tags = " | ".join(sorted(set("|".join(group.get("main_tags", pd.Series(dtype=str)).fillna("").astype(str)).split("|")) - {""}))
+        return f"В теме обсуждались: {tags}." if tags else "В теме обсуждались связанные сообщения выбранного периода."
+    return "В теме обсуждались: " + "; ".join(signals[:5]) + "."
+
+
+
+def pick_event_description(group: pd.DataFrame) -> str:
+    """Return manual description if present; otherwise build an automatic one."""
+    for col in ["display_description", "manual_description", "event_description"]:
+        if col in group.columns:
+            vals = [str(x).strip() for x in group[col].fillna("").tolist() if str(x).strip()]
+            if vals:
+                return vals[0]
+    return build_event_description(group)
+
+
+def manual_payloads(manual_df: pd.DataFrame, table_name: str) -> list[dict[str, Any]]:
+    if manual_df is None or manual_df.empty or "table_name" not in manual_df.columns:
+        return []
+    rows = manual_df[manual_df["table_name"].astype(str) == table_name]
+    payloads: list[dict[str, Any]] = []
+    for _, row in rows.iterrows():
+        payload = row.get("payload") or {}
+        if isinstance(payload, dict):
+            payload = dict(payload)
+            payload.setdefault("_row_key", str(row.get("row_key") or ""))
+            payloads.append(payload)
+    return payloads
+
+
+def get_manual_state(project_id: str) -> dict[str, Any]:
+    try:
+        manual_df = list_manual(project_id)
+    except Exception:
+        manual_df = pd.DataFrame()
+
+    hidden_messages: set[str] = set()
+    hidden_message_keys: dict[str, str] = {}
+    for payload in manual_payloads(manual_df, "message_hidden"):
+        message_id = str(payload.get("message_id") or payload.get("_row_key", "").replace("message_hidden::", ""))
+        if message_id:
+            hidden_messages.add(message_id)
+            hidden_message_keys[message_id] = str(payload.get("_row_key") or f"message_hidden::{message_id}")
+
+    irrelevant_pairs: set[tuple[str, str]] = set()
+    irrelevant_keys: dict[tuple[str, str], str] = {}
+    for payload in manual_payloads(manual_df, "message_irrelevant"):
+        event_id = str(payload.get("event_id") or "")
+        message_id = str(payload.get("message_id") or "")
+        if event_id and message_id:
+            pair = (event_id, message_id)
+            irrelevant_pairs.add(pair)
+            irrelevant_keys[pair] = str(payload.get("_row_key") or f"message_irrelevant::{event_id}::{message_id}")
+
+    move_map: dict[str, str] = {}
+    for payload in manual_payloads(manual_df, "message_moves"):
+        message_id = str(payload.get("message_id") or payload.get("_row_key", "").replace("message_move::", ""))
+        target_event_id = str(payload.get("target_event_id") or "")
+        if message_id and target_event_id:
+            move_map[message_id] = target_event_id
+
+    event_edits: dict[str, dict[str, Any]] = {}
+    for payload in manual_payloads(manual_df, "event_edits"):
+        event_id = str(payload.get("event_id") or payload.get("_row_key", "").replace("event_edit::", ""))
+        if event_id:
+            event_edits[event_id] = payload
+
+    event_merges: dict[str, str] = {}
+    for payload in manual_payloads(manual_df, "event_merges"):
+        source_event_id = str(payload.get("source_event_id") or payload.get("_row_key", "").replace("event_merge::", ""))
+        target_event_id = str(payload.get("target_event_id") or "")
+        if source_event_id and target_event_id:
+            event_merges[source_event_id] = target_event_id
+
+    manual_events = manual_payloads(manual_df, "manual_events")
+
+    return {
+        "manual_df": manual_df,
+        "hidden_messages": hidden_messages,
+        "hidden_message_keys": hidden_message_keys,
+        "irrelevant_pairs": irrelevant_pairs,
+        "irrelevant_keys": irrelevant_keys,
+        "move_map": move_map,
+        "event_edits": event_edits,
+        "event_merges": event_merges,
+        "manual_events": manual_events,
+    }
+
+
+def append_manual_events(events: pd.DataFrame, manual_events: list[dict[str, Any]]) -> pd.DataFrame:
+    if not manual_events:
+        return events
+    rows = []
+    for payload in manual_events:
+        event_id = str(payload.get("event_id") or "").strip()
+        title = str(payload.get("title") or "").strip()
+        if not event_id or not title:
             continue
         rows.append({
             "event_id": event_id,
-            "event_title": str(row.get("title", "")).strip() or "Новый инфоповод",
-            "event_summary": str(row.get("summary", "")).strip(),
-            "main_tag": "ручной",
-            "main_tags": normalize_manual_tags(row.get("main_tags", "")),
-            "keywords": "",
-            "key_phrases": "",
+            "event_title": title,
+            "event_summary": str(payload.get("description") or ""),
+            "display_description": str(payload.get("description") or ""),
+            "main_tags": str(payload.get("tags") or "Ручной инфоповод"),
             "start_date": pd.NaT,
             "end_date": pd.NaT,
-            "discussion_count": 0,
             "message_count": 0,
             "chat_count": 0,
-            "author_count": 0,
             "negative_count": 0,
-            "toxic_count": 0,
-            "negative_share": 0.0,
-            "toxic_share": 0.0,
-            "importance_score": 0.0,
-            "status": str(row.get("status", "")).strip() or "новый",
-            "is_hidden": str(row.get("hidden", "0")).lower() in ["1", "true", "yes", "да"],
-            "is_manual": True,
+            "importance_score": 0,
+            "status": str(payload.get("status") or "active"),
+            "is_manual_event": True,
         })
-
     if not rows:
         return events
-
-    manual_df = pd.DataFrame(rows)
-    for col in events.columns:
-        if col not in manual_df.columns:
-            manual_df[col] = np.nan
-    for col in manual_df.columns:
-        if col not in events.columns:
-            events[col] = np.nan
-
-    return pd.concat([events, manual_df[events.columns]], ignore_index=True)
+    extra = pd.DataFrame(rows)
+    if events is None or events.empty:
+        return extra
+    return pd.concat([events, extra], ignore_index=True, sort=False)
 
 
-
-
-
-SUMMARY_STOPWORDS = {
-    "это", "как", "что", "или", "для", "при", "про", "без", "есть", "нет", "все", "уже", "еще", "ещё",
-    "там", "тут", "они", "она", "его", "мне", "нам", "вам", "тебя", "себя", "так", "такой", "такая",
-    "если", "когда", "куда", "где", "кто", "чем", "надо", "нужно", "можно", "нельзя", "будет", "были",
-    "был", "была", "будут", "этот", "эта", "эти", "эту", "того", "тоже", "очень", "просто",
-    "сейчас", "сегодня", "вчера", "завтра", "потом", "теперь", "больше", "меньше", "через", "после",
-    "водитель", "водители", "такси", "чат", "чате", "сообщение", "сказал", "говорят", "пишут",
-    "яндекс", "yandex", "про", "таксометр", "машина", "заказ", "заказы",
-}
-
-SUMMARY_RULES = [
-    ("законопроект и новые требования к работе такси", [r"законопроект\w*", r"\bзакон\w*", r"регулирован\w*", r"требован\w*", r"минтранс", r"госдум", r"реестр", r"разрешени\w*"]),
-    ("налоги, патенты и самозанятость водителей", [r"налог\w*", r"патент\w*", r"самозанят\w*", r"нпд", r"деклараци\w*", r"фнс", r"штраф\w*"]),
-    ("повышение или снижение коэффициентов", [r"коэфф\w*", r"кэф\w*", r"повыш\w*.{0,40}коэфф\w*", r"сниз\w*.{0,40}коэфф\w*", r"вырос\w*.{0,40}коэфф\w*"]),
-    ("приоритет, тарифы и распределение заказов", [r"приоритет\w*", r"тариф\w*", r"эконом", r"комфорт", r"комисси\w*", r"раздач\w* заказ\w*", r"распределен\w* заказ\w*"]),
-    ("невозможность загрузить или установить обновление", [r"обновлен\w*", r"обновить", r"скачать", r"загруз\w*", r"установ\w*", r"верси\w*", r"апдейт"]),
-    ("сбои, ошибки и зависания приложения", [r"сбой\w*", r"ошибк\w*", r"не работает", r"завис\w*", r"вылета\w*", r"лага\w*", r"глюч\w*", r"баг\w*"]),
-    ("проблемы с заказами, отменами и назначением поездок", [r"отмен\w*", r"назнач\w*", r"принять заказ", r"заказ\w*.{0,40}не приход", r"не дает заказ", r"цепочк\w*", r"подач\w*"]),
-    ("блокировки, доступ к аккаунту и проверки", [r"блокиров\w*", r"заблок\w*", r"аккаунт\w*", r"доступ\w*", r"провер\w*", r"верификац\w*", r"фотоконтроль"]),
-    ("оплата, выплаты и удержания", [r"оплат\w*", r"выплат\w*", r"деньг\w*", r"баланс\w*", r"удерж\w*", r"перевод\w*", r"компенсац\w*"]),
-    ("забастовка, бойкот и коллективные действия", [r"забастов\w*", r"бойкот\w*", r"стачк\w*", r"не выход\w* на лини\w*", r"акци\w* протест\w*"]),
-    ("WB Такси, условия запуска и сравнение с агрегаторами", [r"wb\s*такси", r"wildberries", r"вайлдбер\w*", r"вб\s*такси", r"wb"]),
-    ("Фастен и альтернативные сервисы для водителей", [r"фастен", r"fasten", r"альтернатив\w* агрегатор\w*", r"нов\w* сервис\w*"]),
-    ("карты, адреса, геолокация и навигация", [r"карт\w*", r"адрес\w*", r"геолокац\w*", r"gps", r"навигатор", r"точк\w* подач\w*", r"маршрут\w*"]),
-    ("аэропорты, очереди и заказы из аэропорта", [r"аэропорт\w*", r"шереметьево", r"домодедово", r"внуково", r"пулково", r"очеред\w*"]),
-    ("детские кресла и требования к заказам с детьми", [r"детск\w* кресл\w*", r"кресл\w*", r"ребен\w*", r"ребён\w*", r"дет\w* тариф\w*"]),
-    # Универсальные правила для проектов без такси-лексики.
-    ("проблемы, жалобы и негативный опыт", [r"проблем\w*", r"жалоб\w*", r"недоволь\w*", r"ошибк\w*", r"сбой\w*", r"дефект\w*", r"брак\w*", r"поврежд\w*"]),
-    ("цены, стоимость и условия", [r"цен\w*", r"стоимост\w*", r"прайс\w*", r"скидк\w*", r"акци\w*", r"дорог\w*", r"дешев\w*"]),
-    ("качество продукта или услуги", [r"качеств\w*", r"характерист\w*", r"материал\w*", r"прочност\w*", r"плотност\w*", r"толщин\w*", r"упаковк\w*"]),
-    ("наличие, поставки и логистика", [r"налич\w*", r"склад\w*", r"поставк\w*", r"доставк\w*", r"логист\w*", r"отгруз\w*", r"срок\w*", r"дефицит\w*"]),
-    ("монтаж, применение и эксплуатация", [r"монтаж\w*", r"установ\w*", r"применен\w*", r"использован\w*", r"эксплуатац\w*", r"строитель\w*", r"утепл\w*", r"изоляц\w*"]),
-    ("документы, сертификаты и требования", [r"сертификат\w*", r"документ\w*", r"деклараци\w*", r"гост\w*", r"снип\w*", r"требован\w*", r"стандарт\w*"]),
-    ("безопасность и пожарные свойства", [r"пожар\w*", r"огне\w*", r"горюч\w*", r"негорюч\w*", r"безопасност\w*"]),
-    ("конкуренты и сравнение на рынке", [r"конкурент\w*", r"аналог\w*", r"сравнен\w*", r"рынок\w*", r"бренд\w*"]),
-]
-
-
-def normalize_text_for_summary(text: str) -> str:
-    text = str(text or "").lower().replace("ё", "е")
-    text = re.sub(r"https?://\S+|t\.me/\S+", " ", text)
-    text = re.sub(r"[^а-яa-z0-9\s-]", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
-
-
-def summary_tokens(text: str) -> list[str]:
-    text = normalize_text_for_summary(text)
-    tokens = re.findall(r"[а-яa-z0-9]{3,}", text)
-    return [t for t in tokens if t not in SUMMARY_STOPWORDS and not t.isdigit()]
-
-
-def top_readable_phrases(texts, top_n: int = 5) -> list[str]:
-    """Return short readable frequent phrases as fallback details for summaries."""
-    counter: dict[str, int] = {}
-    for text in texts:
-        tokens = summary_tokens(str(text)[:2500])
-        for a, b in zip(tokens, tokens[1:]):
-            if a == b:
-                continue
-            phrase = f"{a} {b}"
-            counter[phrase] = counter.get(phrase, 0) + 1
-    ranked = sorted(counter.items(), key=lambda x: x[1], reverse=True)
-    return [p for p, c in ranked[:top_n] if c >= 2]
-
-
-def extract_summary_mentions(event_title: str, main_tags: str, event_messages: pd.DataFrame, keywords: str = "", phrases: str = "") -> list[str]:
-    """Extract user-facing thesis bullets from the most frequent signals in event messages."""
-    text_series = event_messages.get("text_clean", pd.Series(dtype=str)).dropna().astype(str)
-    if text_series.empty:
-        base = [p.strip() for p in str(phrases or "").split("|") if p.strip()]
-        base += [k.strip() for k in str(keywords or "").split("|") if k.strip()]
-        return base[:5]
-
-    full_text = "\n".join(text_series.head(350).tolist())
-    normalized = normalize_text_for_summary(full_text)
-
-    scored: list[tuple[int, str]] = []
-    for label, patterns in SUMMARY_RULES:
-        count = 0
-        for pattern in patterns:
-            count += len(re.findall(pattern, normalized, flags=re.IGNORECASE))
-        if count > 0:
-            scored.append((count, label))
-
-    title_tags = normalize_text_for_summary(f"{event_title} {main_tags}")
-    boosted = []
-    for count, label in scored:
-        boost = 2 if any(token in title_tags for token in summary_tokens(label)[:2]) else 0
-        boosted.append((count + boost, label))
-
-    mentions = [label for _, label in sorted(boosted, key=lambda x: x[0], reverse=True)]
-
-    for phrase in top_readable_phrases(text_series, top_n=5):
-        phrase = phrase.strip()
-        if phrase and all(phrase not in m for m in mentions):
-            mentions.append(phrase)
-        if len(mentions) >= 6:
-            break
-
-    clean: list[str] = []
-    seen: set[str] = set()
-    for item in mentions:
-        key = normalize_text_for_summary(item)
-        if not key or key in seen:
+def recompute_event_counts(events: pd.DataFrame, messages: pd.DataFrame) -> pd.DataFrame:
+    if events is None or events.empty or messages is None or messages.empty or "event_id" not in messages.columns:
+        return events
+    out = events.copy()
+    msg = messages.copy()
+    msg["event_id"] = msg["event_id"].fillna("").astype(str)
+    msg = msg[msg["event_id"].str.strip() != ""]
+    if msg.empty:
+        return out
+    grouped = msg.groupby("event_id", dropna=False)
+    for event_id, group in grouped:
+        mask = out["event_id"].astype(str) == str(event_id)
+        if not mask.any():
             continue
-        seen.add(key)
-        clean.append(item)
-        if len(clean) >= 6:
-            break
-
-    return clean
-
-
-def build_event_description(event_title: str, main_tags: str, event_messages: pd.DataFrame, keywords: str = "", phrases: str = "") -> str:
-    """Build concise thesis-style summary for table/card display."""
-    mentions = extract_summary_mentions(event_title, main_tags, event_messages, keywords=keywords, phrases=phrases)
-    if not mentions:
-        return "В теме обсуждались связанные сообщения по выбранному инфоповоду."
-    return "В теме обсуждались: " + "; ".join(mentions[:6]) + "."
-
-def build_auto_title_merge_map(events: pd.DataFrame) -> dict[str, str]:
-    """Map duplicate event titles to one representative event id.
-
-    This is intentionally done at the dashboard layer: source data stays detailed,
-    while the user sees one consolidated topic for identical event titles.
-    """
-    if events.empty or "final_event_id" not in events.columns or "event_title" not in events.columns:
-        return {}
-
-    work_events = events.copy()
-    if "is_manual" in work_events.columns:
-        work_events = work_events[~work_events["is_manual"].astype(str).str.lower().isin(["true", "1", "yes", "да"])]
-
-    representatives = (
-        work_events.groupby("final_event_id", as_index=False)
-        .agg(
-            event_title=("event_title", "first"),
-            message_count=("message_count", "sum"),
-            importance_score=("importance_score", "max"),
-        )
-    )
-    representatives["title_key"] = representatives["event_title"].apply(normalize_title_for_auto_merge)
-    representatives = representatives[representatives["title_key"].astype(str).str.len() > 0]
-
-    title_merge_map: dict[str, str] = {}
-    for _, group in representatives.groupby("title_key", sort=False):
-        if len(group) <= 1:
-            continue
-        ordered = group.sort_values(["message_count", "importance_score"], ascending=False)
-        target_id = str(ordered.iloc[0]["final_event_id"])
-        for source_id in ordered["final_event_id"].astype(str):
-            title_merge_map[source_id] = target_id
-
-    return title_merge_map
+        out.loc[mask, "message_count"] = int(len(group))
+        if "chat_title" in group.columns:
+            out.loc[mask, "chat_count"] = int(group["chat_title"].fillna("").astype(str).replace("", pd.NA).dropna().nunique())
+        elif "chat_id" in group.columns:
+            out.loc[mask, "chat_count"] = int(group["chat_id"].fillna("").astype(str).replace("", pd.NA).dropna().nunique())
+        if "sentiment" in group.columns:
+            out.loc[mask, "negative_count"] = int(group["sentiment"].fillna("").astype(str).str.lower().str.contains("нег").sum())
+        if "datetime" in group.columns:
+            dt = pd.to_datetime(group["datetime"], errors="coerce").dropna()
+            if not dt.empty:
+                out.loc[mask, "start_date"] = dt.min()
+                out.loc[mask, "end_date"] = dt.max()
+    return out
 
 
-def apply_manual_edits(
-    events: pd.DataFrame,
-    messages: pd.DataFrame,
-    discussion_messages: pd.DataFrame,
-    event_discussions: pd.DataFrame,
-    overrides: pd.DataFrame,
-    merges: pd.DataFrame,
-    message_overrides: pd.DataFrame,
-    message_exclusions: pd.DataFrame | None = None,
-    manual_events: pd.DataFrame | None = None,
-    message_topic_overrides: pd.DataFrame | None = None,
-):
-    events = append_manual_events(events.copy(), manual_events)
-    links = event_discussions.copy()
-    msg_links = discussion_messages.merge(links, on="discussion_id", how="left")
+def apply_manual_overrides(project_id: str, events: pd.DataFrame, messages: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
+    state = get_manual_state(project_id)
+    events_out = events.copy() if events is not None else pd.DataFrame()
+    messages_out = messages.copy() if messages is not None else pd.DataFrame()
 
-    merge_map = resolve_merge_map(merges)
+    events_out = append_manual_events(events_out, state["manual_events"])
+    if not events_out.empty:
+        for col in ["event_id", "event_title", "event_summary", "main_tags", "status", "display_description"]:
+            if col not in events_out.columns:
+                events_out[col] = ""
 
-    def apply_manual_event_merge(event_id):
-        return merge_map.get(event_id, event_id)
-
-    links["event_id"] = links["event_id"].apply(apply_manual_event_merge)
-    msg_links["event_id"] = msg_links["event_id"].apply(apply_manual_event_merge)
-    events["final_event_id"] = events["event_id"].apply(apply_manual_event_merge)
-
-    auto_title_merge_map = build_auto_title_merge_map(events)
-
-    def canonical_event_id(event_id):
-        event_id = merge_map.get(event_id, event_id)
-        return auto_title_merge_map.get(str(event_id), event_id)
-
-    if auto_title_merge_map:
-        links["event_id"] = links["event_id"].apply(canonical_event_id)
-        msg_links["event_id"] = msg_links["event_id"].apply(canonical_event_id)
-        events["final_event_id"] = events["final_event_id"].apply(canonical_event_id)
-
-    if message_overrides is not None and not message_overrides.empty:
-        move_map = {
-            r["message_id"]: canonical_event_id(r["target_event_id"])
-            for _, r in message_overrides.iterrows()
-            if str(r.get("target_event_id", "")).strip()
-        }
-        if move_map:
-            msg_links["event_id"] = msg_links.apply(
-                lambda r: move_map.get(r["message_id"], r["event_id"]),
-                axis=1,
-            )
-
-    if message_exclusions is not None and not message_exclusions.empty and len(msg_links):
-        exclusions = message_exclusions.copy()
-        exclusions["event_id"] = exclusions["event_id"].apply(canonical_event_id)
-        excluded_pairs = set(
-            zip(
-                exclusions["message_id"].astype(str),
-                exclusions["event_id"].astype(str),
-            )
-        )
-        msg_links = msg_links[
-            ~msg_links.apply(
-                lambda r: (str(r.get("message_id", "")), str(r.get("event_id", ""))) in excluded_pairs,
-                axis=1,
-            )
-        ]
-
-    msg_event = (
-        msg_links[["message_id", "event_id"]]
-        .dropna()
-        .drop_duplicates()
-        .rename(columns={"event_id": "final_event_id"})
-    )
-
-    enriched_messages = messages.merge(msg_event, on="message_id", how="left")
-
-    if message_topic_overrides is not None and not message_topic_overrides.empty and "message_id" in enriched_messages.columns:
-        topic_overrides = message_topic_overrides.copy()
-        topic_overrides["message_id"] = topic_overrides["message_id"].astype(str)
-        for _, topic_row in topic_overrides.iterrows():
-            msg_id = str(topic_row.get("message_id", "")).strip()
-            if not msg_id:
-                continue
-            mask = enriched_messages["message_id"].astype(str) == msg_id
+    # Apply event-level manual edits.
+    if not events_out.empty:
+        for event_id, payload in state["event_edits"].items():
+            mask = events_out["event_id"].astype(str) == str(event_id)
             if not mask.any():
                 continue
-            main_topic = str(topic_row.get("source_main_topic", "") or "").strip()
-            source_topics = str(topic_row.get("source_topics", "") or "").strip() or main_topic
-            if main_topic:
-                if "source_main_topic" not in enriched_messages.columns:
-                    enriched_messages["source_main_topic"] = ""
-                enriched_messages.loc[mask, "source_main_topic"] = main_topic
-            if source_topics:
-                if "source_topics" not in enriched_messages.columns:
-                    enriched_messages["source_topics"] = ""
-                enriched_messages.loc[mask, "source_topics"] = source_topics
-
-    if message_overrides is not None and not message_overrides.empty:
-        hidden_msg = set(
-            message_overrides.loc[
-                message_overrides["hidden"].astype(str).isin(["1", "true", "True"]),
-                "message_id",
-            ]
-        )
-        enriched_messages["message_hidden"] = enriched_messages["message_id"].isin(hidden_msg)
-    else:
-        enriched_messages["message_hidden"] = False
-
-    # If an uploaded file contains a human/external relevance column, exclude
-    # non-relevant messages from generated info events and summaries without
-    # deleting them from the stored message base.
-    if "source_relevant" in enriched_messages.columns:
-        relevant_mask = enriched_messages["source_relevant"].astype(str).str.lower().isin(["true", "1", "yes", "да"])
-        # Empty values mean that the file did not provide relevance markup.
-        empty_rel = enriched_messages["source_relevant"].astype(str).str.strip().eq("")
-        enriched_messages["message_hidden"] = enriched_messages["message_hidden"].astype(bool) | (~relevant_mask & ~empty_rel)
-
-    rows = []
-    for final_id, group in events.groupby("final_event_id", sort=False):
-        target = events[events["event_id"] == final_id]
-        base = target.iloc[0] if len(target) else group.iloc[0]
-
-        group_messages = enriched_messages[
-            (enriched_messages["final_event_id"] == final_id) & (~enriched_messages["message_hidden"].astype(bool))
-        ]
-
-        all_tags = sorted(set(t for tags in group.get("main_tags", pd.Series(dtype=str)).fillna("") for t in str(tags).split("|") if t.strip()))
-        if len(group_messages) and "tags" in group_messages.columns:
-            message_tags = sorted(set(t for tags in group_messages["tags"].fillna("") for t in str(tags).split("|") if t.strip()))
-            all_tags = sorted(set(all_tags) | set(message_tags))
-
-        all_source_main_topics = sorted(set(
-            t.strip()
-            for topics in group.get("source_main_topic", pd.Series(dtype=str)).fillna("")
-            for t in str(topics).split(";")
-            if t.strip()
-        ))
-        if len(group_messages) and "source_main_topic" in group_messages.columns:
-            msg_source_topics = sorted(set(
-                t.strip()
-                for topics in group_messages["source_main_topic"].fillna("")
-                for t in str(topics).split(";")
-                if t.strip()
-            ))
-            all_source_main_topics = sorted(set(all_source_main_topics) | set(msg_source_topics))
-
-        all_source_topics = sorted(set(
-            t.strip()
-            for topics in group.get("source_topics", pd.Series(dtype=str)).fillna("")
-            for t in re.split(r"[;|]", str(topics))
-            if t.strip()
-        ))
-        if len(group_messages) and "source_topics" in group_messages.columns:
-            msg_source_topics_all = sorted(set(
-                t.strip()
-                for topics in group_messages["source_topics"].fillna("")
-                for t in re.split(r"[;|]", str(topics))
-                if t.strip()
-            ))
-            all_source_topics = sorted(set(all_source_topics) | set(msg_source_topics_all))
-
-        keywords = sorted(set(t for tags in group.get("keywords", pd.Series(dtype=str)).fillna("") for t in str(tags).split("|") if t.strip()))
-        phrases = sorted(set(t for tags in group.get("key_phrases", pd.Series(dtype=str)).fillna("") for t in str(tags).split("|") if t.strip()))
-
-        start_date = group_messages["datetime"].min() if "datetime" in group_messages and len(group_messages) else group["start_date"].min()
-        end_date = group_messages["datetime"].max() if "datetime" in group_messages and len(group_messages) else group["end_date"].max()
-
-        msg_count = int(group_messages["message_id"].nunique()) if len(group_messages) else int(group["message_count"].sum())
-        chat_count = int(group_messages["chat_id"].nunique()) if "chat_id" in group_messages and len(group_messages) else int(group["chat_count"].sum())
-        author_count = int(group_messages["author_id"].nunique()) if "author_id" in group_messages and len(group_messages) else int(group["author_count"].sum())
-        negative_count = int(group_messages["is_negative"].astype(str).str.lower().isin(["true", "1"]).sum()) if "is_negative" in group_messages and len(group_messages) else int(group["negative_count"].sum())
-        toxic_count = int(group_messages["is_toxic"].astype(str).str.lower().isin(["true", "1"]).sum()) if "is_toxic" in group_messages and len(group_messages) else int(group["toxic_count"].sum())
-
-        event_title = str(base.get("event_title", ""))
-        manual_summary = str(base.get("event_summary", "") or "").strip() if str(base.get("is_manual", "")).lower() in ["true", "1", "yes", "да"] else ""
-        event_summary = manual_summary or build_event_description(
-            event_title,
-            "|".join(all_tags),
-            group_messages,
-            keywords="|".join(keywords),
-            phrases="|".join(phrases),
-        )
-
-        source_event_ids = sorted({str(x) for x in group.get("event_id", pd.Series(dtype=str)).dropna().astype(str).tolist()})
-
-        rows.append({
-            "event_id": final_id,
-            "source_event_ids": "|".join(source_event_ids),
-            "source_event_count": len(source_event_ids),
-            "event_title": event_title,
-            "event_summary": event_summary,
-            "main_tag": base.get("main_tag", ""),
-            "main_tags": "|".join(all_tags),
-            "source_main_topics": "; ".join(all_source_main_topics),
-            "source_topics": "; ".join(all_source_topics),
-            "microtopic": "; ".join(sorted(set(
-                t.strip()
-                for topics in group.get("microtopic", pd.Series(dtype=str)).fillna("")
-                for t in re.split(r"[;|]", str(topics))
-                if t.strip()
-            ))),
-            "keywords": "|".join(keywords),
-            "key_phrases": "|".join(phrases),
-            "start_date": start_date,
-            "end_date": end_date,
-            "discussion_count": int(links[links["event_id"] == final_id]["discussion_id"].nunique()) if len(links) else 0,
-            "message_count": msg_count,
-            "chat_count": chat_count,
-            "author_count": author_count,
-            "negative_count": negative_count,
-            "toxic_count": toxic_count,
-            "importance_score": float(group["importance_score"].max()),
-            "status": base.get("status", "новый"),
-            "is_hidden": bool(base.get("is_hidden", False)) if str(base.get("is_manual", "")).lower() in ["true", "1", "yes", "да"] else False,
-            "is_manual": str(base.get("is_manual", "")).lower() in ["true", "1", "yes", "да"],
-        })
-
-    visible_events = pd.DataFrame(rows)
-
-    if overrides is not None and not overrides.empty and len(visible_events):
-        ov = overrides.set_index("event_id")
-        for idx, row in visible_events.iterrows():
-            event_id = row["event_id"]
-            if event_id not in ov.index:
-                continue
-            o = ov.loc[event_id]
-            if str(o.get("title", "")).strip():
-                visible_events.at[idx, "event_title"] = o["title"]
-            if str(o.get("summary", "")).strip():
-                visible_events.at[idx, "event_summary"] = o["summary"]
-            if str(o.get("status", "")).strip():
-                visible_events.at[idx, "status"] = o["status"]
-            if str(o.get("priority", "")).strip():
-                visible_events.at[idx, "priority"] = o["priority"]
-            hidden_val = str(o.get("hidden", "0")).lower()
-            visible_events.at[idx, "is_hidden"] = hidden_val in ["1", "true", "yes", "да"]
-
-    if len(visible_events):
-        visible_events["negative_share"] = np.where(
-            visible_events["message_count"] > 0,
-            visible_events["negative_count"] / visible_events["message_count"],
-            0,
-        )
-        visible_events["toxic_share"] = np.where(
-            visible_events["message_count"] > 0,
-            visible_events["toxic_count"] / visible_events["message_count"],
-            0,
-        )
-        visible_events = visible_events.sort_values(["importance_score", "message_count"], ascending=False)
-
-    return visible_events, enriched_messages
-
-
-# -----------------------------------------------------------------------------
-# Macro-events: semantic consolidation layer above generated information events
-# -----------------------------------------------------------------------------
-
-
-CONSOLIDATION_LEVELS = {
-    "balanced": "Сбалансировано",
-    "large": "Крупные темы",
-    "detailed": "Подробно",
-}
-
-
-def _normalize_macro_value(value: str) -> str:
-    """Normalize text for stable macro-event grouping keys."""
-    value = str(value or "").strip().lower().replace("ё", "е")
-    value = re.sub(r"https?://\S+|t\.me/\S+", " ", value)
-    value = re.sub(r"[^0-9a-zа-я\s_-]+", " ", value)
-    value = re.sub(r"\s+", " ", value).strip(" _-")
-    return value
-
-
-def _first_split_value(value: str, separators: str = r"[;|,]") -> str:
-    for item in re.split(separators, str(value or "")):
-        item = re.sub(r"\s+", " ", item).strip()
-        if item and item.lower() not in {"nan", "none", "nat", "<na>"}:
-            return item
-    return ""
-
-
-def _split_unique_values(value: str, separators: str = r"[;|,]") -> list[str]:
-    result: list[str] = []
-    seen: set[str] = set()
-    for item in re.split(separators, str(value or "")):
-        item = re.sub(r"\s+", " ", item).strip()
-        if not item or item.lower() in {"nan", "none", "nat", "<na>"}:
-            continue
-        key = item.lower().replace("ё", "е")
-        if key not in seen:
-            seen.add(key)
-            result.append(item)
-    return result
-
-
-def _pipe_unique(values: list[str]) -> str:
-    result: list[str] = []
-    seen: set[str] = set()
-    for raw in values:
-        for item in _split_unique_values(raw, separators=r"[|;,]"):
-            key = item.lower().replace("ё", "е")
-            if key not in seen:
-                seen.add(key)
-                result.append(item)
-    return "|".join(result)
-
-
-def _semi_unique(values: list[str]) -> str:
-    result: list[str] = []
-    seen: set[str] = set()
-    for raw in values:
-        for item in _split_unique_values(raw, separators=r"[;|,]"):
-            key = item.lower().replace("ё", "е")
-            if key not in seen:
-                seen.add(key)
-                result.append(item)
-    return "; ".join(result)
-
-
-def _majority_value(values: list[str], fallback: str = "") -> str:
-    counter: Counter[str] = Counter()
-    original: dict[str, str] = {}
-    for raw in values:
-        value = re.sub(r"\s+", " ", str(raw or "")).strip()
-        if not value or value.lower() in {"nan", "none", "nat", "<na>"}:
-            continue
-        key = value.lower().replace("ё", "е")
-        counter[key] += 1
-        original.setdefault(key, value)
-    if not counter:
-        return fallback
-    key = counter.most_common(1)[0][0]
-    return original.get(key, fallback)
-
-
-def _expanded_source_event_ids(row: pd.Series) -> set[str]:
-    """Return all underlying source ids behind an event or macro-event row."""
-    ids: set[str] = set()
-    for col in ["source_event_ids", "macro_source_event_ids"]:
-        raw = str(row.get(col, "") or "")
-        for item in raw.split("|"):
-            item = item.strip()
-            if item:
-                ids.add(item)
-    event_id = str(row.get("event_id", "") or "").strip()
-    if event_id and not event_id.startswith("macro_"):
-        ids.add(event_id)
-    primary = str(row.get("primary_source_event_id", "") or "").strip()
-    if primary:
-        ids.add(primary)
-    return ids
-
-
-def _event_consolidation_key(row: pd.Series, level: str) -> str:
-    """Build a stable semantic bucket key for macro-event grouping.
-
-    The key intentionally prefers human/source topic markup when present, then
-    falls back to the internal microtopic and normalized title. This keeps the
-    existing fine-grained clustering as a source of evidence while showing a
-    cleaner layer in the dashboard.
-    """
-    event_id = str(row.get("event_id", "") or "").strip()
-    if str(row.get("is_manual", "")).lower() in {"true", "1", "yes", "да"}:
-        return f"manual:{event_id}"
-
-    if level == "detailed":
-        return f"event:{event_id}"
-
-    title_key = normalize_title_for_auto_merge(str(row.get("event_title", "") or ""))
-    title_key = _normalize_macro_value(title_key)
-    main_tag = _first_split_value(str(row.get("main_tags", "") or row.get("main_tag", "")), separators=r"[|;,]")
-    main_tag_key = _normalize_macro_value(main_tag)
-    microtopic = _normalize_macro_value(str(row.get("microtopic", "") or ""))
-    source_topic = _first_split_value(
-        str(row.get("source_main_topics", "") or row.get("source_main_topic", "") or row.get("source_topics", "")),
-        separators=r"[;|]",
-    )
-    source_topic_key = _normalize_macro_value(source_topic)
-
-    if level == "large":
-        if source_topic_key:
-            return f"large:source:{source_topic_key}"
-        if microtopic and microtopic != "other":
-            return f"large:micro:{microtopic}"
-        if main_tag_key and main_tag_key not in {"без тега", "яндекс"}:
-            return f"large:tag:{main_tag_key}"
-        return f"large:title:{title_key or event_id}"
-
-    # balanced: merge repeated waves of the same source/microtopic or stable title.
-    start_dt = pd.to_datetime(row.get("start_date", None), errors="coerce")
-    day_key = start_dt.strftime("%Y-%m-%d") if not pd.isna(start_dt) else "no_date"
-
-    if source_topic_key:
-        detail_key = microtopic or main_tag_key or title_key
-        return f"balanced:source:{source_topic_key}:{detail_key}:day:{day_key}"
-    if microtopic and microtopic != "other":
-        return f"balanced:micro:{microtopic}:{title_key or main_tag_key}:day:{day_key}"
-    return f"balanced:title:{main_tag_key}:{title_key or event_id}:day:{day_key}"
-
-
-def _macro_event_id(key: str, source_event_ids: set[str], level: str) -> str:
-    raw = f"{level}|{key}|{'|'.join(sorted(source_event_ids))}"
-    digest = hashlib.md5(raw.encode("utf-8", errors="ignore")).hexdigest()[:12]
-    return f"macro_{digest}"
-
-
-def _primary_source_event_id(group: pd.DataFrame) -> str:
-    if group is None or group.empty:
-        return ""
-    work = group.copy()
-    if "message_count" not in work.columns:
-        work["message_count"] = 0
-    if "importance_score" not in work.columns:
-        work["importance_score"] = 0
-    ordered = work.sort_values(["message_count", "importance_score"], ascending=False)
-    for _, row in ordered.iterrows():
-        candidate = str(row.get("primary_source_event_id", "") or row.get("event_id", "") or "").strip()
-        if candidate and not candidate.startswith("macro_"):
-            return candidate
-        ids = _expanded_source_event_ids(row)
-        if ids:
-            return sorted(ids)[0]
-    return ""
-
-
-def _status_for_macro(group: pd.DataFrame) -> str:
-    statuses = [str(x).strip() for x in group.get("status", pd.Series(dtype=str)).fillna("").tolist() if str(x).strip()]
-    if not statuses:
-        return "новый"
-    for preferred in ["важное", "в работе", "новый", "решено", "шум"]:
-        if preferred in statuses:
-            return preferred
-    return statuses[0]
-
-
-def apply_event_overrides_to_visible_events(events: pd.DataFrame, overrides: pd.DataFrame | None) -> pd.DataFrame:
-    """Apply manual title/summary/status overrides to generated or macro events."""
-    if events is None or events.empty or overrides is None or overrides.empty or "event_id" not in events.columns:
-        return events
-
-    result = events.copy()
-    ov = overrides.copy()
-    if "event_id" not in ov.columns:
-        return result
-    ov = ov.set_index(ov["event_id"].astype(str), drop=False)
-
-    for idx, row in result.iterrows():
-        event_id = str(row.get("event_id", ""))
-        if event_id not in ov.index:
-            continue
-        override = ov.loc[event_id]
-        if isinstance(override, pd.DataFrame):
-            override = override.iloc[-1]
-        if str(override.get("title", "") or "").strip():
-            result.at[idx, "event_title"] = str(override.get("title")).strip()
-        if str(override.get("summary", "") or "").strip():
-            result.at[idx, "event_summary"] = str(override.get("summary")).strip()
-        if str(override.get("status", "") or "").strip():
-            result.at[idx, "status"] = str(override.get("status")).strip()
-        if str(override.get("priority", "") or "").strip():
-            result.at[idx, "priority"] = str(override.get("priority")).strip()
-        if "hidden" in override.index:
-            result.at[idx, "is_hidden"] = str(override.get("hidden", "0")).lower() in ["1", "true", "yes", "да"]
-    return result
-
-
-def build_consolidated_events(
-    events: pd.DataFrame,
-    messages: pd.DataFrame,
-    level: str = "balanced",
-    overrides: pd.DataFrame | None = None,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Build macro-events for dashboard/report display and remap messages to them.
-
-    level=detailed keeps the existing event layer.
-    level=balanced groups repeated waves inside the same source topic/microtopic.
-    level=large groups to broad agenda themes for executive digests.
-    """
-    if not isinstance(events, pd.DataFrame) or events.empty:
-        return events, messages
-
-    level = str(level or "balanced").strip().lower()
-    if level not in CONSOLIDATION_LEVELS:
-        level = "balanced"
-
-    display_messages = messages.copy() if isinstance(messages, pd.DataFrame) else pd.DataFrame()
-    if "final_event_id" in display_messages.columns and "source_final_event_id" not in display_messages.columns:
-        display_messages["source_final_event_id"] = display_messages["final_event_id"].astype(str)
-
-    base_events = events.copy()
-    if "source_event_ids" not in base_events.columns:
-        base_events["source_event_ids"] = base_events["event_id"].astype(str)
-    if "source_event_count" not in base_events.columns:
-        base_events["source_event_count"] = 1
-    if "primary_source_event_id" not in base_events.columns:
-        base_events["primary_source_event_id"] = base_events["event_id"].astype(str)
-    base_events["consolidation_key"] = base_events.apply(lambda row: _event_consolidation_key(row, level), axis=1)
-
-    if level == "detailed":
-        detailed = base_events.copy()
-        detailed["consolidation_level"] = "detailed"
-        detailed["macro_event_id"] = detailed["event_id"].astype(str)
-        detailed["primary_source_event_id"] = detailed["primary_source_event_id"].fillna("").astype(str)
-        if "final_event_id" in display_messages.columns:
-            display_messages["final_event_id"] = display_messages["source_final_event_id"].astype(str)
-            display_messages["macro_event_id"] = display_messages["final_event_id"]
-        return apply_event_overrides_to_visible_events(detailed, overrides), display_messages
-
-    rows: list[dict] = []
-    event_to_macro: dict[str, str] = {}
-
-    visible_message_base = display_messages.copy()
-    if "message_hidden" in visible_message_base.columns:
-        visible_message_base = visible_message_base[~visible_message_base["message_hidden"].astype(bool)]
-
-    for _, group in base_events.groupby("consolidation_key", sort=False):
-        group = group.copy()
-        event_ids_for_messages = set(group["event_id"].dropna().astype(str))
-        source_event_ids: set[str] = set()
-        for _, source_row in group.iterrows():
-            source_event_ids.update(_expanded_source_event_ids(source_row))
-        if not source_event_ids:
-            source_event_ids = event_ids_for_messages
-
-        macro_id = _macro_event_id(str(group["consolidation_key"].iloc[0]), source_event_ids, level)
-        for event_id in event_ids_for_messages:
-            event_to_macro[str(event_id)] = macro_id
-
-        if "source_final_event_id" in visible_message_base.columns:
-            group_messages = visible_message_base[visible_message_base["source_final_event_id"].astype(str).isin(event_ids_for_messages)].copy()
-        else:
-            group_messages = pd.DataFrame()
-
-        group_sorted = group.sort_values(["message_count", "importance_score"], ascending=False)
-        base = group_sorted.iloc[0]
-
-        source_topics = _semi_unique(
-            group.get("source_main_topics", pd.Series(dtype=str)).fillna("").astype(str).tolist()
-            + group.get("source_topics", pd.Series(dtype=str)).fillna("").astype(str).tolist()
-        )
-        microtopics = _semi_unique(group.get("microtopic", pd.Series(dtype=str)).fillna("").astype(str).tolist())
-        main_tags = _pipe_unique(
-            group.get("main_tags", pd.Series(dtype=str)).fillna("").astype(str).tolist()
-            + group.get("main_tag", pd.Series(dtype=str)).fillna("").astype(str).tolist()
-        )
-        keywords = _pipe_unique(group.get("keywords", pd.Series(dtype=str)).fillna("").astype(str).tolist())
-        phrases = _pipe_unique(group.get("key_phrases", pd.Series(dtype=str)).fillna("").astype(str).tolist())
-
-        if level == "large" and source_topics:
-            event_title = _first_split_value(source_topics, separators=r"[;|]")
-        else:
-            event_title = str(base.get("event_title", "") or "Укрупненный инфоповод").strip()
-
-        if not group_messages.empty and "datetime" in group_messages.columns:
-            start_date = pd.to_datetime(group_messages["datetime"], errors="coerce").min()
-            end_date = pd.to_datetime(group_messages["datetime"], errors="coerce").max()
-        else:
-            start_date = pd.to_datetime(group.get("start_date", pd.Series(dtype=str)), errors="coerce").min()
-            end_date = pd.to_datetime(group.get("end_date", pd.Series(dtype=str)), errors="coerce").max()
-
-        if not group_messages.empty:
-            msg_count = int(group_messages["message_id"].nunique()) if "message_id" in group_messages.columns else int(len(group_messages))
-            chat_count = int(group_messages["chat_id"].nunique()) if "chat_id" in group_messages.columns else int(group.get("chat_count", pd.Series(dtype=int)).sum())
-            author_count = int(group_messages["author_id"].nunique()) if "author_id" in group_messages.columns else int(group.get("author_count", pd.Series(dtype=int)).sum())
-            if "is_negative" in group_messages.columns:
-                negative_count = int(group_messages["is_negative"].astype(str).str.lower().isin(["true", "1", "yes", "да"]).sum())
-            elif "sentiment" in group_messages.columns:
-                negative_count = int(group_messages["sentiment"].astype(str).str.lower().str.contains("нег|neg", regex=True, na=False).sum())
-            else:
-                negative_count = int(group.get("negative_count", pd.Series(dtype=int)).sum())
-            toxic_count = int(group_messages["is_toxic"].astype(str).str.lower().isin(["true", "1", "yes", "да"]).sum()) if "is_toxic" in group_messages.columns else int(group.get("toxic_count", pd.Series(dtype=int)).sum())
-        else:
-            msg_count = int(pd.to_numeric(group.get("message_count", pd.Series(dtype=int)), errors="coerce").fillna(0).sum())
-            chat_count = int(pd.to_numeric(group.get("chat_count", pd.Series(dtype=int)), errors="coerce").fillna(0).sum())
-            author_count = int(pd.to_numeric(group.get("author_count", pd.Series(dtype=int)), errors="coerce").fillna(0).sum())
-            negative_count = int(pd.to_numeric(group.get("negative_count", pd.Series(dtype=int)), errors="coerce").fillna(0).sum())
-            toxic_count = int(pd.to_numeric(group.get("toxic_count", pd.Series(dtype=int)), errors="coerce").fillna(0).sum())
-
-        summary = build_event_description(
-            event_title,
-            main_tags,
-            group_messages,
-            keywords=keywords,
-            phrases=phrases,
-        )
-        if len(group) > 1:
-            summary = f"{summary} Укрупнено из {len(group)} первичных событий/волн."
-
-        primary_source_id = _primary_source_event_id(group)
-        rows.append({
-            "event_id": macro_id,
-            "macro_event_id": macro_id,
-            "primary_source_event_id": primary_source_id,
-            "source_event_ids": "|".join(sorted(source_event_ids)),
-            "macro_source_event_ids": "|".join(sorted(source_event_ids)),
-            "source_event_count": int(len(source_event_ids)),
-            "event_title": event_title,
-            "event_summary": summary,
-            "main_tag": _majority_value(group.get("main_tag", pd.Series(dtype=str)).fillna("").astype(str).tolist(), fallback=_first_split_value(main_tags, separators=r"[|]")),
-            "main_tags": main_tags,
-            "source_main_topics": source_topics,
-            "source_topics": source_topics,
-            "microtopic": microtopics,
-            "keywords": keywords,
-            "key_phrases": phrases,
-            "start_date": start_date,
-            "end_date": end_date,
-            "discussion_count": int(pd.to_numeric(group.get("discussion_count", pd.Series(dtype=int)), errors="coerce").fillna(0).sum()),
-            "message_count": msg_count,
-            "chat_count": chat_count,
-            "author_count": author_count,
-            "negative_count": negative_count,
-            "toxic_count": toxic_count,
-            "negative_share": negative_count / msg_count if msg_count else 0.0,
-            "toxic_share": toxic_count / msg_count if msg_count else 0.0,
-            "importance_score": float(pd.to_numeric(group.get("importance_score", pd.Series(dtype=float)), errors="coerce").fillna(0).max()) + float(np.log1p(max(len(group) - 1, 0))),
-            "status": _status_for_macro(group),
-            "is_hidden": bool(group.get("is_hidden", pd.Series([False] * len(group))).astype(bool).all()),
-            "is_manual": False,
-            "consolidation_level": level,
-        })
-
-    macro_events = pd.DataFrame(rows)
-    if macro_events.empty:
-        return base_events, display_messages
-
-    if "final_event_id" in display_messages.columns:
-        display_messages["final_event_id"] = display_messages["source_final_event_id"].astype(str).map(event_to_macro).fillna(display_messages["source_final_event_id"].astype(str))
-        display_messages["macro_event_id"] = display_messages["final_event_id"]
-
-    macro_events = apply_event_overrides_to_visible_events(macro_events, overrides)
-    macro_events = macro_events.sort_values(["importance_score", "message_count"], ascending=False).reset_index(drop=True)
-    return macro_events, display_messages
-
-
-def render_consolidation_level_control(can_edit: bool = False) -> str:
-    """Sidebar control for macro-event detail level."""
-    labels = {
-        "balanced": "Сбалансировано — рекомендовано",
-        "large": "Крупные темы — для отчета",
-        "detailed": "Подробно — первичные инфоповоды",
-    }
-    selected = st.sidebar.selectbox(
-        "Уровень сборки инфоповодов",
-        options=["balanced", "large", "detailed"],
-        index=0,
-        format_func=lambda x: labels.get(x, x),
-        help=(
-            "Сбалансировано склеивает повторяющиеся волны внутри одной смысловой темы. "
-            "Крупные темы сильнее укрупняют повестку для управленческого дайджеста. "
-            "Подробно показывает первичные инфоповоды как раньше."
-        ),
-    )
-    if can_edit:
-        st.sidebar.caption("Новый слой не удаляет первичные события: он только укрупняет их для просмотра и выгрузки.")
-    return selected
-
-
-def render_consolidation_quality(raw_events: pd.DataFrame, visible_events: pd.DataFrame, messages: pd.DataFrame, level: str, can_edit: bool = False) -> None:
-    """Show compact quality metrics for the selected consolidation layer."""
-    if not can_edit or raw_events is None or visible_events is None or raw_events.empty:
-        return
-
-    raw_count = int(len(raw_events))
-    visible_count = int(len(visible_events))
-    hidden_count = int(visible_events.get("is_hidden", pd.Series(dtype=bool)).astype(bool).sum()) if "is_hidden" in visible_events.columns else 0
-    visible_non_hidden = max(0, visible_count - hidden_count)
-    msg_count = int(len(messages)) if isinstance(messages, pd.DataFrame) and not messages.empty else int(raw_events.get("message_count", pd.Series(dtype=int)).sum())
-    avg_raw = msg_count / raw_count if raw_count else 0
-    avg_visible = msg_count / visible_non_hidden if visible_non_hidden else 0
-
-    with st.sidebar.expander("Качество сборки", expanded=False):
-        st.write(f"Первичных инфоповодов: **{raw_count:,}**".replace(",", " "))
-        st.write(f"Показано на выбранном уровне: **{visible_non_hidden:,}**".replace(",", " "))
-        st.write(f"Среднее сообщений на первичный инфоповод: **{avg_raw:.1f}**")
-        st.write(f"Среднее сообщений на текущий инфоповод: **{avg_visible:.1f}**")
-        if level != "detailed":
-            reduction = (1 - visible_non_hidden / raw_count) * 100 if raw_count else 0
-            st.write(f"Укрупнение: **−{reduction:.0f}%** тем")
-        if "source_event_count" in visible_events.columns and level != "detailed":
-            candidates = visible_events[visible_events["source_event_count"].fillna(1).astype(int) > 1]
-            st.write(f"Укрупненных тем: **{len(candidates):,}**".replace(",", " "))
-
-
-
-def format_pct(value) -> str:
-    try:
-        return f"{float(value) * 100:.0f}%"
-    except Exception:
-        return "0%"
-
-
-def parse_date_value(value):
-    """Parse a date value safely and prefer Russian DD.MM.YYYY for user input."""
-    if value is None:
-        return None
-    try:
-        if pd.isna(value):
-            return None
-    except (TypeError, ValueError):
-        pass
-    if isinstance(value, pd.Timestamp):
-        return value.date()
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-
-    text = str(value or "").strip()
-    if not text or text.lower() in {"nat", "nan", "none", "null", "<na>"}:
-        return None
-
-    iso_match = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})", text)
-    if iso_match:
-        try:
-            return date(int(iso_match.group(1)), int(iso_match.group(2)), int(iso_match.group(3)))
-        except ValueError:
-            return None
-
-    ru_match = re.match(r"^(\d{1,2})[.](\d{1,2})[.](\d{2,4})$", text)
-    if ru_match:
-        day, month, year = [int(x) for x in ru_match.groups()]
-        if year < 100:
-            year += 2000
-        try:
-            return date(year, month, day)
-        except ValueError:
-            return None
-
-    dt = pd.to_datetime(text, errors="coerce", dayfirst=True)
-    if pd.isna(dt):
-        return None
-    return dt.date()
-
-def date_to_iso(value) -> str | None:
-    parsed = parse_date_value(value)
-    return parsed.isoformat() if parsed else None
-
-
-def format_date(value) -> str:
-    """Return a user-facing date without time: DD.MM.YYYY."""
-    parsed = parse_date_value(value)
-    if parsed is None:
-        return ""
-    try:
-        if pd.isna(parsed):
-            return ""
-    except (TypeError, ValueError):
-        pass
-    try:
-        return parsed.strftime("%d.%m.%Y")
-    except Exception:
-        return ""
-
-def format_date_series(series: pd.Series) -> pd.Series:
-    """Format pandas datetime/string series as DD.MM.YYYY strings for display tables."""
-    return series.apply(format_date).fillna("")
-
-
-def period_note_from_manifest(value) -> str:
-    if isinstance(value, dict):
-        return str(value.get("period_note", "") or "")
-    return ""
-
-
-def parse_user_date(value: str):
-    return date_to_iso(value)
-
-
-def format_period(row: pd.Series) -> str:
-    start_s = format_date(row.get("start_date"))
-    end_s = format_date(row.get("end_date"))
-
-    if not start_s:
-        return end_s
-    if not end_s or start_s == end_s:
-        return start_s
-    return f"{start_s} — {end_s}"
-
-def get_selected_rows(event) -> list[int]:
-    try:
-        return list(event.selection.rows)
-    except Exception:
-        try:
-            return list(event.get("selection", {}).get("rows", []))
-        except Exception:
-            return []
-
-
-def normalize_search_query(value: str) -> str:
-    """Normalize user-entered text search query for Russian text."""
-    return re.sub(r"\s+", " ", str(value or "").lower().replace("ё", "е")).strip()
-
-
-def filter_messages_by_word(messages: pd.DataFrame, query: str) -> pd.DataFrame:
-    """Return visible messages whose text contains the entered word or phrase."""
-    q = normalize_search_query(query)
-    if not q or not isinstance(messages, pd.DataFrame) or messages.empty:
-        return messages.iloc[0:0].copy() if isinstance(messages, pd.DataFrame) else pd.DataFrame()
-
-    work = messages
-    if "_message_hidden_bool" in work.columns:
-        work = work[~work["_message_hidden_bool"].astype(bool)]
-    elif "message_hidden" in work.columns:
-        work = work[~work["message_hidden"].astype(bool)]
-
-    if "_search_text" in work.columns:
-        text = work["_search_text"].fillna("").astype(str)
-    elif "text_clean" in work.columns:
-        text = (
-            work["text_clean"]
-            .fillna("")
-            .astype(str)
-            .str.lower()
-            .str.replace("ё", "е", regex=False)
-        )
-    else:
-        return work.iloc[0:0].copy()
-    return work[text.str.contains(q, regex=False, na=False)].copy()
-
-
-def apply_filters(events: pd.DataFrame, messages: pd.DataFrame) -> tuple[pd.DataFrame, str, pd.DataFrame]:
-    st.sidebar.header("Фильтры")
-
-    filtered = events.copy()
-    empty_messages = messages.iloc[0:0].copy() if isinstance(messages, pd.DataFrame) else pd.DataFrame()
-    if filtered.empty:
-        return filtered, "", empty_messages
-
-    word_query = st.sidebar.text_input(
-        "Слово в тексте сообщений",
-        placeholder="например: налог, коэффициент, обновление",
-        help="Фильтр ищет введенное слово или фразу именно в текстах сообщений, а не в названии темы.",
-    )
-    word_matches = filter_messages_by_word(messages, word_query) if word_query else empty_messages
-
-    all_tags = sorted(set(t for tags in filtered.get("main_tags", pd.Series(dtype=str)).fillna("") for t in str(tags).split("|") if t.strip()))
-    selected_tags = st.sidebar.multiselect("Теги", all_tags)
-
-    all_source_topics = sorted(set(
-        t.strip()
-        for topics in filtered.get("source_main_topics", pd.Series(dtype=str)).fillna("")
-        for t in str(topics).split(";")
-        if t.strip()
-    ))
-    selected_source_topics = st.sidebar.multiselect(
-        "Тема из файла",
-        all_source_topics,
-        help="Появляется, если в загруженной выгрузке есть колонка «Основная тема». Используется как верхний тематический слой.",
-    ) if all_source_topics else []
-
-    statuses = [s for s in STATUS_OPTIONS if s in set(filtered.get("status", pd.Series(dtype=str)).fillna("").astype(str))]
-    selected_statuses = st.sidebar.multiselect("Статус", statuses)
-
-    only_attention = st.sidebar.checkbox("Только требующие внимания", value=False)
-
-    with st.sidebar.expander("Дополнительно", expanded=False):
-        show_hidden = st.checkbox("Показывать скрытые", value=False)
-        negative_only = st.checkbox("Только с негативом", value=False)
-        min_importance = st.slider(
-            "Минимальная важность",
-            0.0,
-            float(max(filtered["importance_score"].max(), 1.0)),
-            0.0,
-        )
-
-    if not show_hidden and "is_hidden" in filtered.columns:
-        filtered = filtered[~filtered["is_hidden"].astype(bool)]
-
-    if word_query:
-        matched_event_ids = set(word_matches.get("final_event_id", pd.Series(dtype=str)).dropna().astype(str))
-        filtered = filtered[filtered["event_id"].astype(str).isin(matched_event_ids)]
-
-    if selected_tags:
-        filtered = filtered[
-            filtered["main_tags"].fillna("").apply(
-                lambda x: bool(set(selected_tags) & {t.strip() for t in str(x).split("|") if t.strip()})
-            )
-        ]
-
-    if selected_source_topics and "source_main_topics" in filtered.columns:
-        selected_source_set = set(selected_source_topics)
-        filtered = filtered[
-            filtered["source_main_topics"].fillna("").apply(
-                lambda x: bool(selected_source_set & {t.strip() for t in str(x).split(";") if t.strip()})
-            )
-        ]
-
-    if selected_statuses:
-        filtered = filtered[filtered["status"].isin(selected_statuses)]
-
-    filtered = filtered[filtered["importance_score"] >= min_importance]
-
-    if negative_only:
-        filtered = filtered[filtered["negative_count"] > 0]
-
-    if only_attention:
-        filtered = filtered[
-            (filtered["importance_score"] >= filtered["importance_score"].quantile(0.70))
-            | (filtered["negative_share"] >= 0.25)
-            | (filtered["toxic_share"] >= 0.10)
-            | (filtered["main_tags"].fillna("").str.contains("Забастовка|Законы", regex=True))
-        ]
-
-    return filtered.sort_values(["importance_score", "message_count"], ascending=False), word_query, word_matches
-
-def create_manual_event_form(conn, key_prefix: str = "manual_event", *, compact: bool = False) -> str | None:
-    """Render a form for creating a user-defined information event."""
-    with st.form(f"{key_prefix}_form"):
-        title = st.text_input("Название инфоповода", placeholder="Например: Проблемы с детскими креслами")
-        summary = st.text_area(
-            "Описание",
-            placeholder="Например: В теме обсуждались: требования к детским креслам; отказы от заказов с детьми; штрафы.",
-            height=90 if compact else 130,
-        )
-        tags = st.text_input("Теги", placeholder="через запятую: Яндекс, детские кресла, тарифы")
-        status = st.selectbox(
-            "Статус",
-            STATUS_OPTIONS,
-            index=STATUS_OPTIONS.index("новый") if "новый" in STATUS_OPTIONS else 0,
-            key=f"{key_prefix}_status",
-        )
-        note = st.text_input("Комментарий модератора", value="", key=f"{key_prefix}_note")
-        submitted = st.form_submit_button("Создать инфоповод")
-        if submitted:
-            try:
-                new_id = create_manual_event(
-                    conn,
-                    title=title,
-                    summary=summary,
-                    status=status,
-                    main_tags=normalize_manual_tags(tags),
-                    note=note,
-                )
-                st.success("Инфоповод создан. Теперь в него можно переносить сообщения.")
-                st.cache_data.clear()
-                return new_id
-            except Exception as e:
-                st.error(str(e))
-    return None
-
-
-def show_manual_event_creator(conn):
-    with st.sidebar.expander("Создать инфоповод", expanded=False):
-        st.caption("Используйте, если нужной темы нет в списке. Новый инфоповод появится в таблице и в списке для переноса сообщений.")
-        new_id = create_manual_event_form(conn, key_prefix="sidebar_create_event", compact=True)
-        if new_id:
-            st.rerun()
-
-
-def prepare_messages_for_ui(messages: pd.DataFrame) -> pd.DataFrame:
-    """Add reusable helper columns so filters/cards do not rebuild strings every rerun.
-
-    The dashboard repeatedly checks hidden flags, final event ids and text search.
-    Doing those conversions once per prepared frame is noticeably cheaper than
-    lowercasing/casting large message tables inside every widget.
-    """
-    if not isinstance(messages, pd.DataFrame) or messages.empty:
-        return messages
-
-    work = messages.copy()
-    if "_message_hidden_bool" not in work.columns:
-        if "message_hidden" in work.columns:
-            work["_message_hidden_bool"] = work["message_hidden"].astype(bool)
-        else:
-            work["_message_hidden_bool"] = False
-
-    if "final_event_id" in work.columns and "_final_event_id_str" not in work.columns:
-        work["_final_event_id_str"] = work["final_event_id"].fillna("").astype(str)
-
-    if "source_final_event_id" in work.columns and "_source_final_event_id_str" not in work.columns:
-        work["_source_final_event_id_str"] = work["source_final_event_id"].fillna("").astype(str)
-
-    if "text_clean" in work.columns and "_search_text" not in work.columns:
-        work["_search_text"] = (
-            work["text_clean"]
-            .fillna("")
-            .astype(str)
-            .str.lower()
-            .str.replace("ё", "е", regex=False)
-        )
-    return work
-
-
-def messages_for_events(messages: pd.DataFrame, events: pd.DataFrame) -> pd.DataFrame:
-    """Return visible messages that belong to the currently displayed events."""
-    if not isinstance(messages, pd.DataFrame) or messages.empty or not isinstance(events, pd.DataFrame) or events.empty:
-        return pd.DataFrame()
-    if "event_id" not in events.columns:
-        return pd.DataFrame()
-
-    event_ids = set(events["event_id"].dropna().astype(str))
-    if "_final_event_id_str" in messages.columns:
-        mask = messages["_final_event_id_str"].isin(event_ids)
-    elif "final_event_id" in messages.columns:
-        mask = messages["final_event_id"].astype(str).isin(event_ids)
-    else:
-        return pd.DataFrame()
-
-    if "_message_hidden_bool" in messages.columns:
-        mask = mask & (~messages["_message_hidden_bool"].astype(bool))
-    elif "message_hidden" in messages.columns:
-        mask = mask & (~messages["message_hidden"].astype(bool))
-
-    return messages.loc[mask].copy()
-
-
-def show_kpis(events: pd.DataFrame, messages: pd.DataFrame | None = None):
-    visible_messages = messages.copy() if isinstance(messages, pd.DataFrame) else pd.DataFrame()
-    if "_message_hidden_bool" in visible_messages.columns:
-        visible_messages = visible_messages[~visible_messages["_message_hidden_bool"].astype(bool)]
-    elif "message_hidden" in visible_messages.columns:
-        visible_messages = visible_messages[~visible_messages["message_hidden"].astype(bool)]
-
-    if not visible_messages.empty:
-        message_count = int(visible_messages["message_id"].nunique()) if "message_id" in visible_messages.columns else int(len(visible_messages))
-        chat_col = "chat_id" if "chat_id" in visible_messages.columns else "chat_title" if "chat_title" in visible_messages.columns else None
-        chat_count = int(visible_messages[chat_col].nunique()) if chat_col else 0
-        if "is_negative" in visible_messages.columns:
-            negative_count = int(visible_messages["is_negative"].astype(str).str.lower().isin(["true", "1", "yes", "да"]).sum())
-        elif "sentiment" in visible_messages.columns:
-            negative_count = int(visible_messages["sentiment"].astype(str).str.lower().str.contains("нег|neg", regex=True, na=False).sum())
-        else:
-            negative_count = 0
-    else:
-        message_count = int(events["message_count"].sum()) if len(events) and "message_count" in events.columns else 0
-        # Do not use max(chat_count): it undercounts multi-period selections.
-        # Sum is only a fallback when message-level data is unavailable.
-        chat_count = int(events["chat_count"].sum()) if len(events) and "chat_count" in events.columns else 0
-        negative_count = int(events["negative_count"].sum()) if len(events) and "negative_count" in events.columns else 0
-
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Инфоповодов", f"{len(events):,}".replace(",", " "))
-    c2.metric("Сообщений", f"{message_count:,}".replace(",", " "))
-    c3.metric("Чатов", f"{chat_count:,}".replace(",", " "))
-    c4.metric("Негатив", format_pct(negative_count / message_count) if message_count else "0%")
-    c5.metric("Высокая важность", int((events["importance_score"] >= events["importance_score"].quantile(0.75)).sum()) if len(events) and "importance_score" in events.columns else 0)
-
-def _split_pipe_values(series: pd.Series) -> list[str]:
-    values: list[str] = []
-    if series is None:
-        return values
-    for raw in series.fillna("").astype(str):
-        for item in raw.replace(";", "|").replace(",", "|").split("|"):
-            item = re.sub(r"\s+", " ", item).strip()
-            if item:
-                values.append(item)
-    return values
-
-
-def _format_top_items(items: list[tuple[str, int]], limit: int = 5) -> str:
-    filtered = [(str(name).strip(), int(count)) for name, count in items if str(name).strip()]
-    if not filtered:
-        return "нет выраженных лидеров"
-    return "; ".join(f"{name} — {count}" for name, count in filtered[:limit])
-
-
-def _summary_key(period_ids: list[str]) -> str:
-    if period_ids:
-        raw = "|".join(sorted(str(x) for x in period_ids if str(x).strip()))
-        digest = hashlib.md5(raw.encode("utf-8", errors="ignore")).hexdigest()[:12]
-        return f"periods:{digest}"
-    return "local:current"
-
-
-
-
-def _summary_period_range(messages, period_ids: list[str] | None = None) -> str:
-    """Return human-readable period range for summary without period title.
-
-    Prefer edited period metadata from Supabase. Message-level datetimes can be
-    partially empty or parsed differently across imported sources, so using only
-    messages may show the first selected period even when several periods are
-    selected.
-    """
-    if period_ids:
-        try:
-            periods = list_periods(include_inactive=True)
-            if isinstance(periods, pd.DataFrame) and not periods.empty and "period_id" in periods.columns:
-                selected = periods[periods["period_id"].astype(str).isin([str(x) for x in period_ids])].copy()
-                if not selected.empty:
-                    dates = []
-                    for col in ["date_from", "date_to"]:
-                        if col in selected.columns:
-                            parsed = pd.to_datetime(selected[col], errors="coerce", dayfirst=True).dropna()
-                            if not parsed.empty:
-                                dates.append(parsed.min())
-                                dates.append(parsed.max())
-                    if dates:
-                        start_s = format_date(min(dates))
-                        end_s = format_date(max(dates))
-                        if start_s and end_s and start_s != end_s:
-                            return f"{start_s} — {end_s}"
-                        if start_s:
-                            return start_s
-        except Exception:
-            pass
-
-    if not isinstance(messages, pd.DataFrame) or messages.empty or "datetime" not in messages.columns:
-        return "выбранный период"
-    dt = pd.to_datetime(messages["datetime"], errors="coerce", dayfirst=True).dropna()
-    if dt.empty:
-        return "выбранный период"
-    start_s = format_date(dt.min())
-    end_s = format_date(dt.max())
-    if start_s and end_s and start_s != end_s:
-        return f"{start_s} — {end_s}"
-    if start_s:
-        return start_s
-    return "выбранный период"
-
-
-def _first_summary_line(summary_text: str) -> str:
-    for line in str(summary_text or "").splitlines():
-        cleaned = line.strip()
-        if cleaned:
-            return cleaned
-    return ""
-
-
-def _sync_summary_first_line(summary_text: str, auto_summary: str) -> str:
-    """Keep manually saved summaries consistent with the current selected periods.
-
-    Editors may save custom wording for the body of the summary, but the first
-    line contains calculated metrics and selected period range. It should always
-    be generated from the current data to avoid stale single-period headers when
-    multiple periods are selected.
-    """
-    value = str(summary_text or "").strip()
-    auto_first = _first_summary_line(auto_summary)
-    if not value or not auto_first:
-        return value or auto_summary
-    lines = value.splitlines()
-    for idx, line in enumerate(lines):
-        if re.search(r"За период|За выбранный период", line):
-            lines[idx] = auto_first
-            return "\n".join(lines).strip()
-    return "\n".join([auto_first, value]).strip()
-
-
-def _events_grouped_by_title(events: pd.DataFrame, metric_col: str) -> pd.DataFrame:
-    if not isinstance(events, pd.DataFrame) or events.empty or "event_title" not in events.columns:
-        return pd.DataFrame(columns=["event_title", metric_col])
-    work = events.copy()
-    work["event_title"] = work["event_title"].fillna("").astype(str).str.strip()
-    work = work[work["event_title"] != ""]
-    if work.empty:
-        return pd.DataFrame(columns=["event_title", metric_col])
-    if metric_col not in work.columns:
-        work[metric_col] = 0
-    work[metric_col] = pd.to_numeric(work[metric_col], errors="coerce").fillna(0).astype(int)
-    return work.groupby("event_title", as_index=False)[metric_col].sum().sort_values(metric_col, ascending=False)
-
-def format_dashboard_summary_markdown(text: str) -> str:
-    """Normalize summary display: remove legacy period title and bold leading labels."""
-    import re
-
-    value = str(text or "").strip()
-    if not value:
-        return ""
-
-    value = re.sub(
-        r"За период\s+«[^»]+»\s*\((\d{2}\.\d{2}\.\d{4}\s*[—-]\s*\d{2}\.\d{2}\.\d{4})\)",
-        r"За период \1",
-        value,
-    )
-    value = re.sub(
-        r"За период\s+«[^»]+»\s*\((\d{2}\.\d{2}\.\d{4})\)",
-        r"За период \1",
-        value,
-    )
-
-    labels = [
-        "Негатив",
-        "Наиболее активные чаты",
-        "Основные инфоповоды",
-        "Чаще всего встречающиеся темы/теги",
-        "Основные источники негатива",
-    ]
-    for label in labels:
-        value = re.sub(rf"(^|\n)(\s*•\s*){re.escape(label)}:", rf"\1\2**{label}:**", value)
-        value = re.sub(rf"(^|\n)(\s*){re.escape(label)}:", rf"\1\2**{label}:**", value)
-
-    value = re.sub(
-        r"(^|\n)(\s*•\s*)За период\s+([^\n]+?)\s+собрано",
-        r"\1\2**За период \3** собрано",
-        value,
-    )
-    value = re.sub(
-        r"(^|\n)(\s*)За период\s+([^\n]+?)\s+собрано",
-        r"\1\2**За период \3** собрано",
-        value,
-    )
-    return value
-
-
-def _period_label(period_ids: list[str]) -> str:
-    if not period_ids:
-        return "текущая выборка"
-    try:
-        periods = list_periods(include_inactive=True)
-        if not periods.empty and "period_id" in periods.columns:
-            selected = periods[periods["period_id"].astype(str).isin([str(x) for x in period_ids])].copy()
-            if not selected.empty:
-                names = selected.get("period_name", selected["period_id"]).fillna("").astype(str).tolist()
-                names = [name for name in names if name]
-                if len(names) == 1:
-                    return names[0]
-                if 1 < len(names) <= 3:
-                    return ", ".join(names)
-                if len(names) > 3:
-                    return f"{len(names)} выбранных периода"
-    except Exception:
-        pass
-    return f"{len(period_ids)} выбранных периода" if len(period_ids) != 1 else str(period_ids[0])
-
-
-def build_auto_dashboard_summary(events: pd.DataFrame, messages: pd.DataFrame, period_ids: list[str]) -> str:
-    """Build a readable editorial summary for the selected period(s)."""
-    visible_messages = messages.copy() if isinstance(messages, pd.DataFrame) else pd.DataFrame()
-    visible_events = events.copy() if isinstance(events, pd.DataFrame) else pd.DataFrame()
-
-    if "message_hidden" in visible_messages.columns:
-        visible_messages = visible_messages[~visible_messages["message_hidden"].astype(bool)]
-    if "is_hidden" in visible_events.columns:
-        visible_events = visible_events[~visible_events["is_hidden"].astype(bool)]
-
-    period_range = _summary_period_range(visible_messages, period_ids)
-
-    if visible_messages.empty and visible_events.empty:
-        return "**За выбранный период** данных для саммари пока недостаточно."
-
-    msg_count = int(len(visible_messages)) if not visible_messages.empty else int(visible_events.get("message_count", pd.Series(dtype=int)).sum())
-
-    chat_col = "chat_title" if "chat_title" in visible_messages.columns else "chat_id" if "chat_id" in visible_messages.columns else None
-    author_col = "author" if "author" in visible_messages.columns else "author_id" if "author_id" in visible_messages.columns else None
-    chat_count = int(visible_messages[chat_col].nunique()) if chat_col and not visible_messages.empty else int(visible_events.get("chat_count", pd.Series(dtype=int)).max() if not visible_events.empty else 0)
-    author_count = int(visible_messages[author_col].nunique()) if author_col and not visible_messages.empty else int(visible_events.get("author_count", pd.Series(dtype=int)).max() if not visible_events.empty else 0)
-
-    if "is_negative" in visible_messages.columns and not visible_messages.empty:
-        neg_mask = visible_messages["is_negative"].astype(str).str.lower().isin(["true", "1", "yes", "да"])
-        negative_count = int(neg_mask.sum())
-    elif "sentiment" in visible_messages.columns and not visible_messages.empty:
-        neg_mask = visible_messages["sentiment"].astype(str).str.lower().str.contains("нег|neg", regex=True, na=False)
-        negative_count = int(neg_mask.sum())
-    else:
-        negative_count = int(visible_events.get("negative_count", pd.Series(dtype=int)).sum() if not visible_events.empty else 0)
-    negative_share = negative_count / msg_count if msg_count else 0.0
-
-    top_chats_text = "нет данных"
-    if chat_col and not visible_messages.empty:
-        top_chats = (
-            visible_messages[chat_col]
-            .fillna("")
-            .astype(str)
-            .replace("", np.nan)
-            .dropna()
-            .value_counts()
-            .head(5)
-        )
-        top_chats_text = _format_top_items(list(top_chats.items()))
-
-    top_events_text = "нет выраженных тем"
-    if not visible_events.empty and "event_title" in visible_events.columns:
-        top_events = _events_grouped_by_title(visible_events, "message_count")
-        if not top_events.empty:
-            top_events_text = _format_top_items(list(zip(top_events["event_title"], top_events["message_count"])), limit=6)
-
-    negative_events_text = "нет выраженного негативного ядра"
-    if not visible_events.empty and {"event_title", "negative_count"}.issubset(visible_events.columns):
-        neg_events = _events_grouped_by_title(visible_events, "negative_count")
-        neg_events = neg_events[neg_events["negative_count"] > 0].head(5)
-        if not neg_events.empty:
-            negative_events_text = _format_top_items(list(zip(neg_events["event_title"], neg_events["negative_count"])))
-
-    tag_values: list[str] = []
-    if "main_tags" in visible_events.columns:
-        tag_values.extend(_split_pipe_values(visible_events["main_tags"]))
-    if "tags" in visible_messages.columns:
-        tag_values.extend(_split_pipe_values(visible_messages["tags"]))
-    tag_text = "нет явных тегов"
-    if tag_values:
-        top_tags = pd.Series(tag_values).value_counts().head(7)
-        tag_text = _format_top_items(list(top_tags.items()), limit=7)
-
-    lines = [
-        f"**За период {period_range}** собрано {msg_count:,} сообщений из {chat_count:,} чатов".replace(",", " ") + (f" от {author_count:,} авторов".replace(",", " ") if author_count else "") + ".",
-        f"**Негатив:** {negative_count:,} сообщений, доля — {format_pct(negative_share)}.".replace(",", " "),
-        f"**Наиболее активные чаты:** {top_chats_text}.",
-        f"**Основные инфоповоды:** {top_events_text}.",
-        f"**Чаще всего встречающиеся темы/теги:** {tag_text}.",
-        f"**Основные источники негатива:** {negative_events_text}.",
-    ]
-    return "\n".join(f"• {line}" for line in lines)
-
-
-def render_dashboard_summary(events: pd.DataFrame, messages: pd.DataFrame, period_ids: list[str], conn, can_edit: bool) -> None:
-    """Render editable period summary before the information-events block."""
-    key = _summary_key(period_ids)
-    auto_summary = build_auto_dashboard_summary(events, messages, period_ids)
-    saved = get_dashboard_summary(conn, key)
-    saved_text = str(saved.get("summary", "") or "").strip() if isinstance(saved, dict) else ""
-    summary_text = _sync_summary_first_line(saved_text, auto_summary) if saved_text else auto_summary
-
-    st.subheader("Саммари периода")
-    if can_edit:
-        if saved_text:
-            st.caption("Показано ручное саммари. Автоматическое саммари можно вернуть, очистив ручную версию.")
-        else:
-            st.caption("Автоматическое саммари сформировано по выбранному периоду и текущей структуре инфоповодов.")
-
-    st.markdown(format_dashboard_summary_markdown(summary_text).replace("\n", "  \n"))
-
-    if not can_edit:
-        return
-
-    with st.expander("Редактировать саммари", expanded=False):
-        with st.form(f"dashboard_summary_form_{key}"):
-            edited_summary = st.text_area(
-                "Саммари",
-                value=summary_text,
-                height=220,
-                help="Этот текст будет показываться перед таблицей инфоповодов для выбранного периода или набора периодов.",
-            )
-            note = st.text_input("Комментарий к правке", value=str(saved.get("note", "") or "") if isinstance(saved, dict) else "")
-            c1, c2 = st.columns(2)
-            save_clicked = c1.form_submit_button("Сохранить саммари", type="primary")
-            reset_clicked = c2.form_submit_button("Вернуть автоматическое")
-
-        if save_clicked:
-            save_dashboard_summary(conn, key, edited_summary.strip(), note=note, period_ids=period_ids)
-            st.success("Саммари сохранено.")
-            st.rerun()
-        if reset_clicked:
-            save_dashboard_summary(conn, key, "", note=note, period_ids=period_ids)
-            st.success("Ручное саммари очищено. Будет показана автоматическая версия.")
-            st.rerun()
-
-
-
-# -----------------------------------------------------------------------------
-# Digest export: DOCX / PDF
-# -----------------------------------------------------------------------------
-
-
-def _visible_messages_for_digest(messages: pd.DataFrame) -> pd.DataFrame:
-    """Return messages that should be counted in the digest export."""
-    if not isinstance(messages, pd.DataFrame) or messages.empty:
-        return pd.DataFrame()
-    work = messages.copy()
-    if "message_hidden" in work.columns:
-        work = work[~work["message_hidden"].astype(bool)]
-    if "source_relevant" in work.columns:
-        rel = work["source_relevant"].astype(str).str.lower().str.strip()
-        work = work[~rel.isin(["false", "0", "no", "нет", "не релевантно", "нерелевантно"])]
-    return work
-
-
-def _visible_events_for_digest(events: pd.DataFrame) -> pd.DataFrame:
-    if not isinstance(events, pd.DataFrame) or events.empty:
-        return pd.DataFrame()
-    work = events.copy()
-    if "is_hidden" in work.columns:
-        work = work[~work["is_hidden"].astype(bool)]
-    return work
-
-
-def _sentiment_counts(messages: pd.DataFrame) -> dict[str, int]:
-    if not isinstance(messages, pd.DataFrame) or messages.empty:
-        return {"neutral": 0, "negative": 0, "positive": 0, "total": 0}
-    work = messages.copy()
-    total = int(len(work))
-
-    sentiment = work.get("sentiment", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str).str.lower()
-    negative = sentiment.str.contains("нег|neg|отриц", regex=True, na=False)
-    positive = sentiment.str.contains("позит|pos|полож", regex=True, na=False)
-
-    if "is_negative" in work.columns:
-        negative = negative | work["is_negative"].astype(str).str.lower().isin(["true", "1", "yes", "да"])
-
-    # If a system exports explicit neutral values, anything not positive/negative is neutral.
-    neutral_count = max(0, total - int(negative.sum()) - int(positive.sum()))
-    return {
-        "neutral": int(neutral_count),
-        "negative": int(negative.sum()),
-        "positive": int(positive.sum()),
-        "total": total,
-    }
-
-
-def _pct_of(count: int, total: int, decimals: int = 0) -> str:
-    if not total:
-        return "0%"
-    value = count / total * 100
-    if decimals:
-        raw = f"{value:.{decimals}f}".replace(".", ",")
-        raw = re.sub(r",0$", "", raw)
-        return f"{raw}%"
-    return f"{value:.0f}%"
-
-
-def _clean_markdown_text(value: str) -> str:
-    text = str(value or "").strip()
-    text = text.replace("**", "")
-    text = re.sub(r"^\s*•\s*", "", text)
-    return text.strip()
-
-
-def _summary_body_for_digest(events: pd.DataFrame, messages: pd.DataFrame, period_ids: list[str], conn) -> list[str]:
-    """Return bullet-like digest lines without the calculated first period line."""
-    key = _summary_key(period_ids)
-    auto_summary = build_auto_dashboard_summary(events, messages, period_ids)
-    saved = get_dashboard_summary(conn, key)
-    saved_text = str(saved.get("summary", "") or "").strip() if isinstance(saved, dict) else ""
-    summary_text = _sync_summary_first_line(saved_text, auto_summary) if saved_text else auto_summary
-    lines = []
-    for line in str(summary_text or "").splitlines():
-        cleaned = _clean_markdown_text(line)
-        if not cleaned:
-            continue
-        if cleaned.lower().startswith("за период") or cleaned.lower().startswith("за выбранный период"):
-            continue
-        lines.append(cleaned)
-    if not lines:
-        lines.append("В периоде выделены основные темы, динамика обсуждений и наиболее заметные источники негатива.")
-    return lines
-
-
-def _quote_rows_for_digest(
-    topic_messages: pd.DataFrame,
-    *,
-    event_title: str,
-    event_summary: str,
-    tags: str,
-    pinned_message_ids: set[str],
-    limit: int,
-) -> pd.DataFrame:
-    if not isinstance(topic_messages, pd.DataFrame) or topic_messages.empty or limit <= 0:
-        return pd.DataFrame()
-    work = topic_messages.copy()
-    if "message_id" in work.columns:
-        work["message_id"] = work["message_id"].astype(str)
-    else:
-        work["message_id"] = ""
-
-    pinned = work[work["message_id"].isin({str(x) for x in pinned_message_ids})].copy()
-    if not pinned.empty and "datetime" in pinned.columns:
-        pinned = pinned.sort_values("datetime")
-    auto_limit = max(0, limit - len(pinned))
-    auto_source = work[~work["message_id"].isin(set(pinned.get("message_id", [])))].copy()
-    auto = rank_key_messages(
-        auto_source,
-        event_title=event_title,
-        event_summary=event_summary,
-        tags=tags,
-        limit=auto_limit,
-    ) if auto_limit else auto_source.iloc[0:0].copy()
-    result = pd.concat([pinned, auto], ignore_index=False) if not pinned.empty else auto
-    if result.empty:
-        return result
-    # Keep the digest readable and prevent repeated identical quotes.
-    result = result.copy()
-    result["_quote_key"] = result.get("text_clean", "").astype(str).apply(lambda x: _dedupe_key(x)[:120])
-    result = result.drop_duplicates("_quote_key")
-    return result.head(limit)
-
-
-def build_digest_export_payload(
-    events: pd.DataFrame,
-    messages: pd.DataFrame,
-    period_ids: list[str],
-    conn,
-    *,
-    max_topics: int = 8,
-    quotes_per_topic: int = 3,
-    pinned_messages: pd.DataFrame | None = None,
-) -> dict:
-    """Build a plain data payload for DOCX/PDF digest export."""
-    visible_messages = _visible_messages_for_digest(messages)
-    visible_events = _visible_events_for_digest(events)
-    period_range = _summary_period_range(visible_messages, period_ids)
-    sentiment = _sentiment_counts(visible_messages)
-    total_messages = int(sentiment["total"])
-
-    pinned_df = pinned_messages if isinstance(pinned_messages, pd.DataFrame) else get_key_message_pins(conn)
-    if isinstance(pinned_df, pd.DataFrame) and not pinned_df.empty:
-        pinned_df = pinned_df.copy()
-        pinned_df["event_id"] = pinned_df.get("event_id", "").astype(str)
-        pinned_df["message_id"] = pinned_df.get("message_id", "").astype(str)
-    else:
-        pinned_df = pd.DataFrame(columns=["event_id", "message_id"])
-
-    summary_lines = _summary_body_for_digest(visible_events, visible_messages, period_ids, conn)
-
-    topics: list[dict] = []
-    if not visible_events.empty and "event_title" in visible_events.columns:
-        work_events = visible_events.copy()
-        work_events["event_title"] = work_events["event_title"].fillna("").astype(str).str.strip()
-        work_events = work_events[work_events["event_title"] != ""]
-        if "message_count" not in work_events.columns:
-            work_events["message_count"] = 0
-        work_events["message_count"] = pd.to_numeric(work_events["message_count"], errors="coerce").fillna(0).astype(int)
-
-        grouped_rows = []
-        for title, group in work_events.groupby("event_title", sort=False):
-            event_ids = set(group.get("event_id", pd.Series(dtype=str)).astype(str).tolist())
-            if "final_event_id" in visible_messages.columns:
-                topic_messages = visible_messages[visible_messages["final_event_id"].astype(str).isin(event_ids)].copy()
-            else:
-                topic_messages = pd.DataFrame()
-            msg_count = int(len(topic_messages)) if not topic_messages.empty else int(group["message_count"].sum())
-            grouped_rows.append((title, group, event_ids, topic_messages, msg_count))
-
-        grouped_rows = sorted(grouped_rows, key=lambda x: x[4], reverse=True)[:max_topics]
-
-        for title, group, event_ids, topic_messages, msg_count in grouped_rows:
-            if msg_count <= 0:
-                continue
-            topic_sentiment = _sentiment_counts(topic_messages) if not topic_messages.empty else {"neutral": 0, "negative": int(group.get("negative_count", pd.Series([0])).sum()), "positive": 0, "total": msg_count}
-            # If only event-level negative is available, neutral is the rest.
-            if topic_sentiment["total"] == 0:
-                topic_sentiment["total"] = msg_count
-            if topic_sentiment["neutral"] == 0 and topic_sentiment["positive"] == 0 and topic_sentiment["negative"] <= msg_count:
-                topic_sentiment["neutral"] = max(0, msg_count - topic_sentiment["negative"])
-
-            summaries = [str(x).strip() for x in group.get("event_summary", pd.Series(dtype=str)).fillna("").astype(str).tolist() if str(x).strip()]
-            event_summary = summaries[0] if summaries else ""
-            main_tags = "|".join(sorted(set(_split_pipe_values(group.get("main_tags", pd.Series(dtype=str)))))) if "main_tags" in group.columns else ""
-            if not event_summary and not topic_messages.empty:
-                event_summary = build_event_description(title, main_tags, topic_messages)
-
-            pinned_message_ids = set(pinned_df.loc[pinned_df["event_id"].isin(event_ids), "message_id"].tolist())
-            quote_rows = _quote_rows_for_digest(
-                topic_messages,
-                event_title=title,
-                event_summary=event_summary,
-                tags=main_tags,
-                pinned_message_ids=pinned_message_ids,
-                limit=quotes_per_topic,
-            )
-            quotes = []
-            for _, row in quote_rows.iterrows():
-                text = str(row.get("text_clean", "") or "").strip()
-                if not text:
-                    continue
-                quotes.append({
-                    "date": format_date(row.get("datetime")),
-                    "chat": str(row.get("chat_title", "") or "").strip(),
-                    "author": str(row.get("author", "") or "").strip(),
-                    "text": re.sub(r"\s+", " ", text)[:900],
-                    "link": str(row.get("message_link", "") or "").strip(),
-                })
-
-            topics.append({
-                "title": title,
-                "message_count": msg_count,
-                "share": msg_count / total_messages if total_messages else 0.0,
-                "sentiment": topic_sentiment,
-                "summary": event_summary or "В теме обсуждались основные сообщения и реакции участников по выбранному инфоповоду.",
-                "quotes": quotes,
-            })
-
-    return {
-        "title": "Дайджест водительских чатов",
-        "period_range": period_range,
-        "message_count": total_messages,
-        "sentiment": sentiment,
-        "summary_lines": summary_lines,
-        "topics": topics,
-        "created_at": datetime.now().strftime("%d.%m.%Y %H:%M"),
-    }
-
-
-def _digest_filename(period_range: str, suffix: str) -> str:
-    safe = re.sub(r"[^0-9A-Za-zА-Яа-я_.-]+", "_", str(period_range or "period"), flags=re.UNICODE).strip("_")
-    safe = safe or "period"
-    return f"digest_driver_chats_{safe}.{suffix}"
-
-
-def _add_docx_bold_label(paragraph, label: str, text: str = ""):
-    run = paragraph.add_run(label)
-    run.bold = True
-    if text:
-        paragraph.add_run(text)
-
-
-def _add_docx_hyperlink(paragraph, url: str, text: str = "открыть сообщение"):
-    """Add a clickable external hyperlink to a python-docx paragraph."""
-    url = str(url or "").strip()
-    if not url:
-        return
-    try:
-        from docx.oxml import OxmlElement
-        from docx.oxml.ns import qn
-        from docx.opc.constants import RELATIONSHIP_TYPE as RT
-
-        r_id = paragraph.part.relate_to(url, RT.HYPERLINK, is_external=True)
-        hyperlink = OxmlElement("w:hyperlink")
-        hyperlink.set(qn("r:id"), r_id)
-
-        new_run = OxmlElement("w:r")
-        r_pr = OxmlElement("w:rPr")
-        color = OxmlElement("w:color")
-        color.set(qn("w:val"), "0563C1")
-        r_pr.append(color)
-        underline = OxmlElement("w:u")
-        underline.set(qn("w:val"), "single")
-        r_pr.append(underline)
-        new_run.append(r_pr)
-
-        text_element = OxmlElement("w:t")
-        text_element.text = text
-        new_run.append(text_element)
-        hyperlink.append(new_run)
-        paragraph._p.append(hyperlink)
-    except Exception:
-        paragraph.add_run(f"{text}: {url}")
-
-
-def _clean_quote_link(value) -> str:
-    link = str(value or "").strip()
-    if not link or link.lower() in {"nan", "none", "null"}:
-        return ""
-    return link
-
-
-def generate_digest_docx(payload: dict) -> bytes:
-    try:
-        from docx import Document
-        from docx.shared import Pt
-    except Exception as exc:
-        raise RuntimeError("Для выгрузки Word установите зависимость python-docx.") from exc
-
-    doc = Document()
-    styles = doc.styles
-    styles["Normal"].font.name = "Arial"
-    styles["Normal"].font.size = Pt(10.5)
-
-    title = f"{payload['title']} | {payload['period_range']}"
-    p = doc.add_paragraph()
-    r = p.add_run(title)
-    r.bold = True
-    r.font.size = Pt(16)
-
-    sentiment = payload["sentiment"]
-    total = max(1, int(sentiment.get("total", 0)))
-    doc.add_paragraph(f"Релевантных сообщений: {payload['message_count']:,}".replace(",", " "))
-    doc.add_paragraph(
-        "Тональность: "
-        f"{_pct_of(sentiment.get('neutral', 0), total)} - нейтрал, "
-        f"{_pct_of(sentiment.get('negative', 0), total)} - негатив, "
-        f"{_pct_of(sentiment.get('positive', 0), total)} - позитив"
-    )
-    doc.add_paragraph("---")
-
-    p = doc.add_paragraph()
-    p.add_run("Главное за неделю").bold = True
-    for line in payload.get("summary_lines", []):
-        doc.add_paragraph(_clean_markdown_text(line), style=None).style = doc.styles["Normal"]
-    doc.add_paragraph("---")
-
-    p = doc.add_paragraph()
-    p.add_run("Обсуждения недели").bold = True
-
-    for idx, topic in enumerate(payload.get("topics", []), start=1):
-        sent = topic["sentiment"]
-        topic_total = max(1, int(sent.get("total", topic.get("message_count", 0))))
-        header = (
-            f"{topic['title']} — {_pct_of(topic.get('share', 0), 1, decimals=1)} сообщений | "
-            f"Тональность: {_pct_of(sent.get('neutral', 0), topic_total)} нейтрал, "
-            f"{_pct_of(sent.get('negative', 0), topic_total)} негатив, "
-            f"{_pct_of(sent.get('positive', 0), topic_total)} позитив"
-        )
-        p = doc.add_paragraph()
-        p.add_run(header).bold = True
-        doc.add_paragraph(_clean_markdown_text(topic.get("summary", "")))
-        quotes = topic.get("quotes", [])
-        if quotes:
-            qh = doc.add_paragraph()
-            qh.add_run("Ключевые цитаты:").bold = True
-            for quote in quotes:
-                meta = " · ".join([x for x in [quote.get("date"), quote.get("chat"), quote.get("author")] if x])
-                text = f"{meta}: {quote.get('text', '')}" if meta else quote.get("text", "")
-                doc.add_paragraph(text, style="List Bullet")
-                link = _clean_quote_link(quote.get("link"))
-                if link:
-                    link_paragraph = doc.add_paragraph()
-                    link_paragraph.paragraph_format.left_indent = Pt(18)
-                    link_paragraph.add_run("Ссылка на цитату: ")
-                    _add_docx_hyperlink(link_paragraph, link, "открыть сообщение")
-        if idx != len(payload.get("topics", [])):
-            doc.add_paragraph("---")
-
-    out = BytesIO()
-    doc.save(out)
-    return out.getvalue()
-
-
-def _register_pdf_font():
-    try:
-        from reportlab.pdfbase import pdfmetrics
-        from reportlab.pdfbase.ttfonts import TTFont
-    except Exception as exc:
-        raise RuntimeError("Для выгрузки PDF установите зависимость reportlab.") from exc
-
-    candidates = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf",
-        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-    ]
-    for path in candidates:
-        if Path(path).exists():
-            try:
-                pdfmetrics.registerFont(TTFont("DigestSans", path))
-                return "DigestSans"
-            except Exception:
-                continue
-    # Fallback may not render Cyrillic in all environments, but keeps generation from crashing.
-    return "Helvetica"
-
-
-def generate_digest_pdf(payload: dict) -> bytes:
-    try:
-        from reportlab.lib.pagesizes import A4
-        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-        from reportlab.lib.units import cm
-        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-        from reportlab.lib.enums import TA_LEFT
-        from xml.sax.saxutils import escape as xml_escape
-    except Exception as exc:
-        raise RuntimeError("Для выгрузки PDF установите зависимость reportlab.") from exc
-
-    font_name = _register_pdf_font()
-    out = BytesIO()
-    doc = SimpleDocTemplate(
-        out,
-        pagesize=A4,
-        leftMargin=1.7 * cm,
-        rightMargin=1.7 * cm,
-        topMargin=1.5 * cm,
-        bottomMargin=1.5 * cm,
-        title=f"{payload['title']} | {payload['period_range']}",
-    )
-    base = getSampleStyleSheet()
-    normal = ParagraphStyle("DigestNormal", parent=base["Normal"], fontName=font_name, fontSize=9.8, leading=13, alignment=TA_LEFT)
-    title_style = ParagraphStyle("DigestTitle", parent=normal, fontName=font_name, fontSize=16, leading=20, spaceAfter=10)
-    h_style = ParagraphStyle("DigestHeading", parent=normal, fontName=font_name, fontSize=12.5, leading=16, spaceBefore=8, spaceAfter=6)
-    topic_style = ParagraphStyle("DigestTopic", parent=normal, fontName=font_name, fontSize=10.5, leading=14, spaceBefore=8, spaceAfter=4)
-    small = ParagraphStyle("DigestSmall", parent=normal, fontName=font_name, fontSize=8.8, leading=12, leftIndent=12)
-
-    story = []
-    story.append(Paragraph(f"<b>{xml_escape(payload['title'])} | {xml_escape(payload['period_range'])}</b>", title_style))
-    sentiment = payload["sentiment"]
-    total = max(1, int(sentiment.get("total", 0)))
-    story.append(Paragraph(xml_escape(f"Релевантных сообщений: {payload['message_count']:,}".replace(",", " ")), normal))
-    tonality = (
-        "Тональность: "
-        f"{_pct_of(sentiment.get('neutral', 0), total)} - нейтрал, "
-        f"{_pct_of(sentiment.get('negative', 0), total)} - негатив, "
-        f"{_pct_of(sentiment.get('positive', 0), total)} - позитив"
-    )
-    story.append(Paragraph(xml_escape(tonality), normal))
-    story.append(Spacer(1, 8))
-    story.append(Paragraph("<b>Главное за неделю</b>", h_style))
-    for line in payload.get("summary_lines", []):
-        story.append(Paragraph("• " + xml_escape(_clean_markdown_text(line)), normal))
-    story.append(Spacer(1, 8))
-    story.append(Paragraph("<b>Обсуждения недели</b>", h_style))
-
-    for topic in payload.get("topics", []):
-        sent = topic["sentiment"]
-        topic_total = max(1, int(sent.get("total", topic.get("message_count", 0))))
-        header = (
-            f"{topic['title']} — {_pct_of(topic.get('share', 0), 1, decimals=1)} сообщений | "
-            f"Тональность: {_pct_of(sent.get('neutral', 0), topic_total)} нейтрал, "
-            f"{_pct_of(sent.get('negative', 0), topic_total)} негатив, "
-            f"{_pct_of(sent.get('positive', 0), topic_total)} позитив"
-        )
-        story.append(Paragraph(f"<b>{xml_escape(header)}</b>", topic_style))
-        story.append(Paragraph(xml_escape(_clean_markdown_text(topic.get("summary", ""))), normal))
-        quotes = topic.get("quotes", [])
-        if quotes:
-            story.append(Paragraph("<b>Ключевые цитаты:</b>", small))
-            for quote in quotes:
-                meta = " · ".join([x for x in [quote.get("date"), quote.get("chat"), quote.get("author")] if x])
-                text = f"{meta}: {quote.get('text', '')}" if meta else quote.get("text", "")
-                story.append(Paragraph("• " + xml_escape(text), small))
-                link = _clean_quote_link(quote.get("link"))
-                if link:
-                    safe_link = xml_escape(link, {"\"": "&quot;", "\047": "&apos;"})
-                    story.append(Paragraph(f"&nbsp;&nbsp;&nbsp;&nbsp;Ссылка на цитату: <a href=\"{safe_link}\">открыть сообщение</a>", small))
-        story.append(Spacer(1, 6))
-
-    doc.build(story)
-    return out.getvalue()
-
-
-def _digest_cache_key(events: pd.DataFrame, messages: pd.DataFrame, period_ids: list[str], max_topics: int, quotes_per_topic: int) -> str:
-    """Return a stable key for session-cached digest files."""
-    raw_parts = [
-        "|".join(str(x) for x in (period_ids or [])),
-        str(max_topics),
-        str(quotes_per_topic),
-        str(len(events) if isinstance(events, pd.DataFrame) else 0),
-        str(len(messages) if isinstance(messages, pd.DataFrame) else 0),
-    ]
-    if isinstance(events, pd.DataFrame) and not events.empty and "event_id" in events.columns:
-        raw_parts.append("|".join(events["event_id"].astype(str).head(200).tolist()))
-    raw = "::".join(raw_parts)
-    return hashlib.md5(raw.encode("utf-8", errors="ignore")).hexdigest()[:16]
-
-
-def render_digest_export(events: pd.DataFrame, messages: pd.DataFrame, period_ids: list[str], conn, manual_tables: dict[str, pd.DataFrame] | None = None) -> None:
-    """Render export controls for the current period selection.
-
-    The previous version built the payload and generated both DOCX and PDF on
-    every Streamlit rerun as soon as the expander existed. This version is
-    lazy: it prepares a file only after the user clicks the corresponding
-    button, then keeps the generated bytes in session_state until settings or
-    selection change.
-    """
-    with st.expander("Выгрузка дайджеста", expanded=False):
-        st.caption(
-            "Сформируйте Word или PDF по выбранному периоду/периодам. "
-            "Файлы готовятся только после нажатия кнопки, поэтому обычная работа дашборда быстрее."
-        )
-        col1, col2 = st.columns(2)
-        max_topics = int(col1.number_input("Тем в выгрузке", min_value=1, max_value=30, value=10, step=1))
-        quotes_per_topic = int(col2.number_input("Цитат на тему", min_value=0, max_value=10, value=3, step=1))
-
-        visible_messages = _visible_messages_for_digest(messages)
-        visible_events = _visible_events_for_digest(events)
-        msg_count = int(len(visible_messages)) if isinstance(visible_messages, pd.DataFrame) else 0
-        topic_count = int(min(max_topics, len(visible_events))) if isinstance(visible_events, pd.DataFrame) else 0
-        period_range_preview = _summary_period_range(visible_messages, period_ids)
-
-        if not msg_count:
-            st.info("Нет сообщений для выгрузки по выбранному периоду.")
-            return
-
-        st.write(
-            f"Готово к выгрузке: {msg_count:,} сообщений, "
-            f"до {topic_count} тем, период {period_range_preview}.".replace(",", " ")
-        )
-
-        cache_key = _digest_cache_key(events, messages, period_ids, max_topics, quotes_per_topic)
-        state_key = f"digest_export_{cache_key}"
-        cached = st.session_state.get(state_key, {})
-
-        c1, c2, c3 = st.columns([1, 1, 1])
-        prepare_docx = c1.button("Подготовить Word", use_container_width=True, key=f"prepare_docx_{cache_key}")
-        prepare_pdf = c2.button("Подготовить PDF", use_container_width=True, key=f"prepare_pdf_{cache_key}")
-        clear_export = c3.button("Очистить файл", use_container_width=True, key=f"clear_digest_{cache_key}")
-
-        if clear_export:
-            st.session_state.pop(state_key, None)
-            cached = {}
-
-        if prepare_docx or prepare_pdf:
-            try:
-                with st.spinner("Готовлю данные дайджеста…"):
-                    pinned_df = (manual_tables or {}).get("event_key_messages", pd.DataFrame())
-                    payload = build_digest_export_payload(
-                        events,
-                        messages,
-                        period_ids,
-                        conn,
-                        max_topics=max_topics,
-                        quotes_per_topic=quotes_per_topic,
-                        pinned_messages=pinned_df,
-                    )
-                if not payload.get("message_count"):
-                    st.info("Нет сообщений для выгрузки по выбранному периоду.")
-                    return
-                cached = {"payload": payload, "created_at": datetime.now().isoformat(timespec="seconds")}
-                if prepare_docx:
-                    with st.spinner("Генерирую Word…"):
-                        cached["docx"] = generate_digest_docx(payload)
-                if prepare_pdf:
-                    with st.spinner("Генерирую PDF…"):
-                        cached["pdf"] = generate_digest_pdf(payload)
-                st.session_state[state_key] = cached
-                st.success("Файл подготовлен. Кнопка скачивания появилась ниже.")
-            except Exception as exc:
-                st.error("Не удалось подготовить выгрузку.")
-                st.exception(exc)
-                return
-
-        payload = cached.get("payload") if isinstance(cached, dict) else None
-        if not payload:
-            st.caption("Нажмите «Подготовить Word» или «Подготовить PDF», чтобы собрать файл.")
-            return
-
-        st.caption(
-            f"Последняя подготовленная выгрузка: {payload.get('message_count', 0):,} сообщений, "
-            f"{len(payload.get('topics', []))} тем, период {payload.get('period_range', '')}.".replace(",", " ")
-        )
-
-        d1, d2 = st.columns(2)
-        if cached.get("docx"):
-            d1.download_button(
-                "Скачать Word",
-                data=cached["docx"],
-                file_name=_digest_filename(payload.get("period_range", "period"), "docx"),
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                use_container_width=True,
-            )
-        else:
-            d1.info("Word еще не подготовлен.")
-
-        if cached.get("pdf"):
-            d2.download_button(
-                "Скачать PDF",
-                data=cached["pdf"],
-                file_name=_digest_filename(payload.get("period_range", "period"), "pdf"),
-                mime="application/pdf",
-                use_container_width=True,
-            )
-        else:
-            d2.info("PDF еще не подготовлен.")
-
-
-def _safe_int_delta(value) -> str:
-    try:
-        return f"{int(value):+d}"
-    except Exception:
-        return "0"
-
-
-
-def _safe_pct_delta(current: float, previous: float) -> str:
-    try:
-        if previous in [0, None] or pd.isna(previous):
-            return "н/д"
-        return f"{((current - previous) / previous) * 100:+.0f}%"
-    except Exception:
-        return "н/д"
-
-
-
-def build_period_comparison_df(messages: pd.DataFrame, period_ids: list[str], periods_meta: pd.DataFrame | None = None) -> pd.DataFrame:
-    """Build period-level comparison metrics from visible messages."""
-    if messages is None or messages.empty or "period_id" not in messages.columns:
-        return pd.DataFrame()
-
-    work = messages.copy()
-    if period_ids:
-        work = work[work["period_id"].astype(str).isin([str(x) for x in period_ids])]
-    if work.empty:
-        return pd.DataFrame()
-
-    if "message_hidden" in work.columns:
-        work = work[~work["message_hidden"].astype(bool)]
-    if work.empty:
-        return pd.DataFrame()
-
-    if "datetime" in work.columns:
-        work["datetime"] = pd.to_datetime(work["datetime"], errors="coerce")
-
-    if "is_negative" in work.columns:
-        work["__is_negative"] = work["is_negative"].astype(str).str.lower().isin(["true", "1", "yes", "да"]).astype(int)
-    elif "sentiment" in work.columns:
-        work["__is_negative"] = work["sentiment"].astype(str).str.lower().str.contains("neg").astype(int)
-    else:
-        work["__is_negative"] = 0
-
-    agg_dict = {
-        "message_count": ("period_id", "size"),
-        "negative_count": ("__is_negative", "sum"),
-    }
-    if "datetime" in work.columns:
-        agg_dict["date_from"] = ("datetime", "min")
-        agg_dict["date_to"] = ("datetime", "max")
-    if "chat_title" in work.columns:
-        agg_dict["chat_count"] = ("chat_title", pd.Series.nunique)
-
-    summary = work.groupby("period_id", dropna=False).agg(**agg_dict).reset_index()
-    summary["negative_share"] = np.where(
-        summary["message_count"] > 0,
-        summary["negative_count"] / summary["message_count"],
-        0.0,
-    )
-
-    if periods_meta is not None and not periods_meta.empty and "period_id" in periods_meta.columns:
-        meta_cols = [c for c in ["period_id", "period_name", "date_from", "date_to", "uploaded_at"] if c in periods_meta.columns]
-        meta = periods_meta[meta_cols].copy().drop_duplicates(subset=["period_id"])
-        summary = summary.merge(meta, on="period_id", how="left", suffixes=("", "_meta"))
-        if "date_from_meta" in summary.columns:
-            summary["date_from"] = summary["date_from_meta"].combine_first(summary.get("date_from"))
-        if "date_to_meta" in summary.columns:
-            summary["date_to"] = summary["date_to_meta"].combine_first(summary.get("date_to"))
-        drop_cols = [c for c in ["date_from_meta", "date_to_meta"] if c in summary.columns]
-        if drop_cols:
-            summary = summary.drop(columns=drop_cols)
-    else:
-        summary["period_name"] = summary["period_id"]
-
-    # Normalize period names to plain strings. Supabase/JSON values can occasionally
-    # come back as mixed objects; sorting mixed Python objects may crash pandas.
-    if "period_name" not in summary.columns:
-        summary["period_name"] = summary["period_id"]
-    summary["period_name"] = summary["period_name"].where(
-        summary["period_name"].notna(),
-        summary["period_id"],
-    ).map(lambda value: "" if pd.isna(value) else str(value))
-
-    # Build a stable string sort key instead of sorting raw datetimes.
-    # This avoids pandas TypeError when selected periods contain a mix of
-    # timezone-aware, timezone-naive, empty, or malformed dates.
-    date_from_series = summary["date_from"] if "date_from" in summary.columns else pd.Series([pd.NaT] * len(summary), index=summary.index)
-    sort_date = pd.to_datetime(date_from_series, errors="coerce", utc=True)
-    if "uploaded_at" in summary.columns:
-        uploaded_at = pd.to_datetime(summary["uploaded_at"], errors="coerce", utc=True)
-        sort_date = sort_date.combine_first(uploaded_at)
-
-    summary["sort_date"] = sort_date.dt.strftime("%Y-%m-%d %H:%M:%S").fillna("9999-12-31 23:59:59")
-    summary["period_name_sort"] = summary["period_name"].fillna("").astype(str)
-    summary = summary.sort_values(
-        ["sort_date", "period_name_sort"],
-        ascending=[True, True],
-        kind="mergesort",
-    ).reset_index(drop=True)
-    summary["negative_share_pct"] = (summary["negative_share"] * 100).round(1)
-    summary["label"] = summary["period_name"]
-    return summary
-
-
-
-def render_period_comparison(messages: pd.DataFrame, period_ids: list[str]):
-    """Render visual comparison across two or more selected periods."""
-    if not period_ids or len(period_ids) < 2:
-        return
-
-    try:
-        periods_meta = list_periods()
-    except Exception:
-        periods_meta = pd.DataFrame()
-
-    summary = build_period_comparison_df(messages, period_ids, periods_meta)
-    if summary.empty or len(summary) < 2:
-        return
-
-    latest = summary.iloc[-1]
-    previous = summary.iloc[-2]
-    msg_delta = int(latest["message_count"] - previous["message_count"])
-    neg_count_delta = int(latest["negative_count"] - previous["negative_count"])
-    neg_share_delta_pp = float((latest["negative_share"] - previous["negative_share"]) * 100)
-
-    st.subheader("Сравнение периодов")
-    st.caption(
-        f"Сейчас сравниваются {len(summary)} период(а/ов). Последний период: {latest['period_name']}. "
-        f"Сравнение ведется с предыдущим периодом: {previous['period_name']}."
-    )
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric(
-        f"Сообщения · {latest['period_name']}",
-        f"{int(latest['message_count']):,}".replace(",", " "),
-        delta=_safe_int_delta(msg_delta),
-        help="Разница по общему количеству сообщений относительно предыдущего выбранного периода.",
-    )
-    c2.metric(
-        "Изменение сообщений",
-        _safe_pct_delta(float(latest["message_count"]), float(previous["message_count"])),
-        help="Процентное изменение количества сообщений относительно предыдущего периода.",
-    )
-    c3.metric(
-        f"Негатив · {latest['period_name']}",
-        format_pct(latest["negative_share"]),
-        delta=f"{neg_share_delta_pp:+.1f} п.п.",
-        help="Доля негативных сообщений и ее изменение в процентных пунктах относительно предыдущего периода.",
-    )
-    c4.metric(
-        "Негативных сообщений",
-        f"{int(latest['negative_count']):,}".replace(",", " "),
-        delta=_safe_int_delta(neg_count_delta),
-        help="Изменение числа негативных сообщений относительно предыдущего периода.",
-    )
-
-    chart_source = summary[["label", "message_count", "negative_share_pct"]].copy().rename(columns={
-        "label": "Период",
-        "message_count": "Сообщений",
-        "negative_share_pct": "Негатив, %",
-    })
-
-    left, right = st.columns(2)
-    with left:
-        st.caption("Общее количество сообщений по периодам")
-        st.bar_chart(chart_source.set_index("Период")[["Сообщений"]], use_container_width=True)
-    with right:
-        st.caption("Доля негатива по периодам")
-        st.line_chart(chart_source.set_index("Период")[["Негатив, %"]], use_container_width=True)
-
-    table = summary.copy()
-    table["Период"] = table["period_name"]
-    table["Начало"] = format_date_series(table.get("date_from", pd.Series(dtype=str)))
-    table["Конец"] = format_date_series(table.get("date_to", pd.Series(dtype=str)))
-    table["Сообщений"] = table["message_count"].astype(int)
-    table["Негативных"] = table["negative_count"].astype(int)
-    table["Доля негатива"] = table["negative_share"].apply(format_pct)
-    display_cols = [c for c in ["Период", "Начало", "Конец", "Сообщений", "Негативных", "Доля негатива"] if c in table.columns]
-    st.dataframe(table[display_cols], use_container_width=True, hide_index=True)
-
-
-
-def word_message_results_table(messages: pd.DataFrame, events: pd.DataFrame, query: str):
-    """Show all messages that match the sidebar word filter."""
-    if not str(query or "").strip():
-        return
-
-    st.subheader(f"Сообщения со словом: «{query}»")
-
-    if messages.empty:
-        st.info("Сообщений с таким словом в тексте не найдено.")
-        return
-
-    table = messages.copy().sort_values("datetime", ascending=False)
-    table["Дата"] = format_date_series(table.get("datetime", pd.Series(dtype=str)))
-    table["Чат"] = table.get("chat_title", "")
-    table["Автор"] = table.get("author", "")
-    table["Текст"] = table.get("text_clean", "").fillna("").astype(str).str.slice(0, 500)
-    event_title_map = events.set_index("event_id")["event_title"].to_dict() if len(events) else {}
-    table["Инфоповод"] = table.get("final_event_id", "").map(event_title_map).fillna("")
-    table["Ссылка"] = table.get("message_link", "")
-
-    st.caption(f"Найдено сообщений: {len(table):,}".replace(",", " "))
-    cols = ["Дата", "Чат", "Автор", "Инфоповод", "Текст", "Ссылка"]
-    cols = [c for c in cols if c in table.columns]
-
-    st.dataframe(
-        table[cols],
-        use_container_width=True,
-        height=420,
-        hide_index=True,
-        column_config={
-            "Текст": st.column_config.TextColumn(width="large"),
-            "Инфоповод": st.column_config.TextColumn(width="medium"),
-            "Ссылка": st.column_config.LinkColumn("Ссылка"),
-        },
-    )
-
-
-def event_table(events: pd.DataFrame) -> str | None:
-    if events.empty:
-        st.info("Нет инфоповодов по выбранным фильтрам.")
-        return None
-
-    table = events.copy()
-    table["Период"] = table.apply(format_period, axis=1)
-    table["Негатив"] = table["negative_share"].apply(format_pct)
-    table["Токсичность"] = table["toxic_share"].apply(format_pct)
-    table["Теги"] = table["main_tags"].fillna("").astype(str).str.replace("|", ", ", regex=False)
-    table["Тема из файла"] = table.get("source_main_topics", pd.Series([""] * len(table))).fillna("").astype(str).str.replace(";", ",", regex=False)
-    table["Название"] = table["event_title"]
-    table["Описание"] = table["event_summary"]
-    table["Сообщений"] = table["message_count"]
-    table["Первичных событий"] = table.get("source_event_count", pd.Series([1] * len(table))).fillna(1).astype(int)
-    table["Чатов"] = table["chat_count"]
-    table["Авторов"] = table["author_count"]
-    table["Важность"] = table["importance_score"].round(1)
-    table["Статус"] = table["status"]
-
-    display_cols = [
-        "Название",
-        "Описание",
-    ]
-    if table["Тема из файла"].fillna("").astype(str).str.strip().any():
-        display_cols.append("Тема из файла")
-    display_cols += [
-        "Теги",
-        "Период",
-        "Сообщений",
-        "Первичных событий",
-        "Чатов",
-        "Негатив",
-        "Важность",
-        "Статус",
-    ]
-
-    st.subheader("Инфоповоды")
-    selected = st.dataframe(
-        table[display_cols],
-        use_container_width=True,
-        height=520,
-        hide_index=True,
-        on_select="rerun",
-        selection_mode="single-row",
-        column_config={
-            "Описание": st.column_config.TextColumn(width="large"),
-            "Название": st.column_config.TextColumn(width="medium"),
-            "Теги": st.column_config.TextColumn(width="medium"),
-            "Тема из файла": st.column_config.TextColumn(width="medium"),
-            "Сообщений": st.column_config.NumberColumn(format="%d"),
-            "Первичных событий": st.column_config.NumberColumn(format="%d"),
-            "Чатов": st.column_config.NumberColumn(format="%d"),
-            "Важность": st.column_config.NumberColumn(format="%.1f"),
-        },
-    )
-
-    rows = get_selected_rows(selected)
-    if rows:
-        return table.iloc[rows[0]]["event_id"]
-    return table.iloc[0]["event_id"]
-
-
-KEY_MESSAGE_STOPWORDS = {
-    "это", "как", "что", "или", "для", "при", "уже", "еще", "ещё", "там", "тут", "все", "всё",
-    "они", "она", "оно", "его", "ему", "вам", "вас", "нам", "нас", "про", "без", "под", "над",
-    "только", "так", "вот", "когда", "если", "где", "куда", "почему", "зачем", "тоже", "можно",
-    "нужно", "надо", "будет", "было", "были", "есть", "нет", "да", "ну", "же", "ли", "бы", "за",
-    "из", "от", "до", "по", "на", "не", "ни", "во", "со", "ко", "то", "вы", "мы", "он", "я",
-    "такси", "чат", "водитель", "водители", "сообщение", "сообщения", "тема", "обсуждение",
-}
-
-
-def _message_tokens(text: str) -> list[str]:
-    """Tokenize Russian/English text for representative-message scoring."""
-    normalized = str(text or "").lower().replace("ё", "е")
-    tokens = re.findall(r"[a-zа-я0-9]{3,}", normalized, flags=re.IGNORECASE)
-    return [t for t in tokens if t not in KEY_MESSAGE_STOPWORDS and not t.isdigit()]
-
-
-def _message_token_set(text: str) -> set[str]:
-    return set(_message_tokens(text))
-
-
-def _dedupe_key(text: str) -> str:
-    normalized = re.sub(r"\s+", " ", str(text or "").lower().replace("ё", "е")).strip()
-    normalized = re.sub(r"[^a-zа-я0-9 ]+", "", normalized)
-    return normalized[:280]
-
-
-def _text_source_penalty(row: pd.Series) -> float:
-    source = str(row.get("text_source", "") or row.get("source", "")).lower()
-    text = str(row.get("text_clean", "") or "").lower()
-    penalty = 0.0
-    if any(x in source for x in ["ocr", "image", "изображ", "картин"]):
-        penalty -= 0.35
-    if any(x in text for x in ["тексты с изображений", "расшифровки"]):
-        penalty -= 0.25
-    return penalty
-
-
-def rank_key_messages(
-    event_messages: pd.DataFrame,
-    *,
-    event_title: str = "",
-    event_summary: str = "",
-    tags: str = "",
-    limit: int = 10,
-) -> pd.DataFrame:
-    """Return representative messages for an event.
-
-    The previous version prioritized negative + longest messages. This scorer keeps that signal,
-    but adds semantic relevance to the event title/summary, frequent words inside the event,
-    moderate text length, duplicate suppression and simple diversity.
-    """
-    if event_messages is None or event_messages.empty or "text_clean" not in event_messages.columns:
-        return event_messages.iloc[0:0].copy() if isinstance(event_messages, pd.DataFrame) else pd.DataFrame()
-
-    work = event_messages.copy()
-    work["_text"] = work["text_clean"].fillna("").astype(str).str.strip()
-    work = work[work["_text"].str.len() >= 18].copy()
-    if work.empty:
-        return event_messages.copy().head(limit)
-
-    topic_seed = " ".join([str(event_title or ""), str(event_summary or ""), str(tags or "").replace("|", " ")])
-    topic_tokens = set(_message_tokens(topic_seed))
-
-    all_tokens: list[str] = []
-    for txt in work["_text"].head(400).tolist():
-        all_tokens.extend(_message_tokens(txt))
-    frequent_tokens = {token for token, count in Counter(all_tokens).most_common(24) if count >= 2}
-    relevance_tokens = topic_tokens | frequent_tokens
-
-    rows = []
-    seen_best: dict[str, tuple[float, int]] = {}
-    for idx, row in work.iterrows():
-        text = row.get("_text", "")
-        text_len = len(text)
-        tokens = _message_token_set(text)
-        if not tokens:
-            continue
-
-        if text_len < 45:
-            length_score = 0.20
-        elif text_len <= 450:
-            length_score = 0.85 + min(text_len, 450) / 450 * 0.35
-        elif text_len <= 1200:
-            length_score = 1.05
-        else:
-            length_score = 0.70
-
-        overlap_topic = len(tokens & topic_tokens)
-        overlap_relevance = len(tokens & relevance_tokens)
-        topic_score = min(overlap_topic * 0.85, 3.4)
-        relevance_score = min(overlap_relevance * 0.28, 2.2)
-
-        sentiment = str(row.get("sentiment", "") or "").lower()
-        is_negative = False
-        if "is_negative" in row.index:
-            is_negative = str(row.get("is_negative", "")).lower() in {"true", "1", "yes", "да"}
-        is_negative = is_negative or any(x in sentiment for x in ["негатив", "negative", "отриц"])
-        negative_score = 1.15 if is_negative else 0.0
-
-        toxicity = str(row.get("toxicity", "") or row.get("Токсичность", "")).lower()
-        toxic_score = 0.45 if any(x in toxicity for x in ["токс", "toxic", "да", "true", "1"]) else 0.0
-
-        problem_score = 0.0
-        problem_words = {
-            "сбой", "ошибка", "ошибки", "проблема", "проблемы", "не работает",
-            "заблокировали", "блокировка", "налог", "закон", "коэффициент", "приоритет",
-            "оплата", "выплата", "штраф", "забастовка", "обновление", "тариф",
+            if str(payload.get("title") or "").strip():
+                events_out.loc[mask, "event_title"] = str(payload.get("title")).strip()
+            if "description" in payload:
+                events_out.loc[mask, "display_description"] = str(payload.get("description") or "").strip()
+                events_out.loc[mask, "event_summary"] = str(payload.get("description") or "").strip()
+            if str(payload.get("tags") or "").strip():
+                events_out.loc[mask, "main_tags"] = str(payload.get("tags")).strip()
+            if str(payload.get("status") or "").strip():
+                events_out.loc[mask, "status"] = str(payload.get("status")).strip()
+
+    # Merge events by redirecting source title to target title.
+    if not events_out.empty and state["event_merges"]:
+        title_map = {
+            str(row.get("event_id")): str(row.get("event_title") or "Без названия")
+            for _, row in events_out.iterrows()
         }
-        text_l = text.lower().replace("ё", "е")
-        for word in problem_words:
-            if word in text_l:
-                problem_score += 0.22
-        problem_score = min(problem_score, 1.1)
+        summary_map = {
+            str(row.get("event_id")): str(row.get("display_description") or row.get("event_summary") or "")
+            for _, row in events_out.iterrows()
+        }
+        for source_event_id, target_event_id in state["event_merges"].items():
+            mask = events_out["event_id"].astype(str) == str(source_event_id)
+            if mask.any():
+                events_out.loc[mask, "event_title"] = title_map.get(str(target_event_id), str(target_event_id))
+                events_out.loc[mask, "display_description"] = summary_map.get(str(target_event_id), "")
+                events_out.loc[mask, "merged_into"] = str(target_event_id)
 
-        score = length_score + topic_score + relevance_score + negative_score + toxic_score + problem_score + _text_source_penalty(row)
+    if not messages_out.empty:
+        if "message_id" not in messages_out.columns:
+            messages_out["message_id"] = messages_out.index.astype(str)
+        messages_out["message_id"] = messages_out["message_id"].fillna("").astype(str)
 
-        if re.fullmatch(r"[а-яa-z0-9 ,.!?\-]{0,80}", text_l) and len(tokens) <= 4 and overlap_relevance == 0:
-            score -= 1.0
+        if state["hidden_messages"]:
+            messages_out = messages_out[~messages_out["message_id"].isin(state["hidden_messages"])].copy()
 
-        dedupe = _dedupe_key(text)
-        if not dedupe:
+        if "event_id" in messages_out.columns:
+            messages_out["event_id"] = messages_out["event_id"].fillna("").astype(str)
+            if state["event_merges"]:
+                messages_out["event_id"] = messages_out["event_id"].map(lambda x: state["event_merges"].get(str(x), str(x)))
+            if state["move_map"]:
+                messages_out["event_id"] = messages_out.apply(lambda r: state["move_map"].get(str(r.get("message_id")), str(r.get("event_id") or "")), axis=1)
+
+    # Refresh titles in messages after moves/merges.
+    if not events_out.empty and not messages_out.empty and "event_id" in messages_out.columns:
+        title_map = {
+            str(row.get("event_id")): str(row.get("event_title") or "Без названия")
+            for _, row in events_out.iterrows()
+        }
+        messages_out["event_title"] = messages_out["event_id"].fillna("").astype(str).map(title_map).fillna(messages_out.get("event_title", ""))
+
+    events_out = recompute_event_counts(events_out, messages_out)
+
+    # Hide events after counts are recomputed.
+    if not events_out.empty and "status" in events_out.columns:
+        events_out = events_out[~events_out["status"].fillna("").astype(str).str.lower().isin(["hidden", "deleted", "archived"])].copy()
+
+    return events_out, messages_out, state
+
+
+def create_manual_event(project_id: str, title: str, description: str = "", tags: str = "", status: str = "active") -> str:
+    event_id = "manual_" + uuid.uuid4().hex[:12]
+    save_manual(project_id, "manual_events", f"manual_event::{event_id}", {
+        "event_id": event_id,
+        "title": title.strip(),
+        "description": description.strip(),
+        "tags": tags.strip() or "Ручной инфоповод",
+        "status": status,
+    })
+    return event_id
+
+
+def event_select_options(events_agg: pd.DataFrame, exclude_event_ids: set[str] | None = None) -> list[tuple[str, str]]:
+    exclude_event_ids = exclude_event_ids or set()
+    options: list[tuple[str, str]] = []
+    if events_agg is None or events_agg.empty:
+        return options
+    for _, row in events_agg.iterrows():
+        ids = [str(x) for x in row.get("event_ids", [])]
+        if not ids:
             continue
-        if dedupe in seen_best:
-            old_score, old_idx = seen_best[dedupe]
-            if score > old_score:
-                seen_best[dedupe] = (score, idx)
-        else:
-            seen_best[dedupe] = (score, idx)
-        rows.append((idx, score, tokens))
-
-    if not rows:
-        return work.sort_values("datetime").head(limit) if "datetime" in work.columns else work.head(limit)
-
-    score_by_idx = {idx: score for idx, score, _ in rows}
-    token_by_idx = {idx: tokens for idx, _, tokens in rows}
-    duplicate_winners = {idx for _, idx in seen_best.values()}
-
-    candidates = [idx for idx in score_by_idx if idx in duplicate_winners]
-    candidates = sorted(candidates, key=lambda idx: score_by_idx[idx], reverse=True)
-
-    selected: list[int] = []
-    for idx in candidates:
-        tokens = token_by_idx.get(idx, set())
-        too_similar = False
-        for chosen in selected:
-            chosen_tokens = token_by_idx.get(chosen, set())
-            union = tokens | chosen_tokens
-            if union and len(tokens & chosen_tokens) / len(union) >= 0.72:
-                too_similar = True
-                break
-        if too_similar:
+        if set(ids) & exclude_event_ids:
             continue
-        selected.append(idx)
-        if len(selected) >= limit:
-            break
-
-    if len(selected) < limit:
-        for idx in candidates:
-            if idx not in selected:
-                selected.append(idx)
-            if len(selected) >= limit:
-                break
-
-    result = work.loc[selected].copy()
-    result["_key_message_score"] = result.index.map(score_by_idx).fillna(0.0)
-    if "datetime" in result.columns:
-        return result.sort_values("datetime")
-    return result
+        label = f"{row.get('title') or ids[0]} · {int(row.get('message_count') or 0)} сообщ."
+        options.append((ids[0], label))
+    return options
 
 
-def message_preview_cards(
-    event_messages: pd.DataFrame,
-    limit: int = 8,
-    *,
-    event_title: str = "",
-    event_summary: str = "",
-    tags: str = "",
-    pinned_message_ids: set[str] | None = None,
-    conn=None,
-    event_id: str = "",
-    can_edit: bool = False,
-):
-    if event_messages.empty:
-        st.info("Сообщения не найдены.")
-        return
+def build_auto_summary(messages: pd.DataFrame, events_agg: pd.DataFrame, periods: pd.DataFrame, selected_period_ids: list[str]) -> str:
+    total = len(messages)
+    chats = messages["chat_title"].nunique() if "chat_title" in messages.columns else 0
+    authors = messages["author"].nunique() if "author" in messages.columns else 0
+    neg = 0
+    if "sentiment" in messages.columns:
+        neg = int(messages["sentiment"].fillna("").astype(str).str.lower().str.contains("нег").sum())
+    neg_share = (neg / total * 100) if total else 0
+    period_names = []
+    if not periods.empty:
+        subset = periods[periods["period_id"].astype(str).isin([str(x) for x in selected_period_ids])]
+        period_names = [str(x) for x in subset.get("period_name", pd.Series(dtype=str)).tolist()]
+    top_events = events_agg.head(5)["title"].tolist() if not events_agg.empty else []
+    top_chats = []
+    if "chat_title" in messages.columns:
+        top_chats = messages["chat_title"].fillna("").astype(str).replace("", pd.NA).dropna().value_counts().head(5).index.tolist()
 
-    pinned_message_ids = {str(x) for x in (pinned_message_ids or set()) if str(x).strip()}
-    work = event_messages.copy()
-    work["message_id"] = work.get("message_id", "").astype(str)
+    lines = []
+    lines.append(f"За выбранный период обработано {total:,} сообщений из {chats:,} чатов; уникальных авторов — {authors:,}.".replace(",", " "))
+    lines.append(f"Негативных сообщений: {neg:,} ({neg_share:.1f}%).".replace(",", " "))
+    if period_names:
+        lines.append("Периоды: " + "; ".join(period_names[:6]) + ("…" if len(period_names) > 6 else ""))
+    if top_events:
+        lines.append("Основные инфоповоды: " + "; ".join(top_events) + ".")
+    if top_chats:
+        lines.append("Наиболее активные чаты: " + "; ".join(top_chats) + ".")
+    return "\n\n".join(lines)
 
-    pinned_sample = work[work["message_id"].isin(pinned_message_ids)].copy()
-    auto_source = work[~work["message_id"].isin(pinned_message_ids)].copy()
 
-    auto_limit = max(0, limit - len(pinned_sample))
-    auto_sample = rank_key_messages(
-        auto_source,
-        event_title=event_title,
-        event_summary=event_summary,
-        tags=tags,
-        limit=auto_limit,
-    ) if auto_limit else auto_source.iloc[0:0].copy()
-
-    if not pinned_sample.empty:
-        pinned_sample["_manual_key"] = True
-        if "datetime" in pinned_sample.columns:
-            pinned_sample = pinned_sample.sort_values("datetime")
-    if not auto_sample.empty:
-        auto_sample["_manual_key"] = False
-
-    sample = pd.concat([pinned_sample, auto_sample], ignore_index=False) if not pinned_sample.empty else auto_sample
-
-    if sample.empty:
-        st.info("Не найдено достаточно информативных сообщений для этого инфоповода.")
-        return
-
-    st.caption(
-        "Закрепленные вручную сообщения показываются первыми. Остальные выбраны по близости к теме, частым словам внутри инфоповода, информативности текста, негативу и отсутствию дублей."
-    )
-
-    for _, row in sample.iterrows():
-        when = format_date(row.get("datetime"))
-        chat = row.get("chat_title", "")
-        author = row.get("author", "")
-        text = str(row.get("text_clean", "")).strip()
-        sentiment = str(row.get("sentiment", "")).strip()
-        link = str(row.get("message_link", "")).strip()
-        message_id = str(row.get("message_id", "")).strip()
-        is_manual_key = bool(row.get("_manual_key", False))
-        badge = "<b>Закреплено вручную</b> · " if is_manual_key else ""
-
-        st.markdown(
-            f"""
-<div style="padding: 0.75rem 0; border-bottom: 1px solid rgba(128,128,128,.25);">
-  <div style="font-size: 0.88rem; opacity: .75;">{badge}{when} · {chat} · {author} · {sentiment}</div>
-  <div style="margin-top: .25rem; white-space: pre-wrap;">{text[:1200]}</div>
-</div>
-""",
-            unsafe_allow_html=True,
-        )
-        cols = st.columns([1, 4]) if can_edit and is_manual_key and conn is not None and event_id and message_id else None
-        if link.startswith("http"):
-            st.markdown(f"[Открыть сообщение]({link})")
-        if cols:
-            with cols[0]:
-                if st.button("Убрать из ключевых", key=f"unpin_key_{event_id}_{message_id}"):
-                    unpin_key_message(conn, event_id, message_id)
-                    st.success("Сообщение удалено из ключевых.")
-                    st.cache_data.clear()
+def render_summary(project_id: str, period_ids: list[str], messages: pd.DataFrame, events_agg: pd.DataFrame, periods: pd.DataFrame, role: str) -> None:
+    st.subheader("Саммари")
+    key = "summary::" + "__".join(sorted(period_ids))
+    manual = get_manual(project_id, key)
+    auto_summary = build_auto_summary(messages, events_agg, periods, period_ids)
+    summary_text = (manual or {}).get("summary") or auto_summary
+    st.markdown(summary_text.replace("\n", "  \n"))
+    if role_rank(role) >= role_rank("editor"):
+        with st.expander("Редактировать саммари"):
+            edited = st.text_area("Текст саммари", value=summary_text, height=220, key=f"summary_{key}")
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("Сохранить саммари", key=f"save_{key}"):
+                    save_manual(project_id, "summaries", key, {"summary": edited})
+                    st.success("Саммари сохранено.")
+                    st.rerun()
+            with c2:
+                if st.button("Вернуть автоматическое", key=f"auto_{key}"):
+                    delete_manual(project_id, key)
+                    st.success("Вернули автоматическое саммари.")
                     st.rerun()
 
 
-def show_event_card(event_id: str, events: pd.DataFrame, messages: pd.DataFrame, conn, can_edit: bool = True, manual_tables: dict[str, pd.DataFrame] | None = None):
-    manual_tables = manual_tables or {}
-    selected = events[events["event_id"] == event_id]
-    if selected.empty:
-        st.warning("Инфоповод не найден.")
+def render_period_dynamics(messages: pd.DataFrame, periods: pd.DataFrame, period_ids: list[str]) -> None:
+    if len(period_ids) < 2 or messages.empty or "period_id" not in messages.columns:
+        return
+    rows = []
+    for period_id, group in messages.groupby("period_id"):
+        meta = periods[periods["period_id"].astype(str) == str(period_id)]
+        name = str(meta.iloc[0].get("period_name") if not meta.empty else period_id)
+        sort_date = pd.to_datetime(meta.iloc[0].get("date_from") if not meta.empty else None, errors="coerce")
+        neg = int(group.get("sentiment", pd.Series(dtype=str)).fillna("").astype(str).str.lower().str.contains("нег").sum()) if "sentiment" in group.columns else 0
+        total = len(group)
+        rows.append({"period_name": name, "sort_date": sort_date, "Сообщения": total, "Негатив": neg, "Доля негатива, %": round(neg / total * 100, 1) if total else 0})
+    summary = pd.DataFrame(rows)
+    if summary.empty:
+        return
+    summary = summary.sort_values(["sort_date", "period_name"], na_position="last")
+    st.subheader("Динамика по периодам")
+    c1, c2 = st.columns(2)
+    chart_df = summary.set_index("period_name")
+    with c1:
+        st.line_chart(chart_df[["Сообщения"]])
+    with c2:
+        st.line_chart(chart_df[["Доля негатива, %"]])
+    st.dataframe(summary.drop(columns=["sort_date"]), hide_index=True, use_container_width=True)
+
+
+
+def render_events(
+    project_id: str,
+    role: str,
+    events_agg: pd.DataFrame,
+    messages: pd.DataFrame,
+    manual_state: dict[str, Any],
+) -> None:
+    st.subheader("Инфоповоды")
+    can_edit = role_rank(role) >= role_rank("editor")
+
+    if can_edit:
+        with st.expander("Создать инфоповод вручную", expanded=False):
+            title = st.text_input("Название нового инфоповода", key="new_manual_event_title")
+            description = st.text_area("Описание", key="new_manual_event_description")
+            tags = st.text_input("Теги", key="new_manual_event_tags")
+            if st.button("Создать инфоповод", type="primary", key="create_manual_event"):
+                if not title.strip():
+                    st.error("Укажите название инфоповода.")
+                else:
+                    create_manual_event(project_id, title, description, tags)
+                    st.success("Инфоповод создан.")
+                    st.rerun()
+
+    if events_agg.empty:
+        st.info("Инфоповоды не найдены.")
         return
 
-    ev = selected.iloc[0]
-    event_source_ids = _expanded_source_event_ids(ev)
-    primary_event_id = str(ev.get("primary_source_event_id", "") or "").strip()
-    if not primary_event_id:
-        primary_event_id = sorted(event_source_ids)[0] if event_source_ids else str(event_id)
-    is_macro_event = str(event_id).startswith("macro_") or int(ev.get("source_event_count", 1) or 1) > 1
+    word = st.text_input("Фильтр по слову в сообщениях", placeholder="Например: коэффициент")
+    filtered_events = events_agg.copy()
+    filtered_messages = messages.copy()
 
-    def primary_id_for_visible_event(visible_id: str) -> str:
-        match = events[events["event_id"].astype(str) == str(visible_id)]
-        if len(match):
-            row = match.iloc[0]
-            primary = str(row.get("primary_source_event_id", "") or "").strip()
-            if primary:
-                return primary
-            ids = _expanded_source_event_ids(row)
-            if ids:
-                return sorted(ids)[0]
-        return str(visible_id)
-
-    event_messages_cache: pd.DataFrame | None = None
-
-    def get_event_messages() -> pd.DataFrame:
-        """Build the selected event message slice only when a section needs it."""
-        nonlocal event_messages_cache
-        if event_messages_cache is not None:
-            return event_messages_cache
-        if not isinstance(messages, pd.DataFrame) or messages.empty:
-            event_messages_cache = pd.DataFrame()
-            return event_messages_cache
-        if "_final_event_id_str" in messages.columns:
-            mask = messages["_final_event_id_str"].eq(str(event_id))
-        elif "final_event_id" in messages.columns:
-            mask = messages["final_event_id"].astype(str).eq(str(event_id))
-        else:
-            event_messages_cache = pd.DataFrame()
-            return event_messages_cache
-        if "_message_hidden_bool" in messages.columns:
-            mask = mask & (~messages["_message_hidden_bool"].astype(bool))
-        elif "message_hidden" in messages.columns:
-            mask = mask & (~messages["message_hidden"].astype(bool))
-        event_messages_cache = messages.loc[mask].copy()
-        if "datetime" in event_messages_cache.columns:
-            event_messages_cache = event_messages_cache.sort_values("datetime")
-        return event_messages_cache
-
-    pinned_message_ids: set[str] = set()
-
-    st.markdown("---")
-    st.header(ev["event_title"])
-    st.info(str(ev.get("event_summary", "")))
-
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Сообщений", int(ev.get("message_count", 0)))
-    c2.metric("Чатов", int(ev.get("chat_count", 0)))
-    c3.metric("Авторов", int(ev.get("author_count", 0)))
-    c4.metric("Негатив", format_pct(ev.get("negative_share", 0)))
-    c5.metric("Важность", round(float(ev.get("importance_score", 0)), 1))
-
-    tags = str(ev.get("main_tags", "")).replace("|", " · ")
-    source_topics_caption = str(ev.get("source_main_topics", "") or "").strip()
-
-    if source_topics_caption:
-        st.caption(f"Тема из файла: {source_topics_caption}")
-    st.caption(f"Теги: {tags}")
-    if is_macro_event:
-        st.caption(
-            f"Укрупненный инфоповод: собрано первичных событий/волн — {int(ev.get('source_event_count', 1) or 1)}."
-        )
-
-    tab_names = ["Ключевые сообщения", "Вся лента"] + (["Правки"] if can_edit else [])
-    card_section = st.radio(
-        "Раздел карточки инфоповода",
-        tab_names,
-        horizontal=True,
-        label_visibility="collapsed",
-        key=f"event_card_section_{event_id}",
-        help="Содержимое раздела строится только после выбора — это ускоряет карточки с большой лентой сообщений.",
-    )
-
-    if card_section in {"Ключевые сообщения", "Вся лента"}:
-        pinned_messages = manual_tables.get("event_key_messages", pd.DataFrame())
-        if pinned_messages is not None and isinstance(pinned_messages, pd.DataFrame) and not pinned_messages.empty:
-            pinned_messages = pinned_messages.copy()
-            pinned_messages["event_id"] = pinned_messages.get("event_id", "").astype(str)
-            pinned_messages["message_id"] = pinned_messages.get("message_id", "").astype(str)
-            pinned_message_ids = set(pinned_messages.loc[pinned_messages["event_id"] == str(event_id), "message_id"].tolist())
-
-    if card_section == "Ключевые сообщения":
-        event_messages = get_event_messages()
-        message_preview_cards(
-            event_messages,
-            limit=10,
-            event_title=str(ev.get("event_title", "")),
-            event_summary=str(ev.get("event_summary", "")),
-            tags=tags,
-            pinned_message_ids=pinned_message_ids,
-            conn=conn,
-            event_id=event_id,
-            can_edit=can_edit,
-        )
-
-    if card_section == "Вся лента":
-        event_messages = get_event_messages()
-        if event_messages.empty:
-            st.info("Сообщения не найдены.")
-        else:
-            total_event_messages = len(event_messages)
-            feed_col1, feed_col2 = st.columns([2, 1])
-            feed_query = feed_col1.text_input(
-                "Поиск внутри ленты",
-                value="",
-                placeholder="Слово или фраза в сообщении",
-                key=f"event_feed_query_{event_id}",
-            )
-            feed_limit = int(feed_col2.number_input(
-                "Показывать строк",
-                min_value=100,
-                max_value=max(100, min(5000, total_event_messages)),
-                value=min(500, max(100, total_event_messages)),
-                step=100,
-                key=f"event_feed_limit_{event_id}",
-                help="Для скорости по умолчанию показывается ограниченная часть ленты. Поиск применяется перед ограничением.",
-            ))
-
-            table = event_messages.copy()
-            if feed_query.strip() and "text_clean" in table.columns:
-                q = normalize_search_query(feed_query)
-                text_norm = (
-                    table["text_clean"]
-                    .fillna("")
-                    .astype(str)
-                    .str.lower()
-                    .str.replace("ё", "е", regex=False)
-                )
-                table = table[text_norm.str.contains(q, regex=False, na=False)].copy()
-
-            if "datetime" in table.columns:
-                table = table.sort_values("datetime", ascending=False)
-            if len(table) > feed_limit:
-                st.caption(f"Показано {feed_limit:,} из {len(table):,} сообщений. Увеличьте лимит или используйте поиск, чтобы сузить ленту.".replace(",", " "))
-                table = table.head(feed_limit).copy()
-            else:
-                st.caption(f"Показано сообщений: {len(table):,} из {total_event_messages:,}.".replace(",", " "))
-
-            table["Дата"] = format_date_series(table["datetime"])
-            table["Текст"] = table["text_clean"].fillna("").astype(str).str.slice(0, 420)
-            table["Тема"] = table.apply(lambda r: message_topic_display(r, str(ev.get("event_title", ""))), axis=1)
-            table["Теги"] = table.get("tags", "").apply(format_tags_for_display) if "tags" in table.columns else ""
-            table["Чат"] = table.get("chat_title", "")
-            table["Автор"] = table.get("author", "")
-            table["Тональность"] = table.get("sentiment", "")
-            table["Ссылка"] = table.get("message_link", "")
-
-            cols = ["Дата", "Текст", "Тема", "Теги", "Чат", "Автор", "Тональность", "Ссылка"]
-            msg_select = st.dataframe(
-                table[cols],
-                use_container_width=True,
-                height=460,
+    if word.strip() and "text" in filtered_messages.columns:
+        mask = filtered_messages["text"].fillna("").astype(str).str.contains(word.strip(), case=False, regex=False)
+        filtered_messages = filtered_messages[mask]
+        if "event_id" in filtered_messages.columns:
+            allowed = set(filtered_messages["event_id"].dropna().astype(str))
+            filtered_events = filtered_events[filtered_events["event_ids"].apply(lambda ids: bool(set(map(str, ids)) & allowed))]
+        st.caption(f"Найдено сообщений: {len(filtered_messages):,}".replace(",", " "))
+        msg_view = filtered_messages.copy()
+        if not msg_view.empty:
+            msg_view["Дата"] = msg_view.get("datetime", "").apply(fmt_date)
+            columns = [c for c in ["Дата", "chat_title", "author", "event_title", "text", "url"] if c in msg_view.columns]
+            st.dataframe(
+                msg_view[columns].rename(columns={
+                    "chat_title": "Чат",
+                    "author": "Автор",
+                    "event_title": "Инфоповод",
+                    "text": "Текст",
+                    "url": "Ссылка",
+                }).head(500),
                 hide_index=True,
-                on_select="rerun",
-                selection_mode="multi-row",
-                column_config={
-                    "Дата": st.column_config.TextColumn("Дата", width="small"),
-                    "Текст": st.column_config.TextColumn("Текст", width="large"),
-                    "Тема": st.column_config.TextColumn("Тема", width="medium"),
-                    "Теги": st.column_config.TextColumn("Теги", width="medium"),
-                    "Ссылка": st.column_config.LinkColumn("Ссылка", width="small"),
-                },
+                use_container_width=True,
             )
 
-            rows = get_selected_rows(msg_select)
-            selected_message_rows = table.iloc[rows].copy() if rows else table.iloc[0:0].copy()
+    table = filtered_events.copy()
+    table["Период"] = table.apply(
+        lambda r: f"{fmt_date(r.get('start_date'))}–{fmt_date(r.get('end_date'))}"
+        if fmt_date(r.get("start_date")) != fmt_date(r.get("end_date"))
+        else fmt_date(r.get("start_date")),
+        axis=1,
+    )
+    table["Негатив"] = (table["negative_share"] * 100).round(1).astype(str) + "%"
+    show = table[["title", "description", "tags", "Период", "message_count", "chat_count", "Негатив", "importance_score"]].rename(columns={
+        "title": "Название",
+        "description": "Описание",
+        "tags": "Теги",
+        "message_count": "Сообщений",
+        "chat_count": "Чатов",
+        "importance_score": "Важность",
+    })
+    event = st.dataframe(show, hide_index=True, use_container_width=True, selection_mode="single-row", on_select="rerun")
+    rows = getattr(event, "selection", {}).get("rows", []) if event is not None else []
+    if not rows:
+        return
 
-            if rows and can_edit:
-                st.markdown(f"#### Массовые действия с сообщениями · выбрано: {len(selected_message_rows)}")
-                st.caption(
-                    "Можно выбрать несколько строк в ленте и одним действием пометить их нерелевантными, "
-                    "перенести в другой инфоповод или удалить из выдачи."
-                )
-                with st.expander("Применить действие к выбранным сообщениям", expanded=len(selected_message_rows) > 1):
-                    bulk_note = st.text_input(
-                        "Комментарий к массовому действию",
-                        value="",
-                        key=f"bulk_msg_note_{event_id}",
-                    )
-                    bulk_action = st.radio(
-                        "Действие",
-                        options=[
-                            "Пометить как нерелевантные для текущего инфоповода",
-                            "Перенести в другой инфоповод",
-                            "Удалить из ленты / скрыть везде",
-                        ],
-                        key=f"bulk_msg_action_{event_id}",
-                    )
+    selected = filtered_events.iloc[rows[0]]
+    selected_ids = set(map(str, selected.get("event_ids", [])))
+    st.markdown(f"### {selected['title']}")
+    st.write(selected.get("description", ""))
 
-                    bulk_target_primary_id = ""
-                    if bulk_action == "Перенести в другой инфоповод":
-                        bulk_target_options = events[["event_id", "event_title", "message_count", "start_date", "end_date"]].copy()
-                        bulk_target_options["event_id"] = bulk_target_options["event_id"].astype(str)
-                        bulk_target_options = bulk_target_options.sort_values(["message_count", "event_title"], ascending=[False, True])
-                        bulk_event_search = st.text_input(
-                            "Поиск целевого инфоповода",
-                            value="",
-                            placeholder="Начните вводить название темы",
-                            key=f"bulk_event_search_{event_id}",
-                        )
-                        if bulk_event_search.strip():
-                            q = bulk_event_search.strip().lower().replace("ё", "е")
-                            bulk_target_options = bulk_target_options[
-                                bulk_target_options["event_title"].fillna("").astype(str).str.lower().str.replace("ё", "е", regex=False).str.contains(q, regex=False, na=False)
-                            ]
-
-                        bulk_target_label_map = {}
-                        for _, target_row in bulk_target_options.iterrows():
-                            target_id = str(target_row.get("event_id", ""))
-                            title_part = str(target_row.get("event_title", "") or "Без названия")[:120]
-                            msg_count = int(target_row.get("message_count", 0) or 0)
-                            period_part = format_period(target_row)
-                            suffix = f" · {msg_count} сообщ."
-                            if period_part:
-                                suffix += f" · {period_part}"
-                            bulk_target_label_map[target_id] = f"{title_part}{suffix}"
-
-                        bulk_target_ids = list(bulk_target_label_map.keys())
-                        current_bulk_target_idx = 0
-                        if str(event_id) in bulk_target_ids:
-                            current_bulk_target_idx = bulk_target_ids.index(str(event_id))
-                        bulk_selected_target_id = st.selectbox(
-                            "Куда перенести выбранные сообщения",
-                            options=bulk_target_ids,
-                            index=current_bulk_target_idx if bulk_target_ids else None,
-                            format_func=lambda x: bulk_target_label_map.get(str(x), str(x)),
-                            key=f"bulk_target_event_id_{event_id}",
-                            disabled=not bool(bulk_target_ids),
-                        )
-                        bulk_target_primary_id = primary_id_for_visible_event(str(bulk_selected_target_id)) if bulk_selected_target_id else ""
-
-                    selected_preview = selected_message_rows.copy()
-                    selected_preview["Дата"] = format_date_series(selected_preview.get("datetime", pd.Series(dtype=str)))
-                    selected_preview["Чат"] = selected_preview.get("chat_title", "")
-                    selected_preview["Автор"] = selected_preview.get("author", "")
-                    selected_preview["Текст"] = selected_preview.get("text_clean", "").fillna("").astype(str).str.slice(0, 240)
-                    st.dataframe(
-                        selected_preview[[c for c in ["Дата", "Чат", "Автор", "Текст"] if c in selected_preview.columns]],
-                        use_container_width=True,
-                        hide_index=True,
-                        height=min(260, 80 + 38 * max(1, len(selected_preview))),
-                        column_config={"Текст": st.column_config.TextColumn(width="large")},
-                    )
-
-                    apply_disabled = selected_message_rows.empty or (bulk_action == "Перенести в другой инфоповод" and not bulk_target_primary_id)
-                    if st.button("Применить к выбранным сообщениям", type="primary", disabled=apply_disabled, key=f"apply_bulk_messages_{event_id}"):
-                        try:
-                            changed_count = 0
-                            skipped_count = 0
-                            selected_unique = selected_message_rows.drop_duplicates(subset=["message_id"]).copy() if "message_id" in selected_message_rows.columns else selected_message_rows.copy()
-                            for _, selected_row in selected_unique.iterrows():
-                                selected_message_id = str(selected_row.get("message_id", "")).strip()
-                                if not selected_message_id:
-                                    skipped_count += 1
-                                    continue
-                                current_source_event_id = str(selected_row.get("source_final_event_id", "") or event_id).strip()
-                                if bulk_action == "Пометить как нерелевантные для текущего инфоповода":
-                                    mark_message_irrelevant(conn, current_source_event_id, selected_message_id, reason=bulk_note)
-                                    changed_count += 1
-                                elif bulk_action == "Перенести в другой инфоповод":
-                                    if not bulk_target_primary_id or str(bulk_target_primary_id) == current_source_event_id:
-                                        skipped_count += 1
-                                        continue
-                                    move_message(conn, selected_message_id, str(bulk_target_primary_id), note=bulk_note)
-                                    changed_count += 1
-                                else:
-                                    hide_message(conn, selected_message_id, hidden=True, note=bulk_note)
-                                    changed_count += 1
-
-                            if changed_count:
-                                st.success(f"Массовое действие выполнено. Обработано сообщений: {changed_count}.")
-                            if skipped_count:
-                                st.info(f"Пропущено сообщений: {skipped_count}.")
-                            st.cache_data.clear()
-                            st.rerun()
-                        except Exception as e:
-                            st.error(str(e))
-
-            if rows:
-                row = table.iloc[rows[0]]
-                message_id = str(row.get("message_id", "")).strip()
-                st.markdown("#### Выбранное сообщение")
-                if len(rows) > 1:
-                    st.caption("Ниже показана точечная карточка первого выбранного сообщения. Массовые действия выше применяются ко всем выбранным строкам.")
-                st.caption(
-                    f"{format_date(row.get('datetime'))} · {row.get('chat_title', '')} · "
-                    f"{row.get('author', '')} · текущая тема: {message_topic_display(row, str(ev.get('event_title', '')))}"
-                )
-                st.write(row.get("text_clean", ""))
-
-                if can_edit:
-                    with st.expander("Назначить тему или инфоповод", expanded=(len(rows) == 1)):
-                        msg_note = st.text_input(
-                            "Комментарий к действию",
-                            value="",
-                            key=f"msg_note_{event_id}_{message_id}",
-                        )
-
-                        st.markdown("##### Назначить тему")
-                        available_topics = collect_available_source_topics(events, messages)
-                        current_topic = message_topic_display(row, str(ev.get("event_title", "")))
-                        topic_options = [""] + available_topics
-                        default_topic_idx = 0
-                        for i, item in enumerate(topic_options):
-                            if item and item.lower().replace("ё", "е") == current_topic.lower().replace("ё", "е"):
-                                default_topic_idx = i
-                                break
-                        selected_topic = st.selectbox(
-                            "Тема сообщения",
-                            options=topic_options,
-                            index=default_topic_idx,
-                            format_func=lambda x: x or "— выбрать из найденных тем —",
-                            key=f"topic_select_{event_id}_{message_id}",
-                        )
-                        custom_topic = st.text_input(
-                            "Или новая тема",
-                            value="",
-                            placeholder="Например: Детские кресла",
-                            key=f"custom_topic_{event_id}_{message_id}",
-                        )
-                        topic_to_save = custom_topic.strip() or selected_topic.strip()
-                        if st.button(
-                            "Сохранить тему сообщения",
-                            disabled=not bool(topic_to_save),
-                            key=f"save_topic_{event_id}_{message_id}",
-                        ):
-                            try:
-                                save_message_topic_override(
-                                    conn,
-                                    message_id,
-                                    source_main_topic=topic_to_save,
-                                    source_topics=topic_to_save,
-                                    note=msg_note,
-                                )
-                                st.success("Тема сообщения сохранена.")
-                                st.cache_data.clear()
-                                st.rerun()
-                            except Exception as e:
-                                st.error(str(e))
-
-                        st.markdown("##### Назначить инфоповод")
-                        target_options = events[["event_id", "event_title", "message_count", "start_date", "end_date"]].copy()
-                        target_options["event_id"] = target_options["event_id"].astype(str)
-                        target_options = target_options.sort_values(["message_count", "event_title"], ascending=[False, True])
-                        event_search = st.text_input(
-                            "Поиск инфоповода",
-                            value="",
-                            placeholder="Начните вводить название темы",
-                            key=f"event_search_{event_id}_{message_id}",
-                        )
-                        if event_search.strip():
-                            q = event_search.strip().lower().replace("ё", "е")
-                            target_options = target_options[
-                                target_options["event_title"].fillna("").astype(str).str.lower().str.replace("ё", "е", regex=False).str.contains(q, regex=False, na=False)
-                            ]
-
-                        target_label_map = {}
-                        for _, target_row in target_options.iterrows():
-                            target_id = str(target_row.get("event_id", ""))
-                            title_part = str(target_row.get("event_title", "") or "Без названия")[:120]
-                            msg_count = int(target_row.get("message_count", 0) or 0)
-                            period_part = format_period(target_row)
-                            suffix = f" · {msg_count} сообщ."
-                            if period_part:
-                                suffix += f" · {period_part}"
-                            target_label_map[target_id] = f"{title_part}{suffix}"
-
-                        target_ids = list(target_label_map.keys())
-                        current_target_idx = 0
-                        if str(event_id) in target_ids:
-                            current_target_idx = target_ids.index(str(event_id))
-                        selected_target_id = st.selectbox(
-                            "Инфоповод сообщения",
-                            options=target_ids,
-                            index=current_target_idx if target_ids else None,
-                            format_func=lambda x: target_label_map.get(str(x), str(x)),
-                            key=f"target_event_id_{event_id}_{message_id}",
-                            disabled=not bool(target_ids),
-                        )
-                        selected_target_primary_id = primary_id_for_visible_event(str(selected_target_id)) if selected_target_id else ""
-                        current_message_source_event_id = str(row.get("source_final_event_id", "") or event_id)
-                        if selected_target_id:
-                            st.caption(f"Будет назначен инфоповод: {target_label_map.get(str(selected_target_id), selected_target_id)}")
-
-                        action_cols = st.columns(4)
-                        if action_cols[0].button(
-                            "Назначить инфоповод",
-                            disabled=not bool(selected_target_primary_id) or str(selected_target_primary_id) == current_message_source_event_id,
-                            key=f"assign_event_{event_id}_{message_id}",
-                        ):
-                            try:
-                                move_message(conn, message_id, str(selected_target_primary_id), note=msg_note)
-                                st.success("Сообщению назначен выбранный инфоповод.")
-                                st.cache_data.clear()
-                                st.rerun()
-                            except Exception as e:
-                                st.error(str(e))
-
-                        if action_cols[1].button("Нерелевант", key=f"irrelevant_{event_id}_{message_id}"):
-                            mark_message_irrelevant(conn, current_message_source_event_id, message_id, reason=msg_note)
-                            st.success("Сообщение исключено из текущего инфоповода как нерелевантное.")
-                            st.cache_data.clear()
-                            st.rerun()
-
-                        if action_cols[2].button("Скрыть везде", key=f"hide_{event_id}_{message_id}"):
-                            hide_message(conn, message_id, hidden=True, note=msg_note)
-                            st.success("Сообщение скрыто во всех разделах дашборда.")
-                            st.cache_data.clear()
-                            st.rerun()
-
-                        already_key = message_id in pinned_message_ids
-                        if action_cols[3].button("Ключевое", disabled=already_key, key=f"pin_key_{event_id}_{message_id}"):
-                            pin_key_message(conn, event_id, message_id, note=msg_note)
-                            st.success("Сообщение добавлено в ключевые.")
-                            st.cache_data.clear()
-                            st.rerun()
-                        if already_key:
-                            st.caption("Это сообщение уже закреплено как ключевое для текущего инфоповода.")
-
-                        st.markdown("##### Создать новый инфоповод и назначить его сообщению")
-                        st.caption("Если подходящего инфоповода нет в списке, создайте новый — выбранное сообщение сразу будет перенесено туда.")
-                        with st.form(f"create_event_for_message_{event_id}_{message_id}"):
-                            new_title = st.text_input("Название нового инфоповода", key=f"new_event_title_{event_id}_{message_id}")
-                            new_summary = st.text_area(
-                                "Описание нового инфоповода",
-                                value="",
-                                height=90,
-                                key=f"new_event_summary_{event_id}_{message_id}",
-                            )
-                            new_tags = st.text_input(
-                                "Теги нового инфоповода",
-                                value=str(row.get("tags", "")).replace("|", ", "),
-                                key=f"new_event_tags_{event_id}_{message_id}",
-                            )
-                            create_and_move = st.form_submit_button("Создать и назначить")
-                            if create_and_move:
-                                try:
-                                    new_event_id = create_manual_event(
-                                        conn,
-                                        title=new_title,
-                                        summary=new_summary,
-                                        status="новый",
-                                        main_tags=normalize_manual_tags(new_tags),
-                                        note=f"Создано из сообщения {message_id}",
-                                    )
-                                    move_message(conn, message_id, new_event_id, note="Назначено в новый инфоповод")
-                                    st.success("Новый инфоповод создан, сообщение назначено в него.")
-                                    st.cache_data.clear()
-                                    st.rerun()
-                                except Exception as e:
-                                    st.error(str(e))
-
-    if can_edit and card_section == "Правки":
-        st.markdown("#### Ручная правка инфоповода")
-        st.caption("Описание можно скорректировать вручную. После сохранения оно будет показываться в таблице и карточке вместо автоматического описания.")
-        with st.form(f"edit_event_{event_id}"):
-            title = st.text_input("Название", value=str(ev.get("event_title", "")))
-            summary = st.text_area("Описание", value=str(ev.get("event_summary", "")), height=150, help="Например: В теме обсуждались: законопроект; повышение коэффициентов; невозможность загрузить обновление.")
-            status = st.selectbox(
-                "Статус",
-                STATUS_OPTIONS,
-                index=STATUS_OPTIONS.index(ev.get("status")) if ev.get("status") in STATUS_OPTIONS else 0,
-            )
-            hidden = st.checkbox("Скрыть инфоповод", value=bool(ev.get("is_hidden", False)))
-            note = st.text_area("Комментарий модератора", value="", height=80)
-            submitted = st.form_submit_button("Сохранить")
-            if submitted:
-                save_event_override(conn, event_id, title=title, summary=summary, status=status, hidden=hidden, note=note)
-                st.success("Правки сохранены.")
-                st.cache_data.clear()
-                st.rerun()
-
-        st.markdown("#### Нерелевантные сообщения")
-        exclusions = manual_tables.get("event_message_exclusions", pd.DataFrame())
-        if not exclusions.empty:
-            exclusion_source_ids = {str(x) for x in event_source_ids} | {str(event_id)}
-            event_exclusions = exclusions[exclusions["event_id"].astype(str).isin(exclusion_source_ids)]
-        else:
-            event_exclusions = exclusions
-        if event_exclusions.empty:
-            st.info("Для этого инфоповода пока нет сообщений, помеченных как нерелевантные.")
-        else:
-            excluded_ids = event_exclusions["message_id"].astype(str).tolist()
-            excluded_messages = messages[messages["message_id"].astype(str).isin(excluded_ids)].copy()
-            if excluded_messages.empty:
-                st.info("Есть записи об исключениях, но сообщения не найдены в текущей выгрузке.")
-            else:
-                reason_map = event_exclusions.set_index("message_id")["reason"].to_dict()
-                excluded_messages["Дата"] = format_date_series(excluded_messages.get("datetime", pd.Series(dtype=str)))
-                excluded_messages["Чат"] = excluded_messages.get("chat_title", "")
-                excluded_messages["Автор"] = excluded_messages.get("author", "")
-                excluded_messages["Причина"] = excluded_messages["message_id"].map(reason_map).fillna("")
-                excluded_messages["Текст"] = excluded_messages["text_clean"].fillna("").astype(str).str.slice(0, 350)
-                excluded_cols = ["Дата", "Чат", "Автор", "Причина", "Текст"]
-                excluded_select = st.dataframe(
-                    excluded_messages[excluded_cols],
-                    use_container_width=True,
-                    height=220,
-                    hide_index=True,
-                    on_select="rerun",
-                    selection_mode="single-row",
-                    column_config={
-                        "Текст": st.column_config.TextColumn(width="large"),
-                    },
-                )
-                excluded_rows = get_selected_rows(excluded_select)
-                if excluded_rows:
-                    restored_row = excluded_messages.iloc[excluded_rows[0]]
-                    st.write(restored_row.get("text_clean", ""))
-                    restore_event_id = str(event_exclusions[event_exclusions["message_id"].astype(str) == str(restored_row["message_id"])].iloc[0].get("event_id", event_id))
-                    if st.button("Вернуть сообщение в инфоповод", key=f"restore_{event_id}_{restored_row['message_id']}"):
-                        restore_message_relevance(conn, restore_event_id, restored_row["message_id"])
-                        st.success("Сообщение возвращено в инфоповод.")
-                        st.cache_data.clear()
+    if can_edit:
+        with st.expander("Правка выбранного инфоповода", expanded=False):
+            new_title = st.text_input("Название", value=str(selected.get("title") or ""), key=f"edit_title_{selected.get('group_key')}")
+            new_desc = st.text_area("Описание", value=str(selected.get("description") or ""), height=160, key=f"edit_desc_{selected.get('group_key')}")
+            new_tags = st.text_input("Теги", value=str(selected.get("tags") or ""), key=f"edit_tags_{selected.get('group_key')}")
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                if st.button("Сохранить правки", key=f"save_event_edit_{selected.get('group_key')}"):
+                    for event_id in selected_ids:
+                        save_manual(project_id, "event_edits", f"event_edit::{event_id}", {
+                            "event_id": event_id,
+                            "title": new_title,
+                            "description": new_desc,
+                            "tags": new_tags,
+                            "status": "active",
+                        })
+                    st.success("Правки сохранены.")
+                    st.rerun()
+            with c2:
+                if st.button("Скрыть инфоповод", key=f"hide_event_{selected.get('group_key')}"):
+                    for event_id in selected_ids:
+                        save_manual(project_id, "event_edits", f"event_edit::{event_id}", {
+                            "event_id": event_id,
+                            "title": new_title,
+                            "description": new_desc,
+                            "tags": new_tags,
+                            "status": "hidden",
+                        })
+                    st.success("Инфоповод скрыт.")
+                    st.rerun()
+            with c3:
+                options = event_select_options(events_agg, exclude_event_ids=selected_ids)
+                if options:
+                    target = st.selectbox("Объединить с темой", options, format_func=lambda x: x[1], key=f"merge_target_{selected.get('group_key')}")
+                    if st.button("Объединить", key=f"merge_event_{selected.get('group_key')}"):
+                        target_event_id = target[0]
+                        for source_event_id in selected_ids:
+                            if source_event_id != target_event_id:
+                                save_manual(project_id, "event_merges", f"event_merge::{source_event_id}", {
+                                    "source_event_id": source_event_id,
+                                    "target_event_id": target_event_id,
+                                })
+                        st.success("Инфоповоды объединены.")
                         st.rerun()
 
-        st.markdown("#### Массовое объединение инфоповодов")
-        st.caption(
-            "Можно выбрать сразу несколько инфоповодов и объединить их за одно действие. "
-            "Если целевой инфоповод — текущий, выбранные темы будут присоединены к нему. "
-            "Если выбран другой целевой инфоповод, текущая тема и дополнительные выбранные темы будут присоединены к нему."
-        )
-
-        def visible_event_source_ids(row_or_id) -> set[str]:
-            """Return all internal source event ids hidden behind a visible/aggregated event row."""
-            result: set[str] = set()
-            if isinstance(row_or_id, pd.Series):
-                row = row_or_id
-            else:
-                row_match = events[events["event_id"].astype(str) == str(row_or_id)]
-                row = row_match.iloc[0] if len(row_match) else pd.Series({"event_id": str(row_or_id)})
-
-            raw = str(row.get("source_event_ids", "") or "")
-            for item in raw.split("|"):
-                item = item.strip()
-                if item:
-                    result.add(item)
-            event_id_value = str(row.get("event_id", "") or "").strip()
-            if event_id_value:
-                result.add(event_id_value)
-            return result
-
-        def make_event_label(row: pd.Series, prefix: str = "") -> str:
-            title_part = str(row.get("event_title", "") or "Без названия")[:120]
-            msg_count = int(row.get("message_count", 0) or 0)
-            period_part = format_period(row)
-            suffix = f" · {msg_count} сообщ."
-            if period_part:
-                suffix += f" · {period_part}"
-            return f"{prefix}{title_part}{suffix}"
-
-        current_visible_id = str(event_id)
-        current_internal_ids = visible_event_source_ids(ev)
-        event_rows_for_merge = events.copy()
-        event_rows_for_merge["event_id"] = event_rows_for_merge["event_id"].astype(str)
-        event_rows_for_merge["search_text"] = event_rows_for_merge["event_title"].fillna("").astype(str).str.lower()
-
-        target_search = st.text_input(
-            "Поиск целевого инфоповода",
-            value="",
-            placeholder="Начните вводить название темы, если список большой",
-            key=f"merge_target_search_{event_id}",
-        )
-
-        target_candidates = event_rows_for_merge.copy()
-        if target_search.strip():
-            q = target_search.strip().lower().replace("ё", "е")
-            title_norm = target_candidates["search_text"].str.replace("ё", "е", regex=False)
-            target_candidates = target_candidates[title_norm.str.contains(q, regex=False, na=False)]
-
-        # Always keep the current event available as a target, even when the search filter hides it.
-        current_target_row = event_rows_for_merge[event_rows_for_merge["event_id"] == current_visible_id]
-        if len(current_target_row) and current_visible_id not in set(target_candidates["event_id"].astype(str)):
-            target_candidates = pd.concat([current_target_row, target_candidates], ignore_index=True)
-
-        target_candidates = target_candidates.sort_values(["message_count", "event_title"], ascending=[False, True])
-        target_label_map = {}
-        for _, candidate_row in target_candidates.iterrows():
-            candidate_id = str(candidate_row.get("event_id", ""))
-            prefix = "Текущий: " if candidate_id == current_visible_id else ""
-            target_label_map[candidate_id] = make_event_label(candidate_row, prefix=prefix)
-
-        target_ids = list(target_label_map.keys())
-        if current_visible_id in target_ids:
-            target_ids = [current_visible_id] + [x for x in target_ids if x != current_visible_id]
-
-        selected_target_id = st.selectbox(
-            "Целевой инфоповод",
-            options=target_ids,
-            format_func=lambda x: target_label_map.get(str(x), "— выберите инфоповод —"),
-            key=f"merge_target_id_{event_id}",
-        ) if target_ids else ""
-
-        if not selected_target_id:
-            st.info("Подходящих инфоповодов для объединения не найдено. Попробуйте изменить поиск.")
-
-        source_search = st.text_input(
-            "Поиск инфоповодов для объединения",
-            value="",
-            placeholder="Найдите темы, которые нужно присоединить к целевой",
-            key=f"merge_sources_search_{event_id}",
-        )
-
-        target_internal_ids = visible_event_source_ids(selected_target_id) if selected_target_id else set()
-        source_candidates = event_rows_for_merge.copy()
-        source_candidates = source_candidates[~source_candidates["event_id"].astype(str).isin({current_visible_id, str(selected_target_id)})]
-
-        if source_search.strip():
-            q = source_search.strip().lower().replace("ё", "е")
-            title_norm = source_candidates["search_text"].str.replace("ё", "е", regex=False)
-            source_candidates = source_candidates[title_norm.str.contains(q, regex=False, na=False)]
-
-        source_candidates = source_candidates.sort_values(["message_count", "event_title"], ascending=[False, True])
-        source_label_map = {
-            str(row.get("event_id", "")): make_event_label(row)
-            for _, row in source_candidates.iterrows()
-        }
-
-        selected_extra_source_ids = st.multiselect(
-            "Дополнительные инфоповоды для объединения",
-            options=list(source_label_map.keys()),
-            format_func=lambda x: source_label_map.get(str(x), str(x)),
-            key=f"merge_extra_sources_{event_id}",
-            help="Можно выбрать несколько тем. Они будут объединены за одно действие.",
-        )
-
-        if selected_target_id == current_visible_id:
-            source_visible_ids = [str(x) for x in selected_extra_source_ids]
-            st.caption("Режим: выбранные инфоповоды будут присоединены к текущему.")
-        else:
-            source_visible_ids = [current_visible_id] + [str(x) for x in selected_extra_source_ids]
-            st.caption("Режим: текущий инфоповод и выбранные дополнительные темы будут присоединены к целевому.")
-
-        internal_sources_to_merge: set[str] = set()
-        for source_visible_id in source_visible_ids:
-            internal_sources_to_merge.update(visible_event_source_ids(source_visible_id))
-        internal_sources_to_merge = {
-            source_id for source_id in internal_sources_to_merge
-            if source_id and source_id not in target_internal_ids and source_id != str(selected_target_id)
-        }
-
-        if selected_target_id:
-            st.caption(
-                f"Цель: {target_label_map.get(str(selected_target_id), selected_target_id)}. "
-                f"К объединению выбрано видимых тем: {len(source_visible_ids)}, внутренних событий/волн: {len(internal_sources_to_merge)}."
-            )
-
-        reason = st.text_input("Причина объединения", value="", key=f"merge_reason_{event_id}")
-        merge_disabled = not bool(selected_target_id) or len(internal_sources_to_merge) == 0
-        if st.button("Объединить выбранные", disabled=merge_disabled, key=f"merge_button_{event_id}"):
-            target_id = primary_id_for_visible_event(str(selected_target_id))
-            try:
-                merged_count = 0
-                for source_id in sorted(internal_sources_to_merge):
-                    if source_id == target_id:
-                        continue
-                    merge_events(conn, source_event_id=source_id, target_event_id=target_id, reason=reason)
-                    merged_count += 1
-                st.success(f"Инфоповоды объединены: перенесено внутренних событий/волн: {merged_count}.")
-                st.cache_data.clear()
-                st.rerun()
-            except Exception as e:
-                st.error(str(e))
-
-def show_message_search(messages: pd.DataFrame, events: pd.DataFrame, conn):
-    st.subheader("Поиск по сообщениям")
-
-    col1, col2, col3 = st.columns(3)
-    q = col1.text_input("Текст")
-    tag = col2.text_input("Тег")
-    chat = col3.text_input("Чат")
-
-    if "_message_hidden_bool" in messages.columns:
-        filtered = messages[~messages["_message_hidden_bool"].astype(bool)].copy()
-    else:
-        filtered = messages[~messages.get("message_hidden", pd.Series([False] * len(messages))).astype(bool)].copy()
-
-    if q:
-        q_norm = q.lower().replace("ё", "е")
-        if "_search_text" in filtered.columns:
-            filtered = filtered[filtered["_search_text"].fillna("").astype(str).str.contains(q_norm, regex=False, na=False)]
-        else:
-            filtered = filtered[filtered["text_clean"].fillna("").astype(str).str.lower().str.replace("ё", "е", regex=False).str.contains(q_norm, regex=False, na=False)]
-    if tag and "tags" in filtered.columns:
-        filtered = filtered[filtered["tags"].fillna("").str.lower().str.contains(tag.lower(), regex=False)]
-    if chat and "chat_title" in filtered.columns:
-        filtered = filtered[filtered["chat_title"].fillna("").str.lower().str.contains(chat.lower(), regex=False)]
-
-    filtered = filtered.sort_values("datetime", ascending=False).head(500)
-    filtered["Текст"] = filtered["text_clean"].fillna("").astype(str).str.slice(0, 350)
-    filtered["Дата"] = format_date_series(filtered["datetime"])
-    filtered["Чат"] = filtered.get("chat_title", "")
-    filtered["Автор"] = filtered.get("author", "")
-    event_title_map = events.set_index("event_id")["event_title"].to_dict() if len(events) else {}
-    filtered["Инфоповод"] = filtered.get("final_event_id", "").map(event_title_map).fillna("")
-    filtered["Теги"] = filtered.get("tags", "")
-    filtered["Тональность"] = filtered.get("sentiment", "")
-    filtered["Ссылка"] = filtered.get("message_link", "")
-    cols = ["Дата", "Чат", "Автор", "Теги", "Тональность", "Инфоповод", "Текст", "Ссылка"]
-    cols = [c for c in cols if c in filtered.columns]
-
-    st.dataframe(
-        filtered[cols],
-        use_container_width=True,
-        height=640,
-        hide_index=True,
-        column_config={
-            "Ссылка": st.column_config.LinkColumn("Ссылка"),
-            "Текст": st.column_config.TextColumn(width="large"),
-        },
-    )
-
-
-
-def safe_upload_name(filename: str) -> str:
-    source = Path(filename or "uploaded.csv")
-    name = re.sub(r"[^0-9A-Za-zА-Яа-я_. -]+", "_", source.stem).strip("._-") or "uploaded"
-    suffix = source.suffix.lower()
-    if suffix not in {".csv", ".xlsx", ".xls", ".xlsm"}:
-        suffix = ".csv"
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return f"{stamp}_{name}{suffix}"
-
-
-def read_manifest(data_dir: Path) -> dict:
-    path = data_dir / "manifest.json"
-    if not path.exists():
-        return {}
-    try:
-        import json
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-
-
-@st.cache_data(show_spinner=False, ttl=300)
-def load_generated_tables_remote(period_ids: tuple[str, ...]):
-    return load_generated_tables_from_supabase(list(period_ids))
-
-
-@st.cache_data(show_spinner=False, ttl=300)
-def load_manual_tables_cached(_conn, cache_marker: str = "manual_rows") -> dict[str, pd.DataFrame]:
-    """Load manual rows once per cache window/rerun cycle.
-
-    `_conn` is intentionally prefixed with underscore so Streamlit does not try
-    to hash SQLite/Supabase connection objects. Manual actions call
-    `st.cache_data.clear()`, so saved edits still appear immediately.
-    """
-    return load_all_manual_tables(_conn)
-
-
-@st.cache_data(show_spinner=False)
-def cached_apply_manual_edits(
-    events_raw: pd.DataFrame,
-    messages: pd.DataFrame,
-    discussion_messages: pd.DataFrame,
-    event_discussions: pd.DataFrame,
-    overrides: pd.DataFrame,
-    merges: pd.DataFrame,
-    msg_overrides: pd.DataFrame,
-    msg_exclusions: pd.DataFrame,
-    manual_events: pd.DataFrame,
-    msg_topic_overrides: pd.DataFrame,
-):
-    return apply_manual_edits(
-        events_raw,
-        messages,
-        discussion_messages,
-        event_discussions,
-        overrides,
-        merges,
-        msg_overrides,
-        msg_exclusions,
-        manual_events,
-        msg_topic_overrides,
-    )
-
-
-@st.cache_data(show_spinner=False)
-def cached_build_consolidated_events(
-    events: pd.DataFrame,
-    messages: pd.DataFrame,
-    level: str,
-    overrides: pd.DataFrame,
-):
-    return build_consolidated_events(events, messages, level=level, overrides=overrides)
-
-
-def render_period_selector() -> list[str]:
-    """Render Supabase period selector and return selected period IDs."""
-    periods = list_periods()
-    if periods.empty:
-        st.sidebar.info("В Supabase пока нет сохраненных периодов. Загрузите файл в разделе «Загрузка файла».")
-        return []
-
-    def period_label(row) -> str:
-        name = str(row.get("period_name", "") or row.get("period_id", ""))
-        date_from = format_date(row.get("date_from")) if "date_from" in row else ""
-        date_to = format_date(row.get("date_to")) if "date_to" in row else ""
-        dates = f" · {date_from}–{date_to}" if date_from or date_to else ""
-        return f"{name}{dates}"
-
-    labels = {str(row["period_id"]): period_label(row) for _, row in periods.iterrows()}
-    options = list(labels.keys())
-    default = options[:1]
-    selected = st.sidebar.multiselect(
-        "Периоды",
-        options=options,
-        default=default,
-        format_func=lambda x: labels.get(x, x),
-        help="Можно выбрать один период или несколько. При выборе нескольких периодов дашборд объединит данные.",
-    )
-    if not selected:
-        st.sidebar.warning("Выберите хотя бы один период.")
-    return selected
-def render_period_history_manager(persistent_enabled: bool, upload_dir: Path):
-    """Show and edit uploaded periods/files history."""
-    st.markdown("### История загруженных файлов")
-
-    if not persistent_enabled:
-        st.info("Supabase не настроен. В локальном режиме можно только посмотреть файлы в папке загрузок.")
-        upload_dir.mkdir(parents=True, exist_ok=True)
-        files = sorted([p for p in upload_dir.iterdir() if p.suffix.lower() in {".csv", ".xlsx", ".xls", ".xlsm"}], reverse=True)
-        if not files:
-            st.write("Пока нет загруженных файлов.")
-            return
-        history = pd.DataFrame({
-            "Файл": [f.name for f in files],
-            "Размер, КБ": [round(f.stat().st_size / 1024, 1) for f in files],
-            "Дата загрузки": [datetime.fromtimestamp(f.stat().st_mtime).strftime("%d.%m.%Y") for f in files],
-        })
-        st.dataframe(history, use_container_width=True, hide_index=True)
-        if st.button("Очистить локальную историю загруженных файлов"):
-            for f in files:
-                f.unlink(missing_ok=True)
-            st.success("Локальная история загрузок очищена.")
-            st.rerun()
+    if messages.empty or "event_id" not in messages.columns:
+        st.info("Сообщения по выбранному инфоповоду не найдены.")
         return
 
-    try:
-        periods = list_periods(include_inactive=True)
-    except Exception as e:
-        st.warning(f"Не удалось получить историю периодов из Supabase: {e}")
+    topic_messages = messages[messages["event_id"].fillna("").astype(str).isin(selected_ids)].copy()
+    if topic_messages.empty:
+        st.info("Сообщения по выбранному инфоповоду не найдены.")
         return
 
-    if periods.empty:
-        st.write("Пока нет сохраненных периодов в Supabase.")
-        return
+    # Exclude messages marked as irrelevant for this event/group.
+    irrelevant_pairs: set[tuple[str, str]] = manual_state.get("irrelevant_pairs", set())
+    if irrelevant_pairs and "message_id" in topic_messages.columns:
+        topic_messages["__pair"] = topic_messages.apply(lambda r: (str(r.get("event_id") or ""), str(r.get("message_id") or "")), axis=1)
+        topic_messages = topic_messages[~topic_messages["__pair"].isin(irrelevant_pairs)].drop(columns=["__pair"], errors="ignore")
 
-    view = periods.copy().reset_index(drop=True)
-    for col in ["date_from", "date_to", "uploaded_at"]:
-        if col in view.columns:
-            view[col] = pd.to_datetime(view[col], errors="coerce").dt.strftime("%d.%m.%Y").fillna("")
-    if "manifest" in view.columns:
-        view["period_note"] = view["manifest"].apply(period_note_from_manifest)
-    else:
-        view["period_note"] = ""
-
-    display_cols = [c for c in ["period_name", "date_from", "date_to", "source_filename", "uploaded_at", "status", "period_note"] if c in view.columns]
-    display = view[display_cols].rename(columns={
-        "period_name": "Название периода",
-        "date_from": "Начало",
-        "date_to": "Конец",
-        "source_filename": "Файл",
-        "uploaded_at": "Загружено",
-        "status": "Статус",
-        "period_note": "Комментарий",
+    topic_messages = topic_messages.sort_values("datetime") if "datetime" in topic_messages.columns else topic_messages
+    topic_messages["Дата"] = topic_messages.get("datetime", "").apply(fmt_date)
+    cols = [c for c in ["Дата", "chat_title", "author", "text", "url"] if c in topic_messages.columns]
+    msg_show = topic_messages[cols].rename(columns={
+        "chat_title": "Чат",
+        "author": "Автор",
+        "text": "Текст",
+        "url": "Ссылка",
     })
+    st.markdown("#### Сообщения инфоповода")
+    msg_event = st.dataframe(msg_show, hide_index=True, use_container_width=True, selection_mode="single-row", on_select="rerun")
+    msg_rows = getattr(msg_event, "selection", {}).get("rows", []) if msg_event is not None else []
 
-    event = st.dataframe(
-        display,
-        use_container_width=True,
-        hide_index=True,
-        height=320,
-        selection_mode="single-row",
-        on_select="rerun",
-    )
-    rows = get_selected_rows(event)
-    if not rows:
-        st.caption("Выберите строку в таблице, чтобы изменить название периода, даты, статус или комментарий.")
+    if can_edit and msg_rows:
+        selected_msg = topic_messages.iloc[msg_rows[0]]
+        message_id = str(selected_msg.get("message_id") or "")
+        current_event_id = str(selected_msg.get("event_id") or "")
+        with st.expander("Действия с выбранным сообщением", expanded=True):
+            st.caption(str(selected_msg.get("text") or "")[:1000])
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                if st.button("Нерелевант к теме", key=f"irrelevant_{current_event_id}_{message_id}"):
+                    save_manual(project_id, "message_irrelevant", f"message_irrelevant::{current_event_id}::{message_id}", {
+                        "event_id": current_event_id,
+                        "message_id": message_id,
+                    })
+                    st.success("Сообщение исключено из этой темы.")
+                    st.rerun()
+            with c2:
+                if st.button("Скрыть сообщение", key=f"hide_msg_{message_id}"):
+                    save_manual(project_id, "message_hidden", f"message_hidden::{message_id}", {
+                        "message_id": message_id,
+                    })
+                    st.success("Сообщение скрыто.")
+                    st.rerun()
+            with c3:
+                options = event_select_options(events_agg, exclude_event_ids={current_event_id})
+                if options:
+                    target = st.selectbox("Перенести в тему", options, format_func=lambda x: x[1], key=f"move_target_{message_id}")
+                    if st.button("Перенести", key=f"move_msg_{message_id}"):
+                        save_manual(project_id, "message_moves", f"message_move::{message_id}", {
+                            "message_id": message_id,
+                            "source_event_id": current_event_id,
+                            "target_event_id": target[0],
+                        })
+                        st.success("Сообщение перенесено.")
+                        st.rerun()
+
+            st.markdown("**Создать новую тему из выбранного сообщения**")
+            new_topic_title = st.text_input("Название новой темы", key=f"new_topic_title_{message_id}")
+            new_topic_desc = st.text_area("Описание новой темы", key=f"new_topic_desc_{message_id}", height=120)
+            new_topic_tags = st.text_input("Теги новой темы", key=f"new_topic_tags_{message_id}")
+            if st.button("Создать и перенести сообщение", key=f"create_topic_from_msg_{message_id}"):
+                if not new_topic_title.strip():
+                    st.error("Укажите название новой темы.")
+                else:
+                    new_event_id = create_manual_event(project_id, new_topic_title, new_topic_desc, new_topic_tags)
+                    save_manual(project_id, "message_moves", f"message_move::{message_id}", {
+                        "message_id": message_id,
+                        "source_event_id": current_event_id,
+                        "target_event_id": new_event_id,
+                    })
+                    st.success("Новая тема создана, сообщение перенесено.")
+                    st.rerun()
+
+    if can_edit:
+        with st.expander("Нерелевантные сообщения по выбранной теме", expanded=False):
+            keys = manual_state.get("irrelevant_keys", {})
+            pairs_for_topic = [(event_id, message_id) for (event_id, message_id) in keys if event_id in selected_ids]
+            if not pairs_for_topic:
+                st.caption("Нет сообщений, исключенных из этой темы.")
+            else:
+                excluded_ids = [message_id for _, message_id in pairs_for_topic]
+                excluded = messages[messages["message_id"].astype(str).isin(excluded_ids)].copy() if "message_id" in messages.columns else pd.DataFrame()
+                if not excluded.empty:
+                    excluded["Дата"] = excluded.get("datetime", "").apply(fmt_date)
+                    view_cols = [c for c in ["Дата", "chat_title", "author", "text"] if c in excluded.columns]
+                    st.dataframe(excluded[view_cols].rename(columns={"chat_title": "Чат", "author": "Автор", "text": "Текст"}), hide_index=True, use_container_width=True)
+                for pair in pairs_for_topic[:20]:
+                    if st.button(f"Вернуть сообщение {pair[1]}", key=f"restore_irrel_{pair[0]}_{pair[1]}"):
+                        delete_manual(project_id, keys[pair])
+                        st.success("Сообщение возвращено в тему.")
+                        st.rerun()
+
+
+def main() -> None:
+    args = parse_args()
+    st.set_page_config(page_title=APP_TITLE, layout="wide")
+    st.title(APP_TITLE)
+    st.caption(APP_VERSION)
+
+    if not supabase_configured():
+        st.error("Supabase не настроен. Добавьте SUPABASE_URL и SUPABASE_SERVICE_ROLE_KEY в Secrets.")
+        st.stop()
+
+    is_admin = is_platform_admin()
+    project_id, role, projects = render_project_access(is_admin)
+
+    if is_admin:
+        with st.sidebar.expander("Управление платформой", expanded=False):
+            if st.button("Открыть управление проектами"):
+                st.session_state["platform_page"] = "projects"
+    if project_id:
+        page_options = ["Дашборд", "Загрузка файла", "История периодов"]
+    else:
+        page_options = []
+    if is_admin:
+        page_options.append("Проекты")
+    if not page_options:
+        st.info("Выберите проект или войдите как владелец платформы.")
+        if is_admin:
+            render_project_manager(projects)
+        return
+    page = st.sidebar.radio("Раздел", page_options, index=page_options.index("Проекты") if st.session_state.get("platform_page") == "projects" and "Проекты" in page_options else 0)
+
+    if page == "Проекты":
+        render_project_manager(projects)
         return
 
-    selected = periods.reset_index(drop=True).iloc[rows[0]].to_dict()
-    period_id = str(selected.get("period_id", ""))
-    st.markdown("#### Редактирование выбранного периода")
-    st.caption(f"Внутренний ID: `{period_id}`")
+    if not project_id:
+        st.info("Введите код доступа к проекту или войдите как владелец платформы.")
+        return
 
-    current_manifest = selected.get("manifest") or {}
-    if not isinstance(current_manifest, dict):
-        current_manifest = {}
-
-    date_from_value = parse_date_value(selected.get("date_from")) or datetime.now().date()
-    date_to_value = parse_date_value(selected.get("date_to")) or date_from_value
-    status_options = ["active", "hidden", "archived"]
-    current_status = str(selected.get("status") or "active")
-    if current_status not in status_options:
-        status_options.append(current_status)
-
-    with st.form(f"period_edit_form_{period_id}"):
-        c1, c2 = st.columns(2)
-        new_name = c1.text_input("Название периода", value=str(selected.get("period_name") or ""))
-        new_source = c2.text_input("Название исходного файла", value=str(selected.get("source_filename") or ""))
-        d1, d2 = st.columns(2)
-        new_date_from = d1.date_input(
-            "Дата начала",
-            value=date_from_value,
-            format="DD.MM.YYYY",
-            help="Дата хранится в Supabase как YYYY-MM-DD, а в интерфейсе отображается как ДД.ММ.ГГГГ.",
-        )
-        new_date_to = d2.date_input(
-            "Дата окончания",
-            value=date_to_value,
-            format="DD.MM.YYYY",
-            help="Дата хранится в Supabase как YYYY-MM-DD, а в интерфейсе отображается как ДД.ММ.ГГГГ.",
-        )
-        new_status = st.selectbox(
-            "Статус периода",
-            status_options,
-            index=status_options.index(current_status),
-            help="active — показывать в фильтре периодов; hidden/archived — скрыть из основного фильтра, но оставить в истории.",
-        )
-        new_note = st.text_area("Комментарий к периоду", value=str(current_manifest.get("period_note", "") or ""), height=90)
-        submitted = st.form_submit_button("Сохранить изменения", type="primary")
-
-    if submitted:
-        parsed_from = date_to_iso(new_date_from)
-        parsed_to = date_to_iso(new_date_to)
-        if not parsed_from:
-            st.error("Не удалось распознать дату начала.")
-            return
-        if not parsed_to:
-            st.error("Не удалось распознать дату окончания.")
-            return
-        if parsed_from > parsed_to:
-            st.error("Дата начала не может быть позже даты окончания.")
-            return
-        try:
-            update_period_metadata(
-                period_id,
-                period_name=new_name,
-                date_from=parsed_from,
-                date_to=parsed_to,
-                source_filename=new_source,
-                status=new_status,
-                manifest_updates={"period_note": new_note},
-            )
-            st.cache_data.clear()
-            st.success("Данные периода обновлены.")
-            st.rerun()
-        except Exception as e:
-            st.error("Не удалось сохранить изменения периода.")
-            st.exception(e)
-
-    c1, c2, c3 = st.columns(3)
-    if c1.button("Скрыть из фильтра", key=f"hide_period_{period_id}"):
-        set_period_status(period_id, "hidden")
-        st.cache_data.clear()
-        st.success("Период скрыт из основного фильтра.")
-        st.rerun()
-    if c2.button("Вернуть в фильтр", key=f"activate_period_{period_id}"):
-        set_period_status(period_id, "active")
-        st.cache_data.clear()
-        st.success("Период снова активен.")
-        st.rerun()
-
-    with st.expander("Удаление периода", expanded=False):
-        st.warning("Полное удаление уберет период и его обработанные строки из Supabase. Это действие нельзя отменить из дашборда.")
-        confirm_delete = st.checkbox("Я понимаю, что период будет удален полностью", key=f"confirm_delete_period_{period_id}")
-        if st.button("Удалить период полностью", disabled=not confirm_delete, key=f"hard_delete_period_{period_id}"):
-            try:
-                delete_period(period_id, hard=True)
-                st.cache_data.clear()
-                st.success("Период удален.")
-                st.rerun()
-            except Exception as e:
-                st.error("Не удалось удалить период.")
-                st.exception(e)
-
-
-def show_upload_page(data_dir: Path, upload_dir: Path):
-    st.subheader("Загрузка файла нового периода")
-    st.write(
-        "Загрузите новый CSV или Excel-файл из Brand Analytics, Медиалогии или другой системы. "
-        "Дашборд приведет данные к единому формату и пересоберет сообщения, обсуждения и инфоповоды."
-    )
-
-    persistent_enabled = supabase_configured()
-    selected_period_ids: list[str] = []
-    if persistent_enabled:
-        st.success("Постоянное хранение включено: исходные файлы и обработанные периоды будут сохраняться в Supabase.")
-    else:
-        st.warning(
-            "Supabase не настроен. Загруженные файлы и пересчитанные таблицы сохранятся только в текущем runtime Streamlit Cloud "
-            "и после redeploy могут сброситься к версии из GitHub."
-        )
-
-    manifest = read_manifest(data_dir)
-    if manifest:
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Текущих сообщений", f"{int(manifest.get('rows_messages', 0)):,}".replace(",", " "))
-        c2.metric("Текущих обсуждений", f"{int(manifest.get('rows_discussions', 0)):,}".replace(",", " "))
-        c3.metric("Текущих инфоповодов", f"{int(manifest.get('rows_events', 0)):,}".replace(",", " "))
-
-    default_period_name = datetime.now().strftime("%d.%m.%Y")
-    period_name = st.text_input(
-        "Название периода",
-        value=default_period_name,
-        help="Например: 24.04.2026–30.04.2026. Так период будет отображаться в фильтре.",
-    )
-
-    mode = st.radio(
-        "Режим загрузки",
-        [
-            "Заменить текущую выборку новым файлом",
-            "Добавить файл в историю загрузок и пересобрать все загруженные периоды",
-        ],
-        help=(
-            "В режиме добавления дашборд объединит все CSV/Excel-файлы из папки data/uploads. "
-            "Если исходный файл старого периода не был загружен в историю, он не попадет в пересборку."
-        ),
-    )
-
-    uploaded = st.file_uploader("Файл нового периода", type=["csv", "xlsx", "xls", "xlsm"])
-
-    with st.expander("Параметры алгоритма", expanded=False):
-        col1, col2 = st.columns(2)
-        window_minutes = col1.number_input("Окно обсуждения, минут", min_value=10, max_value=240, value=60, step=5)
-        similarity_threshold = col2.slider("Порог похожести", min_value=0.10, max_value=0.60, value=0.28, step=0.01)
-        event_gap_hours = col1.number_input("Разрыв между волнами, часов", min_value=0.5, max_value=24.0, value=3.0, step=0.5)
-        event_window_hours = col2.number_input("Максимальная длина волны, часов", min_value=2.0, max_value=72.0, value=16.0, step=2.0)
-        cluster_method = st.selectbox("Метод кластеризации", ["tfidf", "none"], index=0)
-
-    col_a, col_b = st.columns([1, 2])
-    run = col_a.button("Загрузить и пересобрать", type="primary", disabled=uploaded is None)
-
-    if run and uploaded is not None:
-        upload_dir.mkdir(parents=True, exist_ok=True)
-        data_dir.mkdir(parents=True, exist_ok=True)
-
-        saved_path = upload_dir / safe_upload_name(uploaded.name)
-        saved_path.write_bytes(uploaded.getbuffer())
-
-        try:
-            with st.spinner("Читаю файл и пересобираю инфоповоды…"):
-                if persistent_enabled or mode.startswith("Заменить"):
-                    manifest = run_preprocess(
-                        input_path=saved_path,
-                        output=data_dir,
-                        window_minutes=int(window_minutes),
-                        cluster_method=cluster_method,
-                        similarity_threshold=float(similarity_threshold),
-                        event_gap_hours=float(event_gap_hours),
-                        event_window_hours=float(event_window_hours),
-                    )
-                else:
-                    csv_paths = sorted([p for p in upload_dir.iterdir() if p.suffix.lower() in {".csv", ".xlsx", ".xls", ".xlsm"}])
-                    raw_parts = []
-                    used_files = []
-                    for path in csv_paths:
-                        try:
-                            raw_parts.append(read_source_csv(path))
-                            used_files.append(path.name)
-                        except Exception as e:
-                            st.warning(f"Файл {path.name} пропущен: {e}")
-                    if not raw_parts:
-                        st.error("Не удалось прочитать ни один файл.")
-                        return
-                    combined = pd.concat(raw_parts, ignore_index=True)
-                    manifest = run_preprocess_from_dataframe(
-                        raw=combined,
-                        output=data_dir,
-                        source_file="; ".join(used_files),
-                        window_minutes=int(window_minutes),
-                        cluster_method=cluster_method,
-                        similarity_threshold=float(similarity_threshold),
-                        event_gap_hours=float(event_gap_hours),
-                        event_window_hours=float(event_window_hours),
-                    )
-
-
-            if persistent_enabled:
-                period_title = str(period_name or uploaded.name).strip() or uploaded.name
-                period_id = make_period_id(period_title, uploaded.name)
-                with st.spinner("Сохраняю период в Supabase…"):
-                    save_processed_tables_from_dir(
-                        data_dir,
-                        period_id=period_id,
-                        period_name=period_title,
-                        source_filename=uploaded.name,
-                        manifest=manifest,
-                        replace=True,
-                    )
-                    try:
-                        save_uploaded_csv_to_storage(period_id, uploaded.name, bytes(uploaded.getbuffer()))
-                    except Exception as storage_error:
-                        st.warning(f"Обработанные данные сохранены в Supabase, но исходный файл не удалось сохранить в Storage: {storage_error}")
-                st.success(f"Период сохранен в Supabase: {period_title}")
-
-            st.cache_data.clear()
-            st.success(
-                "Данные пересобраны: "
-                f"{manifest.get('rows_messages', 0)} сообщений, "
-                f"{manifest.get('rows_discussions', 0)} обсуждений, "
-                f"{manifest.get('rows_events', 0)} инфоповодов."
-            )
-            st.info("Перейдите в раздел «Инфоповоды» или обновите страницу, чтобы увидеть новую выборку.")
-            if st.button("Открыть обновленные инфоповоды"):
-                st.rerun()
-        except Exception as e:
-            st.error("Не удалось обработать файл.")
-            st.exception(e)
-
-    with st.expander("История и редактирование загруженных файлов", expanded=False):
-        render_period_history_manager(persistent_enabled, upload_dir)
-
-
-def main():
-    args = parse_args()
-
-    st.set_page_config(
-        page_title="Дайджест водительских чатов",
-        layout="wide",
-        initial_sidebar_state="expanded",
-    )
-
-    st.title("Дайджест водительских чатов")
-
-    data_dir = Path(args.data_dir)
-    db_path = Path(args.db_path)
-    upload_dir = Path(args.upload_dir)
-    persistent_enabled = supabase_configured()
-    selected_period_ids: list[str] = []
-
-    if persistent_enabled:
-        st.sidebar.success("Хранилище: Supabase")
-    else:
-        st.sidebar.info("Хранилище: локальные файлы")
-
-    can_edit = render_admin_mode()
-    if can_edit:
-        st.caption("Версия 4.0: второй этап ускорения — быстрые таблицы и ленивые карточки")
-    pages = ["Инфоповоды", "Поиск сообщений"] + (["Загрузка файла"] if can_edit else [])
-    page = st.sidebar.radio("Раздел", pages, label_visibility="collapsed")
+    project_row = projects[projects["project_id"].astype(str) == str(project_id)]
+    project_name = str(project_row.iloc[0].get("project_name") if not project_row.empty else project_id)
+    st.sidebar.markdown(f"**Текущий проект:**  \n{project_name}")
 
     if page == "Загрузка файла":
-        show_upload_page(data_dir, upload_dir)
+        render_upload_page(project_id, role, args.work_dir)
+        return
+    if page == "История периодов":
+        render_period_history(project_id, role)
         return
 
-    conn = connect(db_path)
-
-    if persistent_enabled:
-        try:
-            selected_period_ids = render_period_selector()
-            if not selected_period_ids:
-                st.info("Пока нет выбранных периодов. Откройте «Загрузка файла» и сохраните первый период в Supabase.")
-                st.stop()
-            events_raw, discussions, messages, discussion_messages, event_discussions = load_generated_tables_remote(tuple(selected_period_ids))
-        except Exception as e:
-            st.error("Не удалось загрузить данные из Supabase.")
-            st.exception(e)
-            st.stop()
-    else:
-        if not data_dir.exists():
-            st.error(f"Папка с обработанными данными не найдена: {data_dir}")
-            st.info("Откройте раздел «Загрузка файла» и загрузите исходный файл для первой сборки дашборда.")
-            st.stop()
-        events_raw, discussions, messages, discussion_messages, event_discussions = load_generated_tables(str(data_dir))
-
-    manual_tables = load_manual_tables_cached(conn, cache_marker=("supabase" if persistent_enabled else str(db_path)))
-    overrides = manual_tables.get("event_overrides", pd.DataFrame())
-    merges = manual_tables.get("event_merges", pd.DataFrame())
-    msg_overrides = manual_tables.get("message_overrides", pd.DataFrame())
-    msg_exclusions = manual_tables.get("event_message_exclusions", pd.DataFrame())
-    manual_events = manual_tables.get("manual_events", pd.DataFrame())
-    msg_topic_overrides = manual_tables.get("message_topic_overrides", pd.DataFrame())
-
-    events, enriched_messages = cached_apply_manual_edits(
-        events_raw,
-        messages,
-        discussion_messages,
-        event_discussions,
-        overrides,
-        merges,
-        msg_overrides,
-        msg_exclusions,
-        manual_events,
-        msg_topic_overrides,
-    )
-
-    events_before_consolidation = events.copy()
-    consolidation_level = render_consolidation_level_control(can_edit)
-    events, enriched_messages = cached_build_consolidated_events(
-        events,
-        enriched_messages,
-        consolidation_level,
-        overrides,
-    )
-    enriched_messages = prepare_messages_for_ui(enriched_messages)
-    render_consolidation_quality(
-        events_before_consolidation,
-        events,
-        enriched_messages,
-        consolidation_level,
-        can_edit,
-    )
-
-    if page == "Поиск сообщений":
-        show_message_search(enriched_messages, events, conn)
+    selected_period_ids, periods = render_period_selector(project_id)
+    if not selected_period_ids:
+        st.info("Выберите период или загрузите первый файл.")
         return
 
-    if can_edit:
-        show_manual_event_creator(conn)
-    else:
-        st.sidebar.caption("Загрузка файлов и ручная модерация доступны после входа администратора.")
+    with st.spinner("Загружаю данные проекта..."):
+        events, discussions, messages, discussion_messages, event_discussions = load_generated_tables(project_id, selected_period_ids)
+    enriched_messages = enrich_messages(messages, event_discussions, discussion_messages, events)
+    events, enriched_messages, manual_state = apply_manual_overrides(project_id, events, enriched_messages)
+    events_agg = aggregate_events(events)
 
-    if persistent_enabled and len(selected_period_ids) >= 2:
-        render_period_comparison(enriched_messages, selected_period_ids)
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Сообщений", f"{len(enriched_messages):,}".replace(",", " "))
+    col2.metric("Инфоповодов", f"{len(events_agg):,}".replace(",", " "))
+    col3.metric("Чатов", f"{enriched_messages['chat_title'].nunique() if 'chat_title' in enriched_messages.columns else 0:,}".replace(",", " "))
+    neg = int(enriched_messages.get("sentiment", pd.Series(dtype=str)).fillna("").astype(str).str.lower().str.contains("нег").sum()) if not enriched_messages.empty and "sentiment" in enriched_messages.columns else 0
+    col4.metric("Негатив", f"{neg:,}".replace(",", " "))
 
-    render_dashboard_summary(events, enriched_messages, selected_period_ids, conn, can_edit)
-    render_digest_export(events, enriched_messages, selected_period_ids, conn, manual_tables=manual_tables)
-
-    filtered_events, word_query, word_matches = apply_filters(events, enriched_messages)
-    filtered_messages = messages_for_events(enriched_messages, filtered_events)
-    show_kpis(filtered_events, filtered_messages)
-    if word_query:
-        word_message_results_table(word_matches, events, word_query)
-    selected_event_id = event_table(filtered_events)
-    if selected_event_id:
-        show_event_card(selected_event_id, events, enriched_messages, conn, can_edit=can_edit, manual_tables=manual_tables)
+    render_summary(project_id, selected_period_ids, enriched_messages, events_agg, periods, role)
+    render_period_dynamics(enriched_messages, periods, selected_period_ids)
+    render_events(project_id, role, events_agg, enriched_messages, manual_state)
 
 
 if __name__ == "__main__":
