@@ -34,7 +34,7 @@ from platform_store import (
 from preprocess import run_preprocess_from_dataframe
 
 APP_TITLE = "Платформа дайджестов"
-APP_VERSION = "3.6-alpha: стартовая страница Brand Analytics"
+APP_VERSION = "3.6.1: сообщения списком"
 
 ALGORITHM_PROFILE_OPTIONS = {
     "universal": "Универсальный",
@@ -1241,8 +1241,52 @@ def render_events(
 
 
 
+def _value_from_row(row: pd.Series, *columns: str) -> str:
+    """Return the first non-empty value from a message row."""
+    for col in columns:
+        if col in row.index:
+            value = str(row.get(col) or "").strip()
+            if value and value.lower() not in {"nan", "none", "nat", "null"}:
+                return value
+    return ""
+
+
+def _render_message_list(view: pd.DataFrame, *, text_col: str | None, link_col: str | None) -> None:
+    """Render messages as readable cards instead of a dataframe."""
+    if view is None or view.empty:
+        st.info("Сообщений для показа нет.")
+        return
+
+    for _, row in view.iterrows():
+        date_text = fmt_date(row.get("datetime")) if "datetime" in row.index else ""
+        source = _value_from_row(row, "chat_title", "platform", "source", "Источник", "Место публикации")
+        author = _value_from_row(row, "author", "Автор")
+        sentiment = _value_from_row(row, "sentiment", "Тональность")
+        event_title = _value_from_row(row, "event_title", "source_main_topic", "Сюжет")
+        tags = _value_from_row(row, "tags", "Теги").replace("|", ", ")
+        views = int(row.get("_views", 0) or 0)
+        engagement = int(row.get("_engagement", 0) or 0)
+        text = str(row.get(text_col, "") or "").strip() if text_col else ""
+        link = str(row.get(link_col, "") or "").strip() if link_col else ""
+
+        meta_parts = [part for part in [date_text, source, author, sentiment] if part]
+        metrics_parts = [f"аудитория: {format_int(views)}", f"вовлеченность: {format_int(engagement)}"]
+
+        st.markdown("---")
+        if meta_parts:
+            st.caption(" · ".join(meta_parts))
+        if event_title:
+            st.markdown(f"**Инфоповод:** {event_title}")
+        if tags:
+            st.caption(f"Теги: {tags}")
+        st.markdown(f"*{' · '.join(metrics_parts)}*")
+        st.write(text[:1800] if text else "—")
+        if link.startswith("http"):
+            st.markdown(f"[Открыть сообщение]({link})")
+
+
 def render_messages_block(messages: pd.DataFrame) -> None:
-    """Render global key messages and full feed."""
+    """Render global key messages and full feed as a readable list."""
     st.subheader("Ключевые сообщения")
     if messages is None or messages.empty:
         st.info("Сообщения не найдены.")
@@ -1269,43 +1313,12 @@ def render_messages_block(messages: pd.DataFrame) -> None:
         view = work.copy()
         if search.strip() and text_col:
             view = view[view[text_col].fillna("").astype(str).str.contains(search.strip(), case=False, regex=False)]
-        feed_limit = int(st.number_input("Сколько сообщений показать", min_value=50, max_value=5000, value=500, step=50, key="full_feed_limit"))
+        feed_limit = int(st.number_input("Сколько сообщений показать", min_value=25, max_value=1000, value=100, step=25, key="full_feed_limit"))
         view = view.sort_values("datetime", ascending=False) if "datetime" in view.columns else view
         st.caption(f"Найдено сообщений: {format_int(len(view))}. Показано: {format_int(min(len(view), feed_limit))}.")
         view = view.head(feed_limit).copy()
 
-    if view.empty:
-        st.info("Сообщений для показа нет.")
-        return
-
-    view["Дата"] = view.get("datetime", "").apply(fmt_date)
-    view["Текст"] = view[text_col].fillna("").astype(str).str.slice(0, 1000) if text_col else ""
-    view["Ссылка"] = view[link_col].fillna("").astype(str) if link_col else ""
-    if "chat_title" in view.columns:
-        view["Источник/площадка"] = view["chat_title"].fillna("").astype(str)
-    elif "platform" in view.columns:
-        view["Источник/площадка"] = view["platform"].fillna("").astype(str)
-    else:
-        view["Источник/площадка"] = ""
-    view["Автор"] = view["author"].fillna("").astype(str) if "author" in view.columns else ""
-    if "event_title" in view.columns:
-        view["Инфоповод"] = view["event_title"].fillna("").astype(str)
-    elif "source_main_topic" in view.columns:
-        view["Инфоповод"] = view["source_main_topic"].fillna("").astype(str)
-    else:
-        view["Инфоповод"] = ""
-    view["Теги"] = view["tags"].fillna("").astype(str).str.replace("|", ", ", regex=False) if "tags" in view.columns else ""
-    view["Аудитория"] = view["_views"].astype(int)
-    view["Вовлеченность"] = view["_engagement"].astype(int)
-
-    cols = ["Дата", "Источник/площадка", "Автор", "Инфоповод", "Теги", "Текст", "Ссылка", "Аудитория", "Вовлеченность"]
-    st.dataframe(
-        view[cols],
-        hide_index=True,
-        use_container_width=True,
-        height=520 if mode == "Вся лента" else 430,
-        column_config={"Ссылка": st.column_config.LinkColumn("Ссылка")},
-    )
+    _render_message_list(view, text_col=text_col, link_col=link_col)
 
 
 def main() -> None:
