@@ -45,6 +45,10 @@ CANONICAL_COLUMNS = [
     "Категории",
     "Сюжет",
     "Id сообщения",
+    "Основная тема",
+    "Все темы",
+    "Все темы (список)",
+    "Релевантное",
     "source_system",
     "source_file",
 ]
@@ -105,6 +109,9 @@ def _find_csv_header(path: Path) -> tuple[int, str]:
         "тональность",
         "блог",
         "площадка",
+        "основная тема",
+        "все темы",
+        "релевантное",
     ]
     for idx, line in enumerate(lines):
         if not line:
@@ -160,6 +167,9 @@ def _find_excel_header(frame: pd.DataFrame) -> int:
         "где пишет",
         "тональность",
         "id сообщения",
+        "основная тема",
+        "все темы",
+        "релевантное",
     ]
     best_idx = 0
     best_score = -1
@@ -175,26 +185,75 @@ def _find_excel_header(frame: pd.DataFrame) -> int:
 
 
 def _read_excel_any(path: Path, sheet_name: str | int | None = None) -> pd.DataFrame:
+    """Read Excel and choose the best non-empty sheet.
+
+    Monitoring exports often contain cover sheets, empty technical sheets or
+    analytical tabs. We prefer the raw-message sheet named "Сообщения" and
+    skip empty sheets instead of crashing on preview.iloc[0].
+    """
     xls = pd.ExcelFile(path)
     sheets = xls.sheet_names
-    if sheet_name is None:
-        selected_sheet = sheets[0]
-        best_score = -1
-        for candidate in sheets:
-            preview = pd.read_excel(path, sheet_name=candidate, header=None, dtype=str, nrows=40)
-            row_idx = _find_excel_header(preview)
-            row_values = [_clean_col_name(v).lower() for v in preview.iloc[row_idx].fillna("").astype(str).tolist()]
-            score = sum(any(token in value for value in row_values) for token in ["текст", "сообщ", "дата", "время", "ссылка", "автор", "тональность"])
-            if score > best_score:
-                selected_sheet = candidate
-                best_score = score
-    else:
-        selected_sheet = sheet_name
-    preview = pd.read_excel(path, sheet_name=selected_sheet, header=None, dtype=str, nrows=40)
-    header_idx = _find_excel_header(preview)
-    df = pd.read_excel(path, sheet_name=selected_sheet, header=header_idx, dtype=str, keep_default_na=False)
-    return _clean_dataframe(df)
+    if not sheets:
+        raise ValueError("В Excel-файле не найдено листов.")
 
+    def safe_preview(sheet):
+        try:
+            preview_df = pd.read_excel(
+                path,
+                sheet_name=sheet,
+                header=None,
+                dtype=str,
+                nrows=60,
+                keep_default_na=False,
+            )
+            if preview_df is None or preview_df.empty:
+                return pd.DataFrame()
+            preview_df = preview_df.dropna(how="all")
+            if preview_df.empty:
+                return pd.DataFrame()
+            return preview_df
+        except Exception:
+            return pd.DataFrame()
+
+    preferred_sheet_names = {"сообщения", "messages", "публикации", "mentions"}
+    selected_sheet = None
+    selected_header_idx = 0
+    best_score = -1
+
+    candidates = [sheet_name] if sheet_name is not None else sheets
+    for candidate in candidates:
+        preview = safe_preview(candidate)
+        if preview.empty:
+            continue
+        row_idx = _find_excel_header(preview)
+        if row_idx < 0 or row_idx >= len(preview):
+            row_idx = 0
+        row_values = [_clean_col_name(v).lower() for v in preview.iloc[row_idx].fillna("").astype(str).tolist()]
+        tokens = [
+            "текст", "сообщ", "дата", "время", "ссылка", "url", "автор",
+            "источник", "тональность", "сюжет", "hash сообщения", "id сообщения",
+            "место публикации", "тип источника", "основная тема", "все темы", "релевантное",
+        ]
+        score = sum(any(token in value for value in row_values) for token in tokens)
+        sheet_key = str(candidate).strip().lower().replace("ё", "е")
+        if sheet_key in preferred_sheet_names:
+            score += 10
+        if score > best_score:
+            selected_sheet = candidate
+            selected_header_idx = row_idx
+            best_score = score
+
+    if selected_sheet is None:
+        raise ValueError(
+            "Не удалось найти непустой лист с таблицей сообщений. "
+            "Проверьте, что в Excel есть лист с колонками: дата, текст/сообщение, url/ссылка, автор или источник."
+        )
+
+    df = pd.read_excel(path, sheet_name=selected_sheet, header=selected_header_idx, dtype=str, keep_default_na=False)
+    df = _clean_dataframe(df)
+    if df.empty:
+        raise ValueError(f"На листе Excel «{selected_sheet}» не найдено данных.")
+    return df
 
 def detect_source_system(df: pd.DataFrame) -> str:
     cols = {str(c).strip().lower() for c in df.columns}
@@ -239,6 +298,33 @@ def _normalize_sentiment(series: pd.Series) -> pd.Series:
     return series.apply(convert)
 
 
+
+def _normalize_topics_list(value: object) -> str:
+    """Normalize list-like topic values to semicolon-separated text."""
+    s = "" if value is None else str(value).strip()
+    if not s or s.lower() in {"nan", "none", "null"}:
+        return ""
+    s = s.replace("\ufeff", "").replace("\xa0", " ")
+    # Values may arrive as: ['A', 'B'], A; B, A|B, or multiline.
+    s = s.strip("[]")
+    s = s.replace("'", "").replace('"', "")
+    parts = re.split(r"\s*[;|,\n]\s*", s)
+    seen = []
+    for part in parts:
+        part = re.sub(r"\s+", " ", str(part).strip())
+        if part and part not in seen:
+            seen.append(part)
+    return "; ".join(seen)
+
+
+def _normalize_bool_text(value: object) -> str:
+    s = "" if value is None else str(value).strip().lower().replace("ё", "е")
+    if s in {"true", "1", "да", "yes", "+", "истина", "верно"}:
+        return "True"
+    if s in {"false", "0", "нет", "no", "-", "ложь", "неверно", "нерелевантно", "не релевантно", "irrelevant"}:
+        return "False"
+    return str(value).strip() if value is not None else ""
+
 def canonicalize_table(raw: pd.DataFrame, source_file: str = "", source_system: str = "auto") -> pd.DataFrame:
     df = _clean_dataframe(raw)
     detected = detect_source_system(df) if source_system in {"", "auto", None} else str(source_system)
@@ -246,8 +332,15 @@ def canonicalize_table(raw: pd.DataFrame, source_file: str = "", source_system: 
 
     out["№"] = first_existing(df, ["№", "N", "ID", "ID сообщения"])
     out["Дата"] = first_existing(df, ["Дата", "Время публикации", "Дата публикации", "Дата сообщения", "Date", "Published"])
+    time_part = first_existing(df, ["Время", "Time", "Published time"])
+    # Some exports, for example Knauf/Brand Analytics Excel, split date and time.
+    if time_part.str.strip().ne("").any() and out["Дата"].str.strip().ne("").any():
+        out["Дата"] = [
+            f"{str(d).strip()} {str(t).strip()}".strip() if str(t).strip() else str(d).strip()
+            for d, t in zip(out["Дата"], time_part)
+        ]
 
-    message = first_existing(df, ["Сообщение", "Текст сообщения", "Текст", "Message", "Text", "Содержание"])
+    message = first_existing(df, ["Сообщение", "Текст сообщения", "Текст", "Message", "Text", "Содержание", "Описание", "Content"])
     recognized = first_existing(df, ["Автораспознанный текст", "Распознанный текст", "OCR", "Расшифровка"])
     title = first_existing(df, ["Заголовок", "Title"])
     if detected == "brand_analytics":
@@ -266,7 +359,7 @@ def canonicalize_table(raw: pd.DataFrame, source_file: str = "", source_system: 
     out["Блог"] = blog
     out["Профиль блога"] = blog_profile
 
-    out["Тип"] = first_existing(df, ["Тип", "Тип сообщения", "Message type"])
+    out["Тип"] = first_existing(df, ["Тип", "Тип сообщения", "Тип источника", "Message type", "Source type"])
     out["Тональность"] = _normalize_sentiment(first_existing(df, ["Тональность", "Sentiment", "Окраска", "Тон"] ))
     out["Токсичность"] = first_existing(df, ["Токсичность", "Агрессия", "Toxicity", "Aggression"])
     out["WOM"] = first_existing(df, ["WOM", "Мнения"])
@@ -287,6 +380,21 @@ def canonicalize_table(raw: pd.DataFrame, source_file: str = "", source_system: 
     out["Категории"] = first_existing(df, ["Категории", "Category", "Categories"])
     out["Сюжет"] = first_existing(df, ["Сюжет", "Topic", "Theme", "Тема"])
     out["Id сообщения"] = first_existing(df, ["Id сообщения", "ID сообщения", "message_id", "id", "Hash сообщения"])
+
+    # Optional human/topic markup columns. If present, they become a top-level
+    # boundary for clustering, but do not replace information events.
+    main_topic = first_existing(df, ["Основная тема", "Главная тема", "Main topic", "Primary topic", "Topic main", "Сюжет", "Topic", "Theme"])
+    all_topics_raw = first_existing(df, ["Все темы", "Темы", "Topics", "All topics"])
+    all_topics_list = first_existing(df, ["Все темы (список)", "Список тем", "Topics list", "All topics list"])
+    relevant = first_existing(df, ["Релевантное", "Релевантность", "Relevant", "Is relevant"])
+
+    out["Основная тема"] = main_topic.apply(lambda x: re.sub(r"\s+", " ", str(x).strip()))
+    out["Все темы"] = all_topics_raw.apply(_normalize_topics_list)
+    out["Все темы (список)"] = all_topics_list.apply(_normalize_topics_list)
+    out.loc[out["Все темы (список)"].str.strip() == "", "Все темы (список)"] = out.loc[
+        out["Все темы (список)"].str.strip() == "", "Все темы"
+    ]
+    out["Релевантное"] = relevant.apply(_normalize_bool_text)
 
     for tag in MEDIALOGIA_DEFAULT_TAGS:
         if tag in df.columns:

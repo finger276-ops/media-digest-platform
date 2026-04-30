@@ -34,7 +34,24 @@ from platform_store import (
 from preprocess import run_preprocess_from_dataframe
 
 APP_TITLE = "Платформа дайджестов"
-APP_VERSION = "3.1-alpha: мультипроектная платформа с ручной модерацией инфоповодов"
+APP_VERSION = "3.2-alpha: универсальные проектные темы и безопасный импорт Excel"
+
+ALGORITHM_PROFILE_OPTIONS = {
+    "universal": "Универсальный",
+    "brand_monitoring": "Бренд-мониторинг",
+    "construction_materials": "Строительство / материалы",
+    "taxi_legacy": "Такси / водительские чаты",
+}
+
+
+def project_settings_from_row(row) -> dict[str, Any]:
+    settings = {}
+    try:
+        settings = row.get("settings") or {}
+    except Exception:
+        settings = {}
+    return settings if isinstance(settings, dict) else {}
+
 
 
 def parse_args() -> argparse.Namespace:
@@ -154,13 +171,26 @@ def render_project_manager(projects: pd.DataFrame) -> None:
     with st.expander("Создать проект", expanded=projects.empty):
         name = st.text_input("Название проекта", key="new_project_name")
         description = st.text_area("Описание проекта", key="new_project_description")
+        topic_profile = st.selectbox(
+            "Профиль алгоритма",
+            list(ALGORITHM_PROFILE_OPTIONS.keys()),
+            format_func=lambda x: ALGORITHM_PROFILE_OPTIONS.get(x, x),
+            key="new_topic_profile",
+            help="Профиль не привязывает платформу к одной отрасли: по умолчанию темы берутся из колонок выгрузки и универсальных правил.",
+        )
         viewer_code = st.text_input("Код просмотра", type="password", key="new_viewer_code")
         editor_code = st.text_input("Код редактора", type="password", key="new_editor_code")
         if st.button("Создать проект", type="primary"):
             if not name.strip():
                 st.error("Укажите название проекта.")
             else:
-                project_id = create_project(project_name=name, description=description, viewer_code=viewer_code, editor_code=editor_code)
+                project_id = create_project(
+                    project_name=name,
+                    description=description,
+                    viewer_code=viewer_code,
+                    editor_code=editor_code,
+                    settings={"topic_profile": topic_profile},
+                )
                 st.success(f"Проект создан: {project_id}")
                 st.rerun()
 
@@ -188,11 +218,32 @@ def render_project_manager(projects: pd.DataFrame) -> None:
             new_name = st.text_input("Название", value=str(row.get("project_name") or ""), key=f"edit_project_name_{project_id}")
             new_description = st.text_area("Описание", value=str(row.get("description") or ""), key=f"edit_project_description_{project_id}")
             new_status = st.selectbox("Статус", ["active", "hidden", "archived"], index=["active", "hidden", "archived"].index(str(row.get("status") or "active")) if str(row.get("status") or "active") in ["active", "hidden", "archived"] else 0, key=f"edit_project_status_{project_id}")
+            current_settings = project_settings_from_row(row)
+            current_profile = str(current_settings.get("topic_profile") or "universal")
+            if current_profile not in ALGORITHM_PROFILE_OPTIONS:
+                current_profile = "universal"
+            new_topic_profile = st.selectbox(
+                "Профиль алгоритма",
+                list(ALGORITHM_PROFILE_OPTIONS.keys()),
+                index=list(ALGORITHM_PROFILE_OPTIONS.keys()).index(current_profile),
+                format_func=lambda x: ALGORITHM_PROFILE_OPTIONS.get(x, x),
+                key=f"edit_topic_profile_{project_id}",
+            )
             st.caption("Коды доступа заполняйте только если хотите заменить текущие.")
             new_viewer_code = st.text_input("Новый код просмотра", type="password", key=f"edit_viewer_code_{project_id}")
             new_editor_code = st.text_input("Новый код редактора", type="password", key=f"edit_editor_code_{project_id}")
             if st.button("Сохранить проект", key=f"save_project_{project_id}"):
-                update_project(project_id, project_name=new_name, description=new_description, status=new_status, viewer_code=new_viewer_code, editor_code=new_editor_code)
+                updated_settings = dict(current_settings)
+                updated_settings["topic_profile"] = new_topic_profile
+                update_project(
+                    project_id,
+                    project_name=new_name,
+                    description=new_description,
+                    status=new_status,
+                    viewer_code=new_viewer_code,
+                    editor_code=new_editor_code,
+                    settings=updated_settings,
+                )
                 st.success("Проект обновлен.")
                 st.rerun()
 
@@ -273,7 +324,16 @@ def render_upload_page(project_id: str, role: str, work_dir: str) -> None:
         return
 
     with st.spinner("Читаю файл и привожу к единому формату..."):
-        canonical = read_uploaded_to_canonical(uploaded, source_system)
+        try:
+            canonical = read_uploaded_to_canonical(uploaded, source_system)
+        except Exception as exc:
+            st.error("Не удалось прочитать файл.")
+            st.info(
+                "Проверьте, что файл содержит лист/таблицу с сообщениями: дата, текст/сообщение, url/ссылка, источник или автор. "
+                "Если в Excel несколько листов, платформа автоматически ищет лист «Сообщения» и пропускает пустые листы."
+            )
+            st.exception(exc)
+            return
     st.success(f"Файл прочитан: {len(canonical):,} строк".replace(",", " "))
     with st.expander("Предпросмотр распознанных колонок", expanded=False):
         st.dataframe(canonical.head(20), use_container_width=True)
@@ -410,26 +470,29 @@ def aggregate_events(events: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_event_description(group: pd.DataFrame) -> str:
+    """Build a neutral, source-agnostic event description."""
     text = " ".join(group.get("event_summary", pd.Series(dtype=str)).fillna("").astype(str).tolist())
-    signals = []
+    tags = " | ".join(sorted(set("|".join(group.get("main_tags", pd.Series(dtype=str)).fillna("").astype(str)).split("|")) - {""}))
+    low = f"{text} {tags}".lower().replace("ё", "е")
     patterns = [
-        ("законопроекты и регулирование", ["закон", "регулир", "штраф", "налог", "патент"]),
-        ("коэффициенты, тарифы и приоритет", ["коэфф", "тариф", "приоритет", "цена"]),
-        ("сбои приложения и обновления", ["сбой", "ошиб", "прилож", "обнов", "загруз"]),
-        ("выплаты и оплата", ["выплат", "оплат", "деньг"]),
-        ("блокировки и доступ к аккаунту", ["блок", "доступ", "аккаунт"]),
-        ("забастовки и бойкоты", ["забаст", "бойкот"]),
-        ("карты, адреса и навигация", ["карта", "адрес", "навиг", "гео"]),
+        ("проблемы, жалобы и негативный опыт", ["жалоб", "проблем", "негатив", "ошиб", "не работает", "плохо", "брак", "дефект"]),
+        ("цены, стоимость и условия", ["цен", "стоим", "скид", "акци", "тариф", "услов", "дорого", "дешев"]),
+        ("качество продукта или услуги", ["качеств", "материал", "характерист", "свойств", "надежн", "эффектив"]),
+        ("наличие, поставки и логистика", ["достав", "налич", "склад", "постав", "логист", "срок", "отгруз"]),
+        ("монтаж, применение и эксплуатация", ["монтаж", "установ", "примен", "использ", "эксплуатац", "строител", "утепл", "изоляц"]),
+        ("документы, сертификаты и требования", ["сертифик", "документ", "декларац", "гост", "снип", "требован", "стандарт"]),
+        ("безопасность и риски", ["безопас", "пожар", "огне", "горюч", "опасн", "токсич"]),
+        ("экология и энергоэффективность", ["эколог", "энергоэфф", "энергосбереж", "устойчив", "переработ"]),
+        ("конкуренты и сравнение", ["конкур", "аналог", "сравнен", "рынок", "бренд"]),
+        ("клиентский сервис и поддержка", ["поддерж", "сервис", "менеджер", "дилер", "магазин", "клиент"]),
     ]
-    low = text.lower()
+    signals = []
     for label, keys in patterns:
         if any(k in low for k in keys):
             signals.append(label)
-    if not signals:
-        tags = " | ".join(sorted(set("|".join(group.get("main_tags", pd.Series(dtype=str)).fillna("").astype(str)).split("|")) - {""}))
-        return f"В теме обсуждались: {tags}." if tags else "В теме обсуждались связанные сообщения выбранного периода."
-    return "В теме обсуждались: " + "; ".join(signals[:5]) + "."
-
+    if signals:
+        return "В теме обсуждались: " + "; ".join(signals[:5]) + "."
+    return f"В теме обсуждались: {tags}." if tags else "В теме обсуждались связанные сообщения выбранного периода."
 
 
 def pick_event_description(group: pd.DataFrame) -> str:
@@ -785,7 +848,7 @@ def render_events(
         st.info("Инфоповоды не найдены.")
         return
 
-    word = st.text_input("Фильтр по слову в сообщениях", placeholder="Например: коэффициент")
+    word = st.text_input("Фильтр по слову в сообщениях", placeholder="Например: доставка, качество, сертификат")
     filtered_events = events_agg.copy()
     filtered_messages = messages.copy()
 
