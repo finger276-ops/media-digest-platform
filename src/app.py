@@ -34,7 +34,7 @@ from platform_store import (
 from preprocess import run_preprocess_from_dataframe
 
 APP_TITLE = "Платформа дайджестов"
-APP_VERSION = "3.2-alpha: универсальные проектные темы и безопасный импорт Excel"
+APP_VERSION = "3.4-alpha: Brand Analytics сюжеты и теговая аналитика"
 
 ALGORITHM_PROFILE_OPTIONS = {
     "universal": "Универсальный",
@@ -124,6 +124,153 @@ def fmt_period(row: pd.Series) -> str:
 
 def normalize_text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def split_pipe_values(value: Any) -> list[str]:
+    """Split platform pipe-separated tags into clean unique labels."""
+    raw = str(value or "").replace(";", "|").replace(",", "|")
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in raw.split("|"):
+        label = " ".join(str(item or "").split()).strip()
+        if not label:
+            continue
+        key = label.lower().replace("ё", "е")
+        if key not in seen:
+            seen.add(key)
+            result.append(label)
+    return result
+
+
+def numeric_series(df: pd.DataFrame, columns: list[str]) -> pd.Series:
+    """Return the first existing numeric column from a dataframe."""
+    if df is None or df.empty:
+        return pd.Series(dtype=float)
+    for col in columns:
+        if col in df.columns:
+            return (
+                df[col]
+                .fillna(0)
+                .astype(str)
+                .str.replace("\u00a0", "", regex=False)
+                .str.replace(" ", "", regex=False)
+                .str.replace(",", ".", regex=False)
+                .pipe(pd.to_numeric, errors="coerce")
+                .fillna(0)
+            )
+    return pd.Series([0] * len(df), index=df.index, dtype=float)
+
+
+def build_tag_statistics(messages: pd.DataFrame) -> pd.DataFrame:
+    """Build tag-level analytics: messages, total views/reach and engagement."""
+    if messages is None or messages.empty or "tags" not in messages.columns:
+        return pd.DataFrame(columns=["Тег", "Сообщений", "Просмотры", "Вовлеченность", "Негатив"])
+
+    work = messages.copy()
+    work["_tag"] = work["tags"].fillna("").astype(str).apply(split_pipe_values)
+    work = work.explode("_tag")
+    work["_tag"] = work["_tag"].fillna("").astype(str).str.strip()
+    work = work[work["_tag"] != ""]
+    if work.empty:
+        return pd.DataFrame(columns=["Тег", "Сообщений", "Просмотры", "Вовлеченность", "Негатив"])
+
+    work["_views"] = numeric_series(work, ["views", "Просмотры", "reach", "Охват"])
+    work["_engagement"] = numeric_series(work, ["engagement", "Вовлечённость", "Вовлеченность", "engagement_count"])
+    if "sentiment" in work.columns:
+        work["_negative"] = work["sentiment"].fillna("").astype(str).str.lower().str.contains("нег", regex=True).astype(int)
+    else:
+        work["_negative"] = 0
+
+    stats = (
+        work.groupby("_tag", as_index=False)
+        .agg(
+            Сообщений=("message_id", "nunique") if "message_id" in work.columns else ("_tag", "size"),
+            Просмотры=("_views", "sum"),
+            Вовлеченность=("_engagement", "sum"),
+            Негатив=("_negative", "sum"),
+        )
+        .rename(columns={"_tag": "Тег"})
+    )
+    for col in ["Сообщений", "Просмотры", "Вовлеченность", "Негатив"]:
+        if col in stats.columns:
+            stats[col] = pd.to_numeric(stats[col], errors="coerce").fillna(0).astype(int)
+    stats["Доля негатива"] = (stats["Негатив"] / stats["Сообщений"].replace(0, pd.NA) * 100).fillna(0).round(1)
+    return stats.sort_values(["Сообщений", "Просмотры", "Вовлеченность"], ascending=False).reset_index(drop=True)
+
+
+def format_int(value: Any) -> str:
+    try:
+        return f"{int(float(value)):,}".replace(",", " ")
+    except Exception:
+        return "0"
+
+
+def render_tag_statistics(messages: pd.DataFrame) -> None:
+    stats = build_tag_statistics(messages)
+    if stats.empty:
+        return
+
+    st.subheader("Статистика тегов")
+    top = stats.head(30).copy()
+    display = top.copy()
+    for col in ["Сообщений", "Просмотры", "Вовлеченность", "Негатив"]:
+        if col in display.columns:
+            display[col] = display[col].apply(format_int)
+    display["Доля негатива"] = display["Доля негатива"].astype(str) + "%"
+    st.caption("Теги берутся из системных колонок Brand Analytics после «Обработано». Просмотры и вовлеченность суммируются по сообщениям с выбранным тегом.")
+    st.dataframe(display, hide_index=True, use_container_width=True)
+
+
+def messages_with_tag(messages: pd.DataFrame, tag: str) -> pd.DataFrame:
+    if messages is None or messages.empty or "tags" not in messages.columns or not str(tag).strip():
+        return pd.DataFrame()
+    key = str(tag).strip().lower().replace("ё", "е")
+    mask = messages["tags"].fillna("").astype(str).apply(
+        lambda value: key in {item.lower().replace("ё", "е") for item in split_pipe_values(value)}
+    )
+    return messages[mask].copy()
+
+
+def render_tag_explorer(messages: pd.DataFrame, *, key_prefix: str = "tag_explorer") -> None:
+    stats = build_tag_statistics(messages)
+    if stats.empty:
+        return
+
+    st.markdown("#### Теги")
+    st.caption("Выберите тег, чтобы посмотреть все сообщения с этим тегом.")
+    options = stats["Тег"].astype(str).tolist()
+    labels = {
+        str(row["Тег"]): f"{row['Тег']} · {format_int(row['Сообщений'])} сообщ. · {format_int(row['Просмотры'])} просмотров · {format_int(row['Вовлеченность'])} вовлеч."
+        for _, row in stats.iterrows()
+    }
+    selected_tag = st.selectbox(
+        "Тег",
+        options,
+        format_func=lambda x: labels.get(str(x), str(x)),
+        key=f"{key_prefix}_select",
+    )
+    tag_messages = messages_with_tag(messages, selected_tag)
+    st.caption(f"Сообщений с тегом «{selected_tag}»: {format_int(len(tag_messages))}")
+    if tag_messages.empty:
+        return
+    tag_messages = tag_messages.copy()
+    tag_messages["Дата"] = tag_messages.get("datetime", "").apply(fmt_date)
+    tag_messages["Просмотры"] = numeric_series(tag_messages, ["views", "Просмотры", "reach", "Охват"]).astype(int)
+    tag_messages["Вовлеченность"] = numeric_series(tag_messages, ["engagement", "Вовлечённость", "Вовлеченность", "engagement_count"]).astype(int)
+    columns = [c for c in ["Дата", "chat_title", "author", "event_title", "text", "url", "Просмотры", "Вовлеченность"] if c in tag_messages.columns]
+    st.dataframe(
+        tag_messages[columns].rename(columns={
+            "chat_title": "Источник/площадка",
+            "author": "Автор",
+            "event_title": "Инфоповод",
+            "text": "Текст",
+            "url": "Ссылка",
+        }),
+        hide_index=True,
+        use_container_width=True,
+        height=420,
+        column_config={"Ссылка": st.column_config.LinkColumn("Ссылка")} if "url" in tag_messages.columns else None,
+    )
 
 
 def render_project_access(is_admin: bool) -> tuple[str | None, str, pd.DataFrame]:
@@ -892,6 +1039,12 @@ def render_events(
         "importance_score": "Важность",
     })
     event = st.dataframe(show, hide_index=True, use_container_width=True, selection_mode="single-row", on_select="rerun")
+
+    # Tag explorer lives under the information-events table. It is independent
+    # from event selection: tags are a separate Brand Analytics slice, while
+    # information events are based on `Сюжет`.
+    render_tag_explorer(filtered_messages, key_prefix="events_tags")
+
     rows = getattr(event, "selection", {}).get("rows", []) if event is not None else []
     if not rows:
         return
@@ -1113,6 +1266,7 @@ def main() -> None:
     neg = int(enriched_messages.get("sentiment", pd.Series(dtype=str)).fillna("").astype(str).str.lower().str.contains("нег").sum()) if not enriched_messages.empty and "sentiment" in enriched_messages.columns else 0
     col4.metric("Негатив", f"{neg:,}".replace(",", " "))
 
+    render_tag_statistics(enriched_messages)
     render_summary(project_id, selected_period_ids, enriched_messages, events_agg, periods, role)
     render_period_dynamics(enriched_messages, periods, selected_period_ids)
     render_events(project_id, role, events_agg, enriched_messages, manual_state)

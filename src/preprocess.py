@@ -257,7 +257,7 @@ def label_microtopic(label: str) -> str:
         return "general"
     return "label_" + stable_hash(clean.lower().replace("ё", "е"), prefix="")[:8]
 
-def row_tags(row: pd.Series, tag_cols: list[str]) -> list[str]:
+def row_tags(row: pd.Series, tag_cols: list[str], include_topic_fields: bool = True) -> list[str]:
     """Return source-provided tags/topics for one message.
 
     Supports two common tag formats:
@@ -289,9 +289,10 @@ def row_tags(row: pd.Series, tag_cols: list[str]) -> list[str]:
             # label into the cell. Prefer it over the column name.
             add_tag(raw_value or tag)
 
-    for col in ["Основная тема", "Все темы", "Все темы (список)", "Теги", "Категории", "Сюжет"]:
-        for tag in unique_labels([row.get(col, "")], limit=12):
-            add_tag(tag)
+    if include_topic_fields:
+        for col in ["Основная тема", "Все темы", "Все темы (список)", "Теги", "Категории", "Сюжет"]:
+            for tag in unique_labels([row.get(col, "")], limit=12):
+                add_tag(tag)
 
     return tags
 
@@ -346,6 +347,24 @@ def infer_display_tags(text: str, microtopic: str, source_tags: list[str]) -> li
     if not tags:
         tags.append("Прочие обсуждения")
     return tags
+
+
+def is_brand_analytics_dataframe(df: pd.DataFrame) -> bool:
+    """Return True for canonical Brand Analytics tables.
+
+    In Brand Analytics exports, information events should be based on the
+    source story column (``Сюжет``), while system tag columns after
+    ``Обработано`` remain tags/analytics dimensions only.
+    """
+    if df is None or df.empty:
+        return False
+    if "source_system" in df.columns:
+        source_system = df["source_system"].fillna("").astype(str).str.lower()
+        if source_system.eq("brand_analytics").any():
+            return True
+    if "source_tag_columns" in df.columns:
+        return df["source_tag_columns"].fillna("").astype(str).str.strip().ne("").any()
+    return False
 
 
 def normalize_messages(raw: pd.DataFrame, tag_cols: list[str]) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -428,36 +447,39 @@ def normalize_messages(raw: pd.DataFrame, tag_cols: list[str]) -> tuple[pd.DataF
         for i, (profile, author) in enumerate(zip(author_profile, author_name))
     ]
 
-    raw_tag_lists = df.apply(lambda r: row_tags(r, tag_cols), axis=1)
+    is_brand_analytics = is_brand_analytics_dataframe(df)
+    raw_tag_lists = df.apply(lambda r: row_tags(r, tag_cols, include_topic_fields=not is_brand_analytics), axis=1)
 
-    source_main_topic_series = get_text_series(
-        df,
-        "Основная тема",
-        aliases=["Главная тема", "Main topic", "Primary topic", "source_main_topic", "Сюжет", "Тема", "Topic"],
-    ).apply(normalize_spaces)
-    source_topics_series = get_text_series(
-        df,
-        "Все темы (список)",
-        aliases=["Все темы", "Темы", "Topics", "source_topics", "Сюжет", "Тема", "Topic"],
-    ).apply(lambda x: "; ".join(split_source_topics(x)))
-    # If there is no separate list of topics, keep the main source topic as a one-item list.
-    source_topics_series = source_topics_series.where(source_topics_series.str.strip() != "", source_main_topic_series)
+    if is_brand_analytics:
+        # Brand Analytics logic: information events are based on the source
+        # story only. Tags from columns after `Обработано` must not create
+        # separate topics/events.
+        source_main_topic_series = get_text_series(
+            df,
+            "Сюжет",
+            aliases=["source_main_topic", "Тема", "Topic", "Theme", "Основная тема"],
+        ).apply(normalize_spaces)
+        source_topics_series = source_main_topic_series.apply(lambda x: "; ".join(split_source_topics(x)))
+    else:
+        source_main_topic_series = get_text_series(
+            df,
+            "Основная тема",
+            aliases=["Главная тема", "Main topic", "Primary topic", "source_main_topic", "Сюжет", "Тема", "Topic"],
+        ).apply(normalize_spaces)
+        source_topics_series = get_text_series(
+            df,
+            "Все темы (список)",
+            aliases=["Все темы", "Темы", "Topics", "source_topics", "Сюжет", "Тема", "Topic"],
+        ).apply(lambda x: "; ".join(split_source_topics(x)))
+        # If there is no separate list of topics, keep the main source topic as a one-item list.
+        source_topics_series = source_topics_series.where(source_topics_series.str.strip() != "", source_main_topic_series)
 
-    # For Brand Analytics, the tag block after `Обработано` is the main human
-    # taxonomy. Add these labels to source_topics so summaries, cards and
-    # macro-grouping can use them directly, not only as secondary display tags.
-    source_topics_series = pd.Series([
-        "; ".join(unique_labels([topics] + list(tags), limit=14)) or str(topics)
-        for topics, tags in zip(source_topics_series, raw_tag_lists)
-    ], index=df.index, dtype="object")
-
-    # Add source topic/story labels to display tags. This is the main universal
-    # signal for non-taxi projects such as Knauf, where exported sheets often
-    # contain "Сюжет" instead of our old hardcoded taxi tags.
-    raw_tag_lists = pd.Series([
-        unique_labels(list(tags) + [main_topic, topics], limit=8)
-        for tags, main_topic, topics in zip(raw_tag_lists, source_main_topic_series, source_topics_series)
-    ], index=df.index, dtype="object")
+        # For non-Brand Analytics files, source topic/story labels may be useful
+        # as display tags because the file may not contain a dedicated tag block.
+        raw_tag_lists = pd.Series([
+            unique_labels(list(tags) + [main_topic, topics], limit=8)
+            for tags, main_topic, topics in zip(raw_tag_lists, source_main_topic_series, source_topics_series)
+        ], index=df.index, dtype="object")
     relevant_series = get_text_series(
         df,
         "Релевантное",
@@ -480,10 +502,15 @@ def normalize_messages(raw: pd.DataFrame, tag_cols: list[str]) -> tuple[pd.DataF
         for text, parent, tags in zip(df["text_clean"].astype(str), parent_context, ["|".join(tags) for tags in raw_tag_lists])
     ]
 
-    tag_lists = [
-        infer_display_tags(text, microtopic, tags)
-        for text, microtopic, tags in zip(df["text_clean"].astype(str), df["microtopic"].astype(str), raw_tag_lists)
-    ]
+    if is_brand_analytics:
+        # Tags are exactly Brand Analytics system/user tags from columns after
+        # `Обработано`. Do not append auto-generated semantic tags here.
+        tag_lists = [list(tags) if list(tags) else ["Без тега"] for tags in raw_tag_lists]
+    else:
+        tag_lists = [
+            infer_display_tags(text, microtopic, tags)
+            for text, microtopic, tags in zip(df["text_clean"].astype(str), df["microtopic"].astype(str), raw_tag_lists)
+        ]
     df["tags"] = ["|".join(tags) for tags in tag_lists]
     df["tag_count"] = [len(tags) for tags in tag_lists]
 
@@ -1179,6 +1206,83 @@ def split_labels_by_time_gap(
     return new_labels.astype(int)
 
 
+def make_events_from_source_stories(discussions: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Build one information event per Brand Analytics `Сюжет`.
+
+    Brand Analytics already contains a human/system story column. For these
+    exports tags are analytical dimensions, not event boundaries, so we avoid
+    clustering by tag or text and group discussions directly by the story.
+    """
+    if discussions is None or discussions.empty:
+        return pd.DataFrame(), pd.DataFrame(columns=["event_id", "discussion_id"])
+
+    d = discussions.copy()
+    if "source_main_topic" not in d.columns:
+        d["source_main_topic"] = ""
+    d["__story"] = d["source_main_topic"].fillna("").astype(str).map(normalize_spaces)
+    d["__story"] = d["__story"].replace("", "Без сюжета")
+    d["event_id"] = d["__story"].apply(lambda x: stable_hash(x, prefix="e_story_"))
+    event_discussions = d[["event_id", "discussion_id"]].copy()
+
+    rows = []
+    for event_id, group in d.groupby("event_id", sort=False):
+        story = str(group["__story"].iloc[0] or "Без сюжета")
+        keywords = top_keywords(group["discussion_text"].fillna("").astype(str), top_n=7)
+        phrases = top_phrases(group["discussion_text"].fillna("").astype(str), top_n=5)
+        start = pd.to_datetime(group["start_date"], errors="coerce").min()
+        end = pd.to_datetime(group["end_date"], errors="coerce").max()
+        msg_count = int(group["message_count"].sum())
+        discussion_count = int(group["discussion_id"].nunique())
+        chat_count = int(group["chat_id"].replace("", np.nan).nunique()) if "chat_id" in group else 0
+        author_count = int(group["author_count"].sum()) if "author_count" in group else 0
+        negative_count = int(group["negative_count"].sum()) if "negative_count" in group else 0
+        toxic_count = int(group["toxic_count"].sum()) if "toxic_count" in group else 0
+        all_tags = sorted(tag_set_from_series(group.get("main_tags", pd.Series(dtype=str))))
+        tag = main_tag(group.get("main_tags", pd.Series(dtype=str)))
+        negative_share = negative_count / msg_count if msg_count else 0.0
+        toxic_share = toxic_count / msg_count if msg_count else 0.0
+        tag_weight = max([CRITICAL_TAG_WEIGHTS.get(t, 1.0) for t in all_tags] or [1.0])
+        importance_score = (
+            math.log1p(msg_count) * 2
+            + math.log1p(max(chat_count, 1)) * 2.5
+            + math.log1p(max(author_count, 1)) * 0.8
+            + negative_share * 4
+            + toxic_share * 2
+            + tag_weight
+        )
+        rows.append({
+            "event_id": event_id,
+            "event_title": story,
+            "event_summary": summarize_event(group, story, keywords, phrases),
+            "main_tag": tag,
+            "microtopic": label_microtopic(story),
+            "main_tags": "|".join(all_tags),
+            "source_main_topic": story,
+            "source_topics": story,
+            "keywords": "|".join(keywords),
+            "key_phrases": "|".join(phrases),
+            "start_date": start,
+            "end_date": end,
+            "discussion_count": discussion_count,
+            "message_count": msg_count,
+            "chat_count": chat_count,
+            "author_count": author_count,
+            "negative_count": negative_count,
+            "toxic_count": toxic_count,
+            "negative_share": round(negative_share, 4),
+            "toxic_share": round(toxic_share, 4),
+            "importance_score": round(float(importance_score), 2),
+            "status": "новый",
+            "is_hidden": False,
+            "event_source": "brand_analytics_story",
+        })
+
+    events = pd.DataFrame(rows)
+    if not events.empty:
+        events = events.sort_values(["importance_score", "message_count"], ascending=False)
+    return events, event_discussions
+
+
 def make_events(
     discussions: pd.DataFrame,
     labels: pd.Series,
@@ -1307,45 +1411,54 @@ def build_processed_tables(
     clear_processed_tables(output)
 
     tag_cols = detect_tag_columns(raw)
+    is_brand_analytics = is_brand_analytics_dataframe(raw)
 
     messages, message_tags = normalize_messages(raw, tag_cols)
     discussions, discussion_messages = make_discussions(messages, window_minutes=window_minutes)
 
-    # Filter empty discussions from clustering, but preserve them as singleton events.
-    clusterable = discussions[discussions["discussion_text"].fillna("").str.len() > 10].copy()
-    non_clusterable = discussions.drop(clusterable.index).copy()
-
-    if cluster_method == "none":
-        labels = pd.Series(range(len(clusterable)), index=clusterable.index)
-    elif cluster_method == "embeddings":
-        labels = cluster_discussions_embeddings(
-            clusterable,
-            similarity_threshold=similarity_threshold,
-            model_name=embedding_model,
-        )
+    if is_brand_analytics:
+        # Brand Analytics mode: events are source stories (`Сюжет`), not tag/text
+        # clusters. Tags from columns after `Обработано` stay available in
+        # messages/message_tags for analytics and filtering.
+        events, event_discussions = make_events_from_source_stories(discussions)
+        cluster_method_used = "brand_analytics_story"
     else:
-        labels = cluster_discussions_tfidf(
-            clusterable,
-            similarity_threshold=similarity_threshold,
-            max_gap_hours=event_gap_hours,
-            max_event_span_hours=event_window_hours,
-        )
+        # Filter empty discussions from clustering, but preserve them as singleton events.
+        clusterable = discussions[discussions["discussion_text"].fillna("").str.len() > 10].copy()
+        non_clusterable = discussions.drop(clusterable.index).copy()
 
-    if len(clusterable):
-        labels = refine_labels_by_tag(labels, clusterable)
-        labels = split_labels_by_time_gap(labels, clusterable, max_gap_hours=event_gap_hours)
-        labels = split_labels_by_fixed_time_window(labels, clusterable, window_hours=event_window_hours)
+        if cluster_method == "none":
+            labels = pd.Series(range(len(clusterable)), index=clusterable.index)
+        elif cluster_method == "embeddings":
+            labels = cluster_discussions_embeddings(
+                clusterable,
+                similarity_threshold=similarity_threshold,
+                model_name=embedding_model,
+            )
+        else:
+            labels = cluster_discussions_tfidf(
+                clusterable,
+                similarity_threshold=similarity_threshold,
+                max_gap_hours=event_gap_hours,
+                max_event_span_hours=event_window_hours,
+            )
 
-    if len(non_clusterable):
-        start_label = int(labels.max()) + 1 if len(labels) else 0
-        singleton_labels = pd.Series(range(start_label, start_label + len(non_clusterable)), index=non_clusterable.index)
-        all_discussions = pd.concat([clusterable, non_clusterable], axis=0).sort_index()
-        all_labels = pd.concat([labels, singleton_labels]).loc[all_discussions.index]
-    else:
-        all_discussions = clusterable
-        all_labels = labels
+        if len(clusterable):
+            labels = refine_labels_by_tag(labels, clusterable)
+            labels = split_labels_by_time_gap(labels, clusterable, max_gap_hours=event_gap_hours)
+            labels = split_labels_by_fixed_time_window(labels, clusterable, window_hours=event_window_hours)
 
-    events, event_discussions = make_events(all_discussions, all_labels)
+        if len(non_clusterable):
+            start_label = int(labels.max()) + 1 if len(labels) else 0
+            singleton_labels = pd.Series(range(start_label, start_label + len(non_clusterable)), index=non_clusterable.index)
+            all_discussions = pd.concat([clusterable, non_clusterable], axis=0).sort_index()
+            all_labels = pd.concat([labels, singleton_labels]).loc[all_discussions.index]
+        else:
+            all_discussions = clusterable
+            all_labels = labels
+
+        events, event_discussions = make_events(all_discussions, all_labels)
+        cluster_method_used = cluster_method
 
     paths = {
         "messages": str(write_table(messages, output, "messages")),
@@ -1364,7 +1477,8 @@ def build_processed_tables(
         "rows_events": int(len(events)),
         "tag_columns": tag_cols,
         "window_minutes": window_minutes,
-        "cluster_method": cluster_method,
+        "cluster_method": cluster_method_used,
+        "event_source": "brand_analytics_story" if is_brand_analytics else "algorithmic_cluster",
         "similarity_threshold": similarity_threshold,
         "event_gap_hours": event_gap_hours,
         "event_window_hours": event_window_hours,
