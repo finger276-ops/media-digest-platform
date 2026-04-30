@@ -143,22 +143,40 @@ def split_pipe_values(value: Any) -> list[str]:
 
 
 def numeric_series(df: pd.DataFrame, columns: list[str]) -> pd.Series:
-    """Return the first existing numeric column from a dataframe."""
+    """Return a parsed numeric series from the first useful existing column.
+
+    If a processed metric column exists but contains only zeros while a raw
+    alias is also present, try the raw alias before giving up. This helps with
+    older uploaded periods and mixed Brand Analytics exports.
+    """
     if df is None or df.empty:
         return pd.Series(dtype=float)
+
+    fallback = pd.Series([0] * len(df), index=df.index, dtype=float)
+
     for col in columns:
-        if col in df.columns:
-            return (
-                df[col]
-                .fillna(0)
-                .astype(str)
-                .str.replace("\u00a0", "", regex=False)
-                .str.replace(" ", "", regex=False)
-                .str.replace(",", ".", regex=False)
-                .pipe(pd.to_numeric, errors="coerce")
-                .fillna(0)
-            )
-    return pd.Series([0] * len(df), index=df.index, dtype=float)
+        if col not in df.columns:
+            continue
+        series = (
+            df[col]
+            .fillna("")
+            .astype(str)
+            .str.replace("\ufeff", "", regex=False)
+            .str.replace("\u00a0", "", regex=False)
+            .str.replace("\u202f", "", regex=False)
+            .str.replace(" ", "", regex=False)
+            .str.replace("\t", "", regex=False)
+            .str.replace(r"[^0-9\-]", "", regex=True)
+            .pipe(pd.to_numeric, errors="coerce")
+            .fillna(0)
+        )
+        # Use the first column with a non-zero value. Keep a zero fallback in
+        # case all aliases are empty or genuinely zero.
+        if float(series.sum()) != 0:
+            return series
+        fallback = series
+
+    return fallback
 
 
 AUTO_GENERATED_TAGS_TO_HIDE = {

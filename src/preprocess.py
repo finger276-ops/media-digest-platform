@@ -515,18 +515,39 @@ def normalize_messages(raw: pd.DataFrame, tag_cols: list[str]) -> tuple[pd.DataF
     df["tag_count"] = [len(tags) for tags in tag_lists]
 
     def as_int(*col_names: str) -> pd.Series:
-        series = pd.Series([0] * len(df), index=df.index, dtype="object")
+        """Parse integer metrics from exports.
+
+        Brand Analytics can export numbers as strings with regular spaces,
+        non-breaking spaces, narrow non-breaking spaces, quotes or other
+        formatting. Empty values are treated as 0.
+        """
+        series = pd.Series([""] * len(df), index=df.index, dtype="object")
         for col_name in col_names:
             if col_name in df.columns:
-                series = df[col_name].fillna("").astype(str)
-                break
-        series = series.str.replace(" ", "", regex=False).str.replace(",", ".", regex=False)
-        return pd.to_numeric(series, errors="coerce").fillna(0).astype(int)
+                candidate = df[col_name].fillna("").astype(str)
+                # Prefer the first existing column that has at least one value.
+                # If it is completely empty, keep looking through aliases.
+                if candidate.str.strip().ne("").any():
+                    series = candidate
+                    break
+                series = candidate
 
-    df["duplicate_count"] = as_int("Количество дублей", "Дублей")
-    df["audience"] = as_int("Аудитория")
-    df["views"] = as_int("Просмотры", "Просмотров", "Охват")
-    df["engagement"] = as_int("Вовлечённость", "Вовлеченность")
+        cleaned = (
+            series.fillna("")
+            .astype(str)
+            .str.replace("\ufeff", "", regex=False)
+            .str.replace("\u00a0", "", regex=False)
+            .str.replace("\u202f", "", regex=False)
+            .str.replace(" ", "", regex=False)
+            .str.replace("\t", "", regex=False)
+            .str.replace(r"[^0-9\-]", "", regex=True)
+        )
+        return pd.to_numeric(cleaned, errors="coerce").fillna(0).astype(int)
+
+    df["duplicate_count"] = as_int("Количество дублей", "Дублей", "Duplicates")
+    df["audience"] = as_int("Аудитория", "Audience", "audience")
+    df["views"] = as_int("Просмотры", "Просмотров", "Охват", "Views", "views", "Reach", "reach")
+    df["engagement"] = as_int("Вовлечённость", "Вовлеченность", "Engagement", "engagement")
 
     sentiment_series = get_text_series(df, "Тональность", aliases=["sentiment", "Окраска", "Тон"])
     toxicity_series = get_text_series(df, "Токсичность", aliases=["toxicity", "toxic"])
