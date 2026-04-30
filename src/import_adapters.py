@@ -51,6 +51,7 @@ CANONICAL_COLUMNS = [
     "Релевантное",
     "source_system",
     "source_file",
+    "source_tag_columns",
 ]
 
 MEDIALOGIA_DEFAULT_TAGS = [
@@ -325,6 +326,41 @@ def _normalize_bool_text(value: object) -> str:
         return "False"
     return str(value).strip() if value is not None else ""
 
+
+def _brand_analytics_tag_columns(df: pd.DataFrame) -> list[str]:
+    """Return Brand Analytics tag columns located after the `Обработано` marker.
+
+    Brand Analytics exports place user/system tags as separate columns after
+    the service column `Обработано`. In those columns a non-empty cell usually
+    contains the tag label itself. These columns are essential for topic
+    grouping and analytics in non-taxi projects.
+    """
+    if df is None or df.empty:
+        return []
+    columns = list(df.columns)
+    marker_idx = -1
+    for idx, col in enumerate(columns):
+        key = _clean_col_name(col).lower().replace("ё", "е")
+        if key in {"обработано", "processed", "processed?", "is processed"}:
+            marker_idx = idx
+            break
+    if marker_idx < 0:
+        return []
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for col in columns[marker_idx + 1:]:
+        label = _clean_col_name(col)
+        key = label.lower().replace("ё", "е")
+        if not label or key in seen or key.startswith("unnamed"):
+            continue
+        values = df[col].fillna("").astype(str).str.strip() if col in df.columns else pd.Series(dtype=str)
+        if values.empty or values.eq("").all():
+            continue
+        seen.add(key)
+        result.append(col)
+    return result
+
 def canonicalize_table(raw: pd.DataFrame, source_file: str = "", source_system: str = "auto") -> pd.DataFrame:
     df = _clean_dataframe(raw)
     detected = detect_source_system(df) if source_system in {"", "auto", None} else str(source_system)
@@ -396,8 +432,17 @@ def canonicalize_table(raw: pd.DataFrame, source_file: str = "", source_system: 
     ]
     out["Релевантное"] = relevant.apply(_normalize_bool_text)
 
+    # Brand Analytics specificity: all non-empty columns after `Обработано`
+    # are tag columns. Keep them in the canonical table so preprocess can use
+    # them as first-class topic signals instead of falling back to generic words.
+    ba_tag_columns = _brand_analytics_tag_columns(df) if detected == "brand_analytics" else []
+    for tag_col in ba_tag_columns:
+        if tag_col not in out.columns and tag_col in df.columns:
+            out[tag_col] = df[tag_col].fillna("").astype(str)
+    out["source_tag_columns"] = "|".join(str(c) for c in ba_tag_columns)
+
     for tag in MEDIALOGIA_DEFAULT_TAGS:
-        if tag in df.columns:
+        if tag in df.columns and tag not in out.columns:
             out[tag] = first_existing(df, [tag])
 
     out["source_system"] = detected

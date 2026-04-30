@@ -133,12 +133,27 @@ def detect_tag_columns(df: pd.DataFrame) -> list[str]:
         "страна", "регион", "город", "просмотры", "вовлечённость", "вовлеченность",
         "лайки", "комментарии", "репосты", "теги", "категории", "сюжет",
         "основная тема", "все темы", "все темы (список)", "релевантное",
-        "source_system", "source_file",
+        "source_system", "source_file", "source_tag_columns", "обработано", "processed",
     }
     positive_values = {"да", "yes", "true", "1", "+", "истина", "верно"}
     bool_values = positive_values | {"нет", "no", "false", "0", "-", "ложь", "неверно", ""}
 
     detected = list(known)
+
+    # Brand Analytics exports store tag column names in `source_tag_columns`
+    # after canonicalization. Trust this marker: these columns are more reliable
+    # topic signals than generic keyword extraction.
+    if "source_tag_columns" in df.columns:
+        declared: list[str] = []
+        for raw in df["source_tag_columns"].dropna().astype(str).unique().tolist():
+            for item in re.split(r"[|;,\n]+", raw):
+                item = normalize_spaces(item)
+                if item and item in df.columns and item not in declared:
+                    declared.append(item)
+        for col in declared:
+            if col not in detected:
+                detected.append(col)
+
     for col in df.columns:
         if col in detected:
             continue
@@ -245,23 +260,38 @@ def label_microtopic(label: str) -> str:
 def row_tags(row: pd.Series, tag_cols: list[str]) -> list[str]:
     """Return source-provided tags/topics for one message.
 
-    The function is intentionally source-agnostic: it uses explicit tag columns,
-    topic/story columns from monitoring systems, and multi-value fields. This is
-    what lets the same pipeline work for taxi, Knauf, retail, banks, medicine,
-    construction, and other projects.
+    Supports two common tag formats:
+    1) boolean tag columns: column `Quality` contains Да/True/1;
+    2) Brand Analytics tag block: columns after `Обработано` contain the tag
+       label itself, for example column `ROCKWOOL` contains `ROCKWOOL`.
     """
     tags: list[str] = []
+    seen: set[str] = set()
+    positive_values = {"да", "yes", "true", "1", "+", "истина", "верно"}
+    negative_values = {"", "нет", "no", "false", "0", "-", "ложь", "неверно", "nan", "none", "null"}
+
+    def add_tag(value: object) -> None:
+        label = normalize_label(value)
+        key = label.lower().replace("ё", "е")
+        if label and key not in seen:
+            seen.add(key)
+            tags.append(label)
+
     for tag in tag_cols:
-        val = str(row.get(tag, "")).strip().lower().replace("ё", "е")
-        if val in {"да", "yes", "true", "1", "+", "истина", "верно"}:
-            label = normalize_label(tag)
-            if label and label not in tags:
-                tags.append(label)
+        raw_value = str(row.get(tag, "") or "").strip()
+        val = raw_value.lower().replace("ё", "е")
+        if val in negative_values:
+            continue
+        if val in positive_values:
+            add_tag(tag)
+        else:
+            # Brand Analytics and some monitoring systems put the actual tag
+            # label into the cell. Prefer it over the column name.
+            add_tag(raw_value or tag)
 
     for col in ["Основная тема", "Все темы", "Все темы (список)", "Теги", "Категории", "Сюжет"]:
         for tag in unique_labels([row.get(col, "")], limit=12):
-            if tag not in tags:
-                tags.append(tag)
+            add_tag(tag)
 
     return tags
 
@@ -412,6 +442,14 @@ def normalize_messages(raw: pd.DataFrame, tag_cols: list[str]) -> tuple[pd.DataF
     ).apply(lambda x: "; ".join(split_source_topics(x)))
     # If there is no separate list of topics, keep the main source topic as a one-item list.
     source_topics_series = source_topics_series.where(source_topics_series.str.strip() != "", source_main_topic_series)
+
+    # For Brand Analytics, the tag block after `Обработано` is the main human
+    # taxonomy. Add these labels to source_topics so summaries, cards and
+    # macro-grouping can use them directly, not only as secondary display tags.
+    source_topics_series = pd.Series([
+        "; ".join(unique_labels([topics] + list(tags), limit=14)) or str(topics)
+        for topics, tags in zip(source_topics_series, raw_tag_lists)
+    ], index=df.index, dtype="object")
 
     # Add source topic/story labels to display tags. This is the main universal
     # signal for non-taxi projects such as Knauf, where exported sheets often
