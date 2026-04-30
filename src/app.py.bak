@@ -586,22 +586,30 @@ def render_period_history(project_id: str, role: str) -> None:
                 value=True,
                 key=f"delete_storage_{period_id}",
             )
-            st.caption("Удаление запускается одной кнопкой. Действие необратимо.")
+            confirm_text = st.text_input(
+                "Для подтверждения введите УДАЛИТЬ",
+                value="",
+                key=f"confirm_delete_period_{period_id}",
+            )
             if st.button("Удалить выгрузку", key=f"hard_delete_period_{period_id}", type="primary"):
-                result = delete_period(
-                    project_id,
-                    period_id,
-                    hard=True,
-                    delete_storage=delete_storage,
-                    cleanup_manual=True,
-                )
-                manual_count = int(result.get("manual_rows_deleted") or 0) if isinstance(result, dict) else 0
-                storage_deleted = bool(result.get("storage_deleted")) if isinstance(result, dict) else False
-                if delete_storage and storage_path and not storage_deleted:
-                    st.warning("Выгрузка удалена из базы, но исходный файл в Storage удалить не удалось или он уже отсутствовал.")
-                st.success(f"Выгрузка удалена. Удалено связанных ручных правок: {manual_count}.")
-                st.cache_data.clear()
-                st.rerun()
+                if confirm_text.strip().upper() != "УДАЛИТЬ":
+                    st.error("Введите УДАЛИТЬ для подтверждения удаления выгрузки.")
+                else:
+                    result = delete_period(
+                        project_id,
+                        period_id,
+                        hard=True,
+                        delete_storage=delete_storage,
+                        cleanup_manual=True,
+                    )
+                    manual_count = int(result.get("manual_rows_deleted") or 0) if isinstance(result, dict) else 0
+                    storage_deleted = bool(result.get("storage_deleted")) if isinstance(result, dict) else False
+                    if delete_storage and storage_path and not storage_deleted:
+                        st.warning("Выгрузка удалена из базы, но исходный файл в Storage удалить не удалось или он уже отсутствовал.")
+                    st.success(f"Выгрузка удалена. Удалено связанных ручных правок: {manual_count}.")
+                    st.cache_data.clear()
+                    st.rerun()
+
 
 def enrich_messages(messages: pd.DataFrame, event_discussions: pd.DataFrame, discussion_messages: pd.DataFrame, events: pd.DataFrame) -> pd.DataFrame:
     if messages.empty:

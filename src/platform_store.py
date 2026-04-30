@@ -429,12 +429,78 @@ def get_period(project_id: str, period_id: str) -> dict[str, Any] | None:
     return data[0] if data else None
 
 
-def delete_period(project_id: str, period_id: str, *, hard: bool = False) -> None:
+def _manual_row_references_period(row: dict[str, Any], period_id: str) -> bool:
+    """Return True when a manual row clearly belongs to the deleted upload."""
+    period_id = str(period_id or "").strip()
+    if not period_id:
+        return False
+    prefix = f"{period_id}__"
+    row_key = str(row.get("row_key") or "")
+    table_name = str(row.get("table_name") or "")
+    if period_id in row_key or prefix in row_key:
+        return True
+    payload = row.get("payload") or {}
+    if not isinstance(payload, dict):
+        return False
+    if str(payload.get("period_id") or "") == period_id:
+        return True
+    if table_name == "summaries":
+        raw_period_ids = payload.get("period_ids") or payload.get("selected_period_ids") or ""
+        if isinstance(raw_period_ids, (list, tuple, set)) and period_id in {str(x) for x in raw_period_ids}:
+            return True
+        if period_id in str(raw_period_ids):
+            return True
+    for key in ["event_id", "source_event_id", "target_event_id", "group_key", "summary_key"]:
+        value = str(payload.get(key) or "")
+        if period_id in value or prefix in value:
+            return True
+    return False
+
+
+def delete_manual_rows_for_period(project_id: str, period_id: str) -> int:
+    """Delete manual rows that are clearly tied to a period/upload."""
     client = get_supabase_client()
-    if hard:
-        client.table("platform_periods").delete().eq("project_id", project_id).eq("period_id", period_id).execute()
-    else:
+    rows = _fetch_all(client, "platform_manual_rows", filters={"project_id": project_id})
+    row_keys = [
+        str(row.get("row_key") or "")
+        for row in rows
+        if _manual_row_references_period(row, period_id) and str(row.get("row_key") or "")
+    ]
+    for batch in chunked(row_keys, 200):
+        client.table("platform_manual_rows").delete().eq("project_id", project_id).in_("row_key", batch).execute()
+    return len(row_keys)
+
+
+def delete_period(
+    project_id: str,
+    period_id: str,
+    *,
+    hard: bool = False,
+    delete_storage: bool = True,
+    cleanup_manual: bool = True,
+) -> dict[str, Any]:
+    """Hide or permanently delete a project upload/period."""
+    client = get_supabase_client()
+    if not hard:
         update_period_metadata(project_id, period_id, status="hidden")
+        return {"mode": "soft", "manual_rows_deleted": 0, "storage_deleted": False}
+
+    period = get_period(project_id, period_id) or {}
+    manifest = period.get("manifest") if isinstance(period.get("manifest"), dict) else {}
+    storage_path = str((manifest or {}).get("storage_path") or "").strip()
+
+    manual_deleted = delete_manual_rows_for_period(project_id, period_id) if cleanup_manual else 0
+
+    client.table("platform_table_rows").delete().eq("project_id", project_id).eq("period_id", period_id).execute()
+    client.table("platform_periods").delete().eq("project_id", project_id).eq("period_id", period_id).execute()
+
+    storage_deleted = delete_uploaded_file_from_storage(storage_path) if delete_storage and storage_path else False
+    return {
+        "mode": "hard",
+        "manual_rows_deleted": manual_deleted,
+        "storage_deleted": storage_deleted,
+        "storage_path": storage_path,
+    }
 
 
 
@@ -493,9 +559,28 @@ def content_type_for_filename(filename: str) -> str:
     return "application/octet-stream"
 
 
+def storage_bucket_name() -> str:
+    """Return the Supabase Storage bucket used by the platform."""
+    return _secret_value("SUPABASE_STORAGE_BUCKET") or _secret_value("PLATFORM_STORAGE_BUCKET") or "dashboard-csv"
+
+
+def delete_uploaded_file_from_storage(storage_path: str) -> bool:
+    """Best-effort removal of a raw uploaded file from Supabase Storage."""
+    storage_path = str(storage_path or "").strip()
+    if not storage_path:
+        return False
+    client = get_supabase_client()
+    bucket = storage_bucket_name()
+    try:
+        client.storage.from_(bucket).remove([storage_path])
+        return True
+    except Exception:
+        return False
+
+
 def save_uploaded_file_to_storage(project_id: str, period_id: str, filename: str, file_bytes: bytes) -> str:
     client = get_supabase_client()
-    bucket = _secret_value("SUPABASE_STORAGE_BUCKET") or _secret_value("PLATFORM_STORAGE_BUCKET") or "dashboard-csv"
+    bucket = storage_bucket_name()
     safe_project = ascii_storage_component(project_id, "project")[:80]
     safe_period = ascii_storage_component(period_id, "period")[:80]
     safe_name = safe_storage_filename(filename)
