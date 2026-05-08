@@ -643,6 +643,18 @@ def _comparison_visual_rows(comparison: list[dict[str, Any]]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _chart_number_label(value: Any, *, percent: bool = False) -> str:
+    try:
+        number = float(value or 0)
+    except Exception:
+        number = 0.0
+    if percent:
+        raw = f"{number:.1f}".replace(".", ",")
+        raw = raw[:-2] if raw.endswith(",0") else raw
+        return f"{raw}%"
+    return format_int(number)
+
+
 def _render_sentiment_donut(period_label: str, sentiment: dict[str, Any], *, key: str) -> None:
     total = int((sentiment or {}).get("total", 0) or 0)
     if total <= 0:
@@ -657,12 +669,26 @@ def _render_sentiment_donut(period_label: str, sentiment: dict[str, Any], *, key
     if pie.empty:
         st.caption(f"{period_label}: нет данных для круговой диаграммы")
         return
-    chart = alt.Chart(pie).mark_arc(innerRadius=50).encode(
+    pie = pie.copy()
+    pie["Доля"] = pie["Сообщений"] / total * 100
+    pie["Подпись"] = pie.apply(lambda r: f"{r['Тональность']}: {_chart_number_label(r['Доля'], percent=True)}", axis=1)
+    base = alt.Chart(pie).encode(
         theta=alt.Theta(field="Сообщений", type="quantitative"),
-        color=alt.Color(field="Тональность", type="nominal", scale=alt.Scale(domain=SENTIMENT_COLOR_DOMAIN, range=SENTIMENT_COLOR_RANGE), legend=alt.Legend(title="Тональность")),
-        tooltip=["Тональность", "Сообщений"],
-    ).properties(height=260, title=period_label)
-    st.altair_chart(chart, use_container_width=True)
+        color=alt.Color(
+            field="Тональность",
+            type="nominal",
+            scale=alt.Scale(domain=SENTIMENT_COLOR_DOMAIN, range=SENTIMENT_COLOR_RANGE),
+            legend=alt.Legend(title="Тональность"),
+        ),
+        tooltip=[
+            "Тональность",
+            alt.Tooltip("Сообщений:Q", format=","),
+            alt.Tooltip("Доля:Q", format=".1f", title="Доля, %"),
+        ],
+    )
+    arcs = base.mark_arc(innerRadius=50)
+    labels = base.mark_text(radius=92, size=12).encode(text="Подпись:N")
+    st.altair_chart((arcs + labels).properties(height=260, title=period_label), use_container_width=True)
 
 
 def render_period_comparison_charts(comparison: list[dict[str, Any]]) -> None:
@@ -676,7 +702,21 @@ def render_period_comparison_charts(comparison: list[dict[str, Any]]) -> None:
     c1, c2 = st.columns(2)
     with c1:
         st.markdown("**Динамика основных метрик**")
-        st.line_chart(chart_df.set_index("Период")[["Сообщения", "Аудитория", "Охват", "Вовлеченность"]])
+        metrics_long = chart_df[["Период", "Сообщения", "Аудитория", "Охват", "Вовлеченность"]].melt(
+            id_vars="Период",
+            var_name="Метрика",
+            value_name="Значение",
+        )
+        metrics_long["Подпись"] = metrics_long["Значение"].apply(_chart_number_label)
+        base_metrics = alt.Chart(metrics_long).encode(
+            x=alt.X("Период:N", sort=None, title="Период"),
+            y=alt.Y("Значение:Q", title="Значение"),
+            color=alt.Color("Метрика:N", legend=alt.Legend(title="Метрика")),
+            tooltip=["Период", "Метрика", alt.Tooltip("Значение:Q", format=",")],
+        )
+        metrics_line = base_metrics.mark_line(point=True)
+        metrics_labels = base_metrics.mark_text(align="center", baseline="bottom", dy=-8, size=10).encode(text="Подпись:N")
+        st.altair_chart((metrics_line + metrics_labels).properties(height=320), use_container_width=True)
     with c2:
         st.markdown("**Динамика долей тональности, %**")
         sentiment_long = chart_df[["Период", "Позитив, %", "Нейтрал, %", "Негатив, %"]].melt(
@@ -685,7 +725,8 @@ def render_period_comparison_charts(comparison: list[dict[str, Any]]) -> None:
             value_name="Доля, %",
         )
         sentiment_long["Тональность"] = sentiment_long["Тональность"].str.replace(", %", "", regex=False)
-        sentiment_line = alt.Chart(sentiment_long).mark_line(point=True).encode(
+        sentiment_long["Подпись"] = sentiment_long["Доля, %"].apply(lambda x: _chart_number_label(x, percent=True))
+        base_sentiment = alt.Chart(sentiment_long).encode(
             x=alt.X("Период:N", sort=None, title="Период"),
             y=alt.Y("Доля, %:Q", title="Доля, %"),
             color=alt.Color(
@@ -694,8 +735,10 @@ def render_period_comparison_charts(comparison: list[dict[str, Any]]) -> None:
                 legend=alt.Legend(title="Тональность"),
             ),
             tooltip=["Период", "Тональность", alt.Tooltip("Доля, %:Q", format=".1f")],
-        ).properties(height=320)
-        st.altair_chart(sentiment_line, use_container_width=True)
+        )
+        sentiment_line = base_sentiment.mark_line(point=True)
+        sentiment_labels = base_sentiment.mark_text(align="center", baseline="bottom", dy=-8, size=10).encode(text="Подпись:N")
+        st.altair_chart((sentiment_line + sentiment_labels).properties(height=320), use_container_width=True)
 
     st.markdown("**Столбчатое сравнение по периодам**")
     metric_map = {
@@ -712,12 +755,15 @@ def render_period_comparison_charts(comparison: list[dict[str, Any]]) -> None:
     )
     metric_col = metric_map[selected_metric]
     bar_df = chart_df[["Период", metric_col]].rename(columns={metric_col: "Значение"})
-    bar = alt.Chart(bar_df).mark_bar().encode(
+    bar_df["Подпись"] = bar_df["Значение"].apply(_chart_number_label)
+    bar_base = alt.Chart(bar_df).encode(
         x=alt.X("Период:N", sort=None, title="Период"),
         y=alt.Y("Значение:Q", title=selected_metric),
         tooltip=["Период", alt.Tooltip("Значение:Q", format=",")],
-    ).properties(height=320)
-    st.altair_chart(bar, use_container_width=True)
+    )
+    bar = bar_base.mark_bar()
+    bar_labels = bar_base.mark_text(align="center", baseline="bottom", dy=-6).encode(text="Подпись:N")
+    st.altair_chart((bar + bar_labels).properties(height=320), use_container_width=True)
 
     if len(comparison) >= 2:
         st.markdown("**Круговые диаграммы тональности**")
