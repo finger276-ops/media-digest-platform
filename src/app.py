@@ -790,21 +790,65 @@ def render_period_comparison_charts(comparison: list[dict[str, Any]], *, label_s
     c1, c2 = st.columns(2)
     with c1:
         st.markdown("**Динамика основных метрик**")
-        metrics_long = chart_df[["Период", "Сообщения", "Аудитория", "Охват", "Вовлеченность"]].melt(
+        metrics_cols = ["Сообщения", "Аудитория", "Охват", "Вовлеченность"]
+        metrics_long = chart_df[["Период"] + metrics_cols].melt(
             id_vars="Период",
             var_name="Метрика",
             value_name="Значение",
         )
         metrics_long["Подпись"] = metrics_long["Значение"].apply(_chart_number_label)
+        chart_type = st.selectbox(
+            "Тип визуализации основных метрик",
+            ["График", "Столбчатая", "Круговая диаграмма"],
+            index=0,
+            key=f"main_metrics_chart_type_{abs(hash(tuple(chart_df['Период'].tolist())))}",
+        )
         base_metrics = alt.Chart(metrics_long).encode(
             x=alt.X("Период:N", sort=None, title="Период"),
             y=alt.Y("Значение:Q", title="Значение"),
             color=alt.Color("Метрика:N", legend=alt.Legend(title="Метрика")),
             tooltip=["Период", "Метрика", alt.Tooltip("Значение:Q", format=",")],
         )
-        metrics_line = base_metrics.mark_line(point=True)
-        metrics_labels = base_metrics.mark_text(**chart_label_text_kwargs(label_settings, chart_type="line")).encode(text="Подпись:N")
-        st.altair_chart((metrics_line + metrics_labels).properties(height=320), use_container_width=True)
+        if chart_type == "Столбчатая":
+            bars = alt.Chart(metrics_long).mark_bar(size=18).encode(
+                x=alt.X("Период:N", sort=None, title="Период", axis=alt.Axis(labelAngle=-90)),
+                xOffset=alt.XOffset("Метрика:N"),
+                y=alt.Y("Значение:Q", title="Значение"),
+                color=alt.Color("Метрика:N", legend=alt.Legend(title="Метрика")),
+                tooltip=["Период", "Метрика", alt.Tooltip("Значение:Q", format=",")],
+            )
+            st.altair_chart(bars.properties(height=320), use_container_width=True)
+        elif chart_type == "Круговая диаграмма":
+            pie_metric = st.selectbox(
+                "Метрика для круговой диаграммы",
+                metrics_cols,
+                index=0,
+                key=f"main_metrics_pie_metric_{abs(hash(tuple(chart_df['Период'].tolist())))}",
+            )
+            pie_df = chart_df[["Период", pie_metric]].rename(columns={pie_metric: "Значение"}).copy()
+            pie_df["Значение"] = pd.to_numeric(pie_df["Значение"], errors="coerce").fillna(0)
+            total_value = float(pie_df["Значение"].sum() or 0)
+            if total_value <= 0:
+                st.info("Нет данных для круговой диаграммы по выбранной метрике.")
+            else:
+                pie_df["Доля"] = pie_df["Значение"] / total_value * 100
+                pie_df["Подпись"] = pie_df.apply(lambda r: f"{_chart_number_label(r['Значение'])} · {_chart_number_label(r['Доля'], percent=True)}", axis=1)
+                donut = alt.Chart(pie_df).mark_arc(innerRadius=50).encode(
+                    theta=alt.Theta(field="Значение", type="quantitative"),
+                    color=alt.Color("Период:N", legend=None),
+                    tooltip=["Период", alt.Tooltip("Значение:Q", format=","), alt.Tooltip("Доля:Q", format=".1f", title="Доля, %")],
+                )
+                left_pie, right_pie = st.columns([3, 2])
+                with left_pie:
+                    st.altair_chart(donut.properties(height=300, title=pie_metric), use_container_width=True)
+                with right_pie:
+                    st.markdown("**Значения**")
+                    for _, row in pie_df.sort_values("Значение", ascending=False).iterrows():
+                        st.markdown(f"**{row['Период']}**  \n{_chart_number_label(row['Значение'])} · {_chart_number_label(row['Доля'], percent=True)}")
+        else:
+            metrics_line = base_metrics.mark_line(point=True)
+            metrics_labels = base_metrics.mark_text(**chart_label_text_kwargs(label_settings, chart_type="line")).encode(text="Подпись:N")
+            st.altair_chart((metrics_line + metrics_labels).properties(height=320), use_container_width=True)
     with c2:
         st.markdown("**Динамика долей тональности, %**")
         sentiment_long = chart_df[["Период", "Позитив, %", "Нейтрал, %", "Негатив, %"]].melt(
@@ -853,11 +897,11 @@ def render_period_comparison_charts(comparison: list[dict[str, Any]], *, label_s
     else:
         bar_df["_label_y"] = pd.to_numeric(bar_df["Значение"], errors="coerce").fillna(0)
     bar_base = alt.Chart(bar_df).encode(
-        x=alt.X("Период:N", sort=None, title="Период"),
+        x=alt.X("Период:N", sort=None, title="Период", axis=alt.Axis(labelAngle=-90)),
         y=alt.Y("Значение:Q", title=selected_metric),
         tooltip=["Период", alt.Tooltip("Значение:Q", format=",")],
     )
-    bar = bar_base.mark_bar()
+    bar = bar_base.mark_bar(size=70)
     bar_label_kwargs = chart_label_text_kwargs(label_settings, chart_type="bar")
     if label_cfg.get("position") in {"center", "bottom"}:
         bar_label_kwargs["dy"] = 0
