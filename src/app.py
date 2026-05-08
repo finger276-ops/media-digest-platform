@@ -36,7 +36,7 @@ from platform_store import (
 from preprocess import run_preprocess_from_dataframe
 
 APP_TITLE = "Платформа дайджестов"
-APP_VERSION = "4.0: мультиплатформа + дашборд водительских чатов"
+APP_VERSION = "4.1.1: единый верхний блок + фильтр малых инфоповодов"
 
 ALGORITHM_PROFILE_OPTIONS = {
     "universal": "Универсальный",
@@ -61,6 +61,78 @@ def is_taxi_project_profile(profile: str) -> bool:
 
 def is_taxi_project_row(project_row: pd.Series | None) -> bool:
     return is_taxi_project_profile(project_topic_profile(project_row))
+
+
+def is_brand_analytics_event_set(events: pd.DataFrame) -> bool:
+    """Return True when events were built from Brand Analytics `Сюжет` values.
+
+    Brand Analytics projects can legitimately have small one-off сюжеты, so the
+    default small-event filter should not hide them. Algorithmic projects
+    (especially driver chats) are much noisier and need a higher threshold.
+    """
+    if events is None or events.empty or "event_source" not in events.columns:
+        return False
+    values = events["event_source"].fillna("").astype(str).str.lower()
+    return bool(values.str.contains("brand_analytics_story", regex=False).any())
+
+
+def default_min_event_messages(profile: str, events: pd.DataFrame | None = None) -> int:
+    """Default threshold for showing information events in dashboards.
+
+    - Brand Analytics: keep every `Сюжет`, because the source system already
+      provides editorial/story grouping.
+    - Driver chats and other algorithmic projects: hide tiny clusters by default
+      so one-message noise does not become an information event.
+    """
+    if is_brand_analytics_event_set(events if events is not None else pd.DataFrame()):
+        return 1
+    return 4
+
+
+def render_min_event_messages_control(profile: str, events: pd.DataFrame | None = None, *, key: str = "min_event_messages") -> int:
+    default_value = int(default_min_event_messages(profile, events))
+    max_value = 50
+    help_text = (
+        "Инфоповоды с меньшим числом сообщений скрываются из таблицы и саммари. "
+        "Сообщения при этом остаются в общей статистике и полной ленте."
+    )
+    return int(st.sidebar.number_input(
+        "Мин. сообщений в инфоповоде",
+        min_value=1,
+        max_value=max_value,
+        value=default_value,
+        step=1,
+        help=help_text,
+        key=key,
+    ))
+
+
+def filter_small_events(events_agg: pd.DataFrame, min_messages: int) -> tuple[pd.DataFrame, int, int]:
+    """Hide tiny information events from dashboard-level analytics.
+
+    This does not delete events or messages from storage; it only filters the
+    analytical view. It is intended to suppress one-off algorithmic clusters
+    such as `Обсуждение: ...` with 1-3 messages.
+    """
+    if events_agg is None or events_agg.empty or min_messages <= 1 or "message_count" not in events_agg.columns:
+        return events_agg, 0, 0
+    work = events_agg.copy()
+    counts = pd.to_numeric(work["message_count"], errors="coerce").fillna(0).astype(int)
+    keep_mask = counts >= int(min_messages)
+    hidden_events = int((~keep_mask).sum())
+    hidden_messages = int(counts[~keep_mask].sum())
+    return work[keep_mask].copy(), hidden_events, hidden_messages
+
+
+def render_small_events_notice(hidden_events: int, hidden_messages: int, min_messages: int) -> None:
+    if hidden_events <= 0:
+        return
+    st.caption(
+        f"Скрыто малых инфоповодов: {format_int(hidden_events)} "
+        f"(< {format_int(min_messages)} сообщений). "
+        f"Сообщений в них: {format_int(hidden_messages)}. "
+        "Они не удалены и остаются в общей статистике/ленте."
+    )
 
 
 def project_settings_from_row(row) -> dict[str, Any]:
@@ -422,17 +494,214 @@ def overview_metrics(messages: pd.DataFrame) -> dict[str, Any]:
     }
 
 
+def _period_row_label(row: pd.Series, fallback: str = "") -> str:
+    name = str(row.get("period_name") or "").strip() if isinstance(row, pd.Series) else ""
+    period = fmt_period(row) if isinstance(row, pd.Series) else ""
+    if name and period:
+        return f"{name} · {period}"
+    return name or period or fallback or "период"
+
+
+def _selected_period_rows(periods: pd.DataFrame, period_ids: list[str]) -> pd.DataFrame:
+    ids = [str(x) for x in (period_ids or []) if str(x).strip()]
+    if not ids or periods is None or periods.empty or "period_id" not in periods.columns:
+        return pd.DataFrame({"period_id": ids})
+    work = periods[periods["period_id"].astype(str).isin(ids)].copy()
+    if work.empty:
+        return pd.DataFrame({"period_id": ids})
+    # Preserve missing selected ids so comparison does not silently lose a period.
+    existing = set(work["period_id"].astype(str))
+    missing = [pid for pid in ids if pid not in existing]
+    if missing:
+        work = pd.concat([work, pd.DataFrame({"period_id": missing})], ignore_index=True)
+    return work
+
+
+def _ordered_period_ids(periods: pd.DataFrame, period_ids: list[str]) -> list[str]:
+    """Return selected period ids in chronological order for sequence comparison."""
+    ids = [str(x) for x in (period_ids or []) if str(x).strip()]
+    if len(ids) <= 1:
+        return ids
+    rows = _selected_period_rows(periods, ids).copy()
+    if rows.empty or "period_id" not in rows.columns:
+        return ids
+
+    date_series = pd.Series(pd.NaT, index=rows.index, dtype="datetime64[ns]")
+    for col in ["date_from", "start_date", "uploaded_at", "date_to", "end_date"]:
+        if col in rows.columns:
+            parsed = pd.to_datetime(rows[col], errors="coerce", dayfirst=True)
+            date_series = date_series.combine_first(parsed)
+    rows["_sort_date"] = date_series
+    rows["_input_order"] = rows["period_id"].astype(str).map({pid: i for i, pid in enumerate(ids)})
+    rows = rows.sort_values(["_sort_date", "_input_order"], na_position="last", kind="mergesort")
+    ordered = rows["period_id"].astype(str).tolist()
+    # If all dates are missing, keep the user's selection order.
+    if rows["_sort_date"].isna().all():
+        return ids
+    # Preserve any ids that were not present in metadata.
+    for pid in ids:
+        if pid not in ordered:
+            ordered.append(pid)
+    return ordered
+
+
+def _metric_delta(current: float, previous: float) -> str:
+    try:
+        current = float(current or 0)
+        previous = float(previous or 0)
+    except Exception:
+        return "0"
+    diff = current - previous
+    sign = "+" if diff > 0 else ""
+    if previous:
+        pct = diff / previous * 100
+        pct_sign = "+" if pct > 0 else ""
+        return f"{sign}{format_int(diff)} ({pct_sign}{pct:.0f}%)"
+    if diff:
+        return f"{sign}{format_int(diff)}"
+    return "0"
+
+
+def _pp_delta(current_share: float, previous_share: float) -> str:
+    diff = (float(current_share or 0) - float(previous_share or 0)) * 100
+    sign = "+" if diff > 0 else ""
+    return f"{sign}{diff:.1f} п.п."
+
+
+def _period_metrics_for_comparison(messages: pd.DataFrame, periods: pd.DataFrame, period_ids: list[str]) -> list[dict[str, Any]]:
+    ordered_ids = _ordered_period_ids(periods, period_ids)
+    result: list[dict[str, Any]] = []
+    if len(ordered_ids) < 2:
+        return result
+
+    rows = _selected_period_rows(periods, ordered_ids)
+    row_by_id = {str(r.get("period_id")): r for _, r in rows.iterrows()} if not rows.empty else {}
+    for pid in ordered_ids:
+        if isinstance(messages, pd.DataFrame) and not messages.empty and "period_id" in messages.columns:
+            subset = messages[messages["period_id"].astype(str) == str(pid)].copy()
+        else:
+            subset = pd.DataFrame()
+        metrics = overview_metrics(subset)
+        sent = metrics.get("sentiment", {})
+        total = max(1, int(sent.get("total", 0) or 0))
+        row = row_by_id.get(str(pid), pd.Series({"period_id": pid}))
+        metrics.update({
+            "period_id": str(pid),
+            "label": _period_row_label(row, str(pid)),
+            "positive_share": float(sent.get("positive", 0) or 0) / total if total else 0.0,
+            "neutral_share": float(sent.get("neutral", 0) or 0) / total if total else 0.0,
+            "negative_share": float(sent.get("negative", 0) or 0) / total if total else 0.0,
+        })
+        result.append(metrics)
+    return result
+
+
+def _comparison_row(metric: dict[str, Any], previous: dict[str, Any] | None = None) -> dict[str, Any]:
+    sent = metric.get("sentiment", {}) or {}
+    row = {
+        "Период": metric.get("label", metric.get("period_id", "")),
+        "Сообщений": format_int(metric.get("messages", 0)),
+        "Δ сообщений": "—" if previous is None else _metric_delta(metric.get("messages", 0), previous.get("messages", 0)),
+        "Аудитория": format_int(metric.get("audience", 0)),
+        "Δ аудитории": "—" if previous is None else _metric_delta(metric.get("audience", 0), previous.get("audience", 0)),
+        "Охват": format_int(metric.get("reach", 0)),
+        "Δ охвата": "—" if previous is None else _metric_delta(metric.get("reach", 0), previous.get("reach", 0)),
+        "Вовлеченность": format_int(metric.get("engagement", 0)),
+        "Δ вовлеченности": "—" if previous is None else _metric_delta(metric.get("engagement", 0), previous.get("engagement", 0)),
+        "Позитив": percent_text(sent.get("positive", 0), sent.get("total", 0)),
+        "Δ позитива": "—" if previous is None else _pp_delta(metric.get("positive_share", 0), previous.get("positive_share", 0)),
+        "Нейтрал": percent_text(sent.get("neutral", 0), sent.get("total", 0)),
+        "Δ нейтрала": "—" if previous is None else _pp_delta(metric.get("neutral_share", 0), previous.get("neutral_share", 0)),
+        "Негатив": percent_text(sent.get("negative", 0), sent.get("total", 0)),
+        "Δ негатива": "—" if previous is None else _pp_delta(metric.get("negative_share", 0), previous.get("negative_share", 0)),
+    }
+    return row
+
+
+def render_period_comparison_metrics(messages: pd.DataFrame, periods: pd.DataFrame, period_ids: list[str]) -> dict[str, Any] | None:
+    """Render sequential comparison when two or more periods are selected."""
+    comparison = _period_metrics_for_comparison(messages, periods, period_ids)
+    if len(comparison) < 2:
+        return None
+
+    previous, current = comparison[-2], comparison[-1]
+    first, last = comparison[0], comparison[-1]
+    st.subheader("Последовательное сравнение периодов")
+    st.caption(
+        "Сравнение идет цепочкой по хронологии: "
+        + " → ".join(item.get("label", item.get("period_id", "")) for item in comparison)
+    )
+
+    st.markdown(f"**Последний период:** {current['label']} · сравнение с предыдущим: {previous['label']}")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Сообщений", format_int(current["messages"]), delta=_metric_delta(current["messages"], previous["messages"]))
+    c2.metric("Аудитория", format_int(current["audience"]), delta=_metric_delta(current["audience"], previous["audience"]))
+    c3.metric("Охват", format_int(current["reach"]), delta=_metric_delta(current["reach"], previous["reach"]))
+    c4.metric("Вовлеченность", format_int(current["engagement"]), delta=_metric_delta(current["engagement"], previous["engagement"]))
+
+    s1, s2, s3 = st.columns(3)
+    s1.metric(
+        "Позитив",
+        f"{current['positive_share'] * 100:.0f}%",
+        delta=_pp_delta(current["positive_share"], previous["positive_share"]),
+        help=f"{format_int(current['sentiment'].get('positive', 0))} сообщений в последнем периоде",
+    )
+    s2.metric(
+        "Нейтрал",
+        f"{current['neutral_share'] * 100:.0f}%",
+        delta=_pp_delta(current["neutral_share"], previous["neutral_share"]),
+        help=f"{format_int(current['sentiment'].get('neutral', 0))} сообщений в последнем периоде",
+    )
+    s3.metric(
+        "Негатив",
+        f"{current['negative_share'] * 100:.0f}%",
+        delta=_pp_delta(current["negative_share"], previous["negative_share"]),
+        help=f"{format_int(current['sentiment'].get('negative', 0))} сообщений в последнем периоде",
+    )
+
+    table_rows = []
+    prev_item: dict[str, Any] | None = None
+    for item in comparison:
+        table_rows.append(_comparison_row(item, prev_item))
+        prev_item = item
+
+    with st.expander("Последовательная сравнительная таблица", expanded=True):
+        st.dataframe(pd.DataFrame(table_rows), hide_index=True, use_container_width=True)
+
+    if len(comparison) > 2:
+        st.caption(
+            f"Итоговая динамика от первого к последнему периоду: "
+            f"сообщения — {_metric_delta(last['messages'], first['messages'])}; "
+            f"аудитория — {_metric_delta(last['audience'], first['audience'])}; "
+            f"охват — {_metric_delta(last['reach'], first['reach'])}; "
+            f"вовлеченность — {_metric_delta(last['engagement'], first['engagement'])}."
+        )
+
+    aggregate_metrics = overview_metrics(messages)
+    aggregate_metrics["period_label"] = selected_period_label(periods, period_ids)
+    aggregate_metrics["comparison_sequence"] = comparison
+    aggregate_metrics["comparison"] = {"first": first, "previous": previous, "current": current, "last": last}
+    return aggregate_metrics
+
+
 def render_project_intro(project_name: str, messages: pd.DataFrame, periods: pd.DataFrame, period_ids: list[str], *, profile_label: str = "") -> dict[str, Any]:
     """Unified top block for all project profiles."""
     st.header(project_name)
     if profile_label:
         st.caption(f"Профиль проекта: {profile_label}")
     period_label = selected_period_label(periods, period_ids)
+
+    st.subheader("Период и основные метрики")
+    if len([x for x in (period_ids or []) if str(x).strip()]) >= 2 and isinstance(messages, pd.DataFrame) and "period_id" in messages.columns:
+        metrics = render_period_comparison_metrics(messages, periods, period_ids)
+        if metrics is not None:
+            metrics["project_name"] = project_name
+            return metrics
+
     metrics = overview_metrics(messages)
     sent = metrics["sentiment"]
     total = int(sent.get("total", 0))
 
-    st.subheader("Период и основные метрики")
     st.caption(f"Период: {period_label}")
 
     c1, c2, c3, c4 = st.columns(4)
@@ -1957,7 +2226,9 @@ def render_taxi_dashboard(
         }.get(x, x),
         key="taxi_event_detail_level",
     )
-    events_agg = aggregate_taxi_events(events, level=level)
+    raw_events_agg = aggregate_taxi_events(events, level=level)
+    min_event_messages = render_min_event_messages_control("driver_chats", raw_events_agg, key="taxi_min_event_messages")
+    events_agg, hidden_events, hidden_messages = filter_small_events(raw_events_agg, min_event_messages)
     metrics = render_project_intro(
         project_name,
         messages,
@@ -1976,6 +2247,7 @@ def render_taxi_dashboard(
         profile="driver_chats",
         metrics=metrics,
     )
+    render_small_events_notice(hidden_events, hidden_messages, min_event_messages)
     st.markdown("---")
     render_events(project_id, role, events_agg, messages, manual_state)
     st.markdown("---")
@@ -2060,7 +2332,9 @@ def main() -> None:
         )
         return
 
-    events_agg = aggregate_events(events)
+    raw_events_agg = aggregate_events(events)
+    min_event_messages = render_min_event_messages_control(project_profile, events, key="main_min_event_messages")
+    events_agg, hidden_events, hidden_messages = filter_small_events(raw_events_agg, min_event_messages)
 
     # Brand Analytics projects must show only system tags from columns after
     # `Обработано`. This prevents legacy taxi/generic labels from appearing
@@ -2086,6 +2360,7 @@ def main() -> None:
         metrics=metrics,
     )
     render_tag_statistics(enriched_messages)
+    render_small_events_notice(hidden_events, hidden_messages, min_event_messages)
     render_events(project_id, role, events_agg, enriched_messages, manual_state)
     render_messages_block(enriched_messages)
 
