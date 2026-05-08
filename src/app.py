@@ -62,6 +62,7 @@ DEFAULT_CHART_LABEL_SETTINGS = {
     "font": "Arial",
     "font_size": 11,
     "position": "top",
+    "show_donut_legend": False,
 }
 
 
@@ -176,6 +177,7 @@ def chart_label_settings_from_project_settings(settings: dict[str, Any] | None) 
     result["font_size"] = max(8, min(28, size))
     position = str(raw.get("position") or result["position"]).strip()
     result["position"] = position if position in CHART_LABEL_POSITION_OPTIONS else result["position"]
+    result["show_donut_legend"] = bool(raw.get("show_donut_legend", result.get("show_donut_legend", False)))
     return result
 
 
@@ -737,13 +739,16 @@ def _render_sentiment_donut(period_label: str, sentiment: dict[str, Any], *, key
 
     # Чтобы подписи не накладывались друг на друга, для круговой диаграммы показываем
     # сам donut отдельно, а значения — списком рядом с диаграммой.
+    # Легенда по умолчанию скрыта, потому что справа уже есть блок значений.
+    donut_cfg = chart_label_settings_from_project_settings({"chart_label_settings": label_settings or {}})
+    donut_legend = alt.Legend(title="Тональность") if donut_cfg.get("show_donut_legend") else None
     base = alt.Chart(pie).encode(
         theta=alt.Theta(field="Сообщений", type="quantitative"),
         color=alt.Color(
             field="Тональность",
             type="nominal",
             scale=alt.Scale(domain=SENTIMENT_COLOR_DOMAIN, range=SENTIMENT_COLOR_RANGE),
-            legend=alt.Legend(title="Тональность"),
+            legend=donut_legend,
         ),
         tooltip=[
             "Тональность",
@@ -1358,6 +1363,12 @@ def render_project_manager(projects: pd.DataFrame) -> None:
                     horizontal=True,
                     key=f"chart_label_position_{project_id}",
                 )
+                show_donut_legend = st.checkbox(
+                    "Показывать легенду круговой диаграммы",
+                    value=bool(current_chart_labels.get("show_donut_legend", False)),
+                    help="По умолчанию легенда скрыта, потому что рядом с круговой диаграммой уже есть блок значений.",
+                    key=f"chart_label_show_donut_legend_{project_id}",
+                )
                 st.caption("Настройка применяется к подписям на линейных, столбчатых и круговых графиках сравнения периодов.")
             st.caption("Коды доступа заполняйте только если хотите заменить текущие.")
             new_viewer_code = st.text_input("Новый код просмотра", type="password", key=f"edit_viewer_code_{project_id}")
@@ -1369,6 +1380,7 @@ def render_project_manager(projects: pd.DataFrame) -> None:
                     "font": chart_font,
                     "font_size": int(chart_font_size),
                     "position": chart_position,
+                    "show_donut_legend": bool(show_donut_legend),
                 }
                 update_project(
                     project_id,
