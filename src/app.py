@@ -4,6 +4,7 @@ import argparse
 import os
 import tempfile
 import uuid
+import re
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -34,14 +35,31 @@ from platform_store import (
 from preprocess import run_preprocess_from_dataframe
 
 APP_TITLE = "Платформа дайджестов"
-APP_VERSION = "3.6.1: сообщения списком"
+APP_VERSION = "4.0: мультиплатформа + дашборд водительских чатов"
 
 ALGORITHM_PROFILE_OPTIONS = {
     "universal": "Универсальный",
     "brand_monitoring": "Бренд-мониторинг",
     "construction_materials": "Строительство / материалы",
-    "taxi_legacy": "Такси / водительские чаты",
+    "driver_chats": "Дайджест водительских чатов",
+    "taxi_legacy": "Такси / водительские чаты (legacy)",
 }
+
+TAXI_PROJECT_PROFILES = {"driver_chats", "taxi_legacy"}
+
+
+def project_topic_profile(project_row: pd.Series | None) -> str:
+    settings = project_settings_from_row(project_row) if project_row is not None else {}
+    profile = str(settings.get("topic_profile") or "universal")
+    return profile if profile in ALGORITHM_PROFILE_OPTIONS else "universal"
+
+
+def is_taxi_project_profile(profile: str) -> bool:
+    return str(profile or "").strip() in TAXI_PROJECT_PROFILES
+
+
+def is_taxi_project_row(project_row: pd.Series | None) -> bool:
+    return is_taxi_project_profile(project_topic_profile(project_row))
 
 
 def project_settings_from_row(row) -> dict[str, Any]:
@@ -1346,6 +1364,214 @@ def render_messages_block(messages: pd.DataFrame) -> None:
     _render_message_list(view, text_col=text_col, link_col=link_col)
 
 
+
+# -----------------------------------------------------------------------------
+# Driver chats dashboard profile
+# -----------------------------------------------------------------------------
+
+
+def taxi_bool_negative(messages: pd.DataFrame) -> pd.Series:
+    if messages is None or messages.empty:
+        return pd.Series(dtype=bool)
+    if "is_negative" in messages.columns:
+        return messages["is_negative"].astype(str).str.lower().isin(["true", "1", "yes", "да", "негатив", "negative"])
+    if "sentiment" in messages.columns:
+        return messages["sentiment"].fillna("").astype(str).str.lower().str.contains("нег|negative|отриц", regex=True, na=False)
+    return pd.Series([False] * len(messages), index=messages.index)
+
+
+def taxi_bool_positive(messages: pd.DataFrame) -> pd.Series:
+    if messages is None or messages.empty:
+        return pd.Series(dtype=bool)
+    if "sentiment" in messages.columns:
+        return messages["sentiment"].fillna("").astype(str).str.lower().str.contains("позит|positive|полож", regex=True, na=False)
+    return pd.Series([False] * len(messages), index=messages.index)
+
+
+def render_taxi_overview_statistics(events_agg: pd.DataFrame, messages: pd.DataFrame) -> None:
+    """Top-level metrics for the driver-chat profile."""
+    st.subheader("Статистика")
+    total_messages = int(len(messages)) if isinstance(messages, pd.DataFrame) else 0
+    chat_col = "chat_title" if isinstance(messages, pd.DataFrame) and "chat_title" in messages.columns else "chat_id" if isinstance(messages, pd.DataFrame) and "chat_id" in messages.columns else None
+    author_col = "author" if isinstance(messages, pd.DataFrame) and "author" in messages.columns else "author_id" if isinstance(messages, pd.DataFrame) and "author_id" in messages.columns else None
+    chat_count = int(messages[chat_col].fillna("").astype(str).replace("", pd.NA).dropna().nunique()) if chat_col and total_messages else 0
+    author_count = int(messages[author_col].fillna("").astype(str).replace("", pd.NA).dropna().nunique()) if author_col and total_messages else 0
+    neg_count = int(taxi_bool_negative(messages).sum()) if total_messages else 0
+    high_count = 0
+    if isinstance(events_agg, pd.DataFrame) and not events_agg.empty and "importance_score" in events_agg.columns:
+        importance = pd.to_numeric(events_agg["importance_score"], errors="coerce").fillna(0)
+        threshold = float(importance.quantile(0.75)) if len(importance) else 0
+        high_count = int((importance >= threshold).sum()) if threshold else 0
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Инфоповодов", format_int(len(events_agg) if isinstance(events_agg, pd.DataFrame) else 0))
+    c2.metric("Сообщений", format_int(total_messages))
+    c3.metric("Чатов", format_int(chat_count))
+    c4.metric("Негатив", f"{(neg_count / total_messages * 100):.0f}%" if total_messages else "0%")
+    c5.metric("Высокая важность", format_int(high_count))
+    if author_count:
+        st.caption(f"Уникальных авторов: {format_int(author_count)}")
+
+
+def normalize_taxi_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").lower().replace("ё", "е")).strip()
+
+
+def taxi_macro_title(row: pd.Series) -> str:
+    """Map detailed taxi events to report-level topics."""
+    text = normalize_taxi_text(" ".join([
+        str(row.get("event_title") or ""),
+        str(row.get("event_summary") or ""),
+        str(row.get("display_description") or ""),
+        str(row.get("main_tags") or ""),
+        str(row.get("microtopic") or ""),
+    ]))
+    rules = [
+        ("Забастовка, бойкот и коллективные действия", ["strike", "забаст", "бойкот", "стачк", "митинг", "коллективн"]),
+        ("Законы, налоги и регулирование такси", ["tax_law", "налог", "патент", "самозан", "минтранс", "реестр", "закон", "разрешен", "лиценз"]),
+        ("Коэффициенты, приоритет и тарифы", ["coeff_priority", "коэфф", "коэф", "кэф", "приоритет", "тариф", "подач"]),
+        ("Сбои и ошибки в приложении", ["app_bug", "сбой", "ошиб", "завис", "не работает", "яндекс про", "обновлен", "приложен"]),
+        ("Проблемы с заказами в приложении", ["app_orders", "заказ", "назнач", "раздач", "цепоч", "не приход"]),
+        ("Оплата, выплаты и удержания", ["payments", "оплат", "выплат", "деньг", "баланс", "удерж", "комисс"]),
+        ("Блокировки и доступ к аккаунту", ["account_block", "блок", "аккаунт", "доступ", "вериф", "фотоконтроль"]),
+        ("Детские кресла и требования к заказам", ["child_seat", "кресл", "детск", "ребен", "ребён"]),
+        ("Карты, адреса и навигация", ["gps_map", "карт", "адрес", "навиг", "геолока", "gps", "маршрут"]),
+        ("Заказы и правила в аэропортах", ["airport", "аэропорт", "шереметьево", "домодедово", "внуково", "пулково"]),
+        ("Поддержка, парк и диспетчерские вопросы", ["support", "поддерж", "таксопарк", "диспетчер", "парк"]),
+        ("Запуск и обсуждение WB Такси", ["wb_launch", "wb такси", "wildberries", "вайлдбер", "вб такси"]),
+        ("Обсуждение сервиса Фастен", ["fasten", "фастен", "fasten_service"]),
+        ("Общее обсуждение Яндекса", ["general_yandex", "яндекс", "yandex", "яша"]),
+    ]
+    for title, keys in rules:
+        if any(key in text for key in keys):
+            return title
+    raw_title = str(row.get("event_title") or "").strip()
+    return raw_title or "Прочие обсуждения"
+
+
+def aggregate_taxi_events(events: pd.DataFrame, level: str = "balanced") -> pd.DataFrame:
+    """Aggregate taxi events for three levels of detail."""
+    if events is None or events.empty:
+        return pd.DataFrame()
+    df = events.copy()
+    if "event_id" not in df.columns:
+        df["event_id"] = df.index.astype(str)
+    if "event_title" not in df.columns:
+        df["event_title"] = "Без названия"
+    if level == "detailed":
+        df["__group_title"] = df["event_title"].fillna("Без названия").astype(str).replace("", "Без названия")
+        df["__group_key"] = df["event_id"].astype(str)
+    elif level == "macro":
+        df["__group_title"] = df.apply(taxi_macro_title, axis=1)
+        df["__group_key"] = df["__group_title"].map(normalize_taxi_text)
+    else:
+        df["__group_title"] = df["event_title"].fillna("Без названия").astype(str).replace("", "Без названия")
+        df["__group_key"] = df["__group_title"].map(normalize_taxi_text)
+
+    rows: list[dict[str, Any]] = []
+    for key, group in df.groupby("__group_key", dropna=False):
+        title = str(group["__group_title"].iloc[0] or "Без названия")
+        tags = " | ".join(sorted(set("|".join(group.get("main_tags", pd.Series(dtype=str)).fillna("").astype(str)).split("|")) - {""}))
+        msg_count = int(pd.to_numeric(group.get("message_count", 0), errors="coerce").fillna(0).sum())
+        neg_count = int(pd.to_numeric(group.get("negative_count", 0), errors="coerce").fillna(0).sum())
+        rows.append({
+            "group_key": str(key),
+            "title": title,
+            "description": pick_event_description(group),
+            "tags": tags,
+            "start_date": pd.to_datetime(group.get("start_date"), errors="coerce").min(),
+            "end_date": pd.to_datetime(group.get("end_date"), errors="coerce").max(),
+            "message_count": msg_count,
+            "chat_count": int(pd.to_numeric(group.get("chat_count", 0), errors="coerce").fillna(0).sum()),
+            "negative_count": neg_count,
+            "importance_score": float(pd.to_numeric(group.get("importance_score", 0), errors="coerce").fillna(0).max()),
+            "event_ids": list(group["event_id"].astype(str)),
+            "source_event_count": int(group["event_id"].astype(str).nunique()),
+        })
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    out["negative_share"] = out.apply(lambda r: float(r["negative_count"]) / float(r["message_count"]) if float(r.get("message_count") or 0) else 0.0, axis=1)
+    return out.sort_values(["importance_score", "message_count"], ascending=False).reset_index(drop=True)
+
+
+def build_taxi_auto_summary(messages: pd.DataFrame, events_agg: pd.DataFrame, periods: pd.DataFrame, selected_period_ids: list[str]) -> str:
+    """Readable summary for driver-chat projects."""
+    total = int(len(messages)) if isinstance(messages, pd.DataFrame) else 0
+    if not total:
+        return "По выбранному периоду пока нет сообщений для саммари."
+    neg_count = int(taxi_bool_negative(messages).sum())
+    pos_count = int(taxi_bool_positive(messages).sum())
+    neutral_count = max(0, total - neg_count - pos_count)
+    top_events = "нет выраженных тем"
+    if isinstance(events_agg, pd.DataFrame) and not events_agg.empty:
+        top = events_agg.sort_values("message_count", ascending=False).head(6)
+        top_events = "; ".join(f"{r['title']} — {format_int(r['message_count'])}" for _, r in top.iterrows())
+    chat_col = "chat_title" if "chat_title" in messages.columns else "chat_id" if "chat_id" in messages.columns else None
+    top_chats = "нет данных"
+    if chat_col:
+        vc = messages[chat_col].fillna("").astype(str).replace("", pd.NA).dropna().value_counts().head(5)
+        if not vc.empty:
+            top_chats = "; ".join(f"{name} — {format_int(count)}" for name, count in vc.items())
+    lines = [
+        f"За выбранный период собрано {format_int(total)} сообщений. Тональность: {neutral_count / total * 100:.0f}% нейтрал, {neg_count / total * 100:.0f}% негатив, {pos_count / total * 100:.0f}% позитив.",
+        f"Основные обсуждения: {top_events}.",
+        f"Наиболее активные чаты: {top_chats}.",
+    ]
+    return "\n".join("• " + line for line in lines)
+
+
+def render_taxi_summary(project_id: str, period_ids: list[str], messages: pd.DataFrame, events_agg: pd.DataFrame, periods: pd.DataFrame, role: str) -> None:
+    key = "summary::taxi::" + "|".join(sorted(map(str, period_ids)))
+    saved = get_manual(project_id, "summaries", key)
+    auto = build_taxi_auto_summary(messages, events_agg, periods, period_ids)
+    text = str((saved or {}).get("summary") or "").strip() or auto
+    st.subheader("Саммари")
+    st.markdown(text.replace("\n", "  \n"))
+    if role_rank(role) >= role_rank("editor"):
+        with st.expander("Редактировать саммари", expanded=False):
+            edited = st.text_area("Саммари", value=text, height=220, key=f"taxi_summary_{key}")
+            if st.button("Сохранить саммари", key=f"save_taxi_summary_{key}"):
+                save_manual(project_id, "summaries", key, {"summary": edited, "period_ids": period_ids, "profile": "driver_chats"})
+                st.success("Саммари сохранено.")
+                st.rerun()
+
+
+def render_taxi_dashboard(
+    project_id: str,
+    project_name: str,
+    role: str,
+    selected_period_ids: list[str],
+    periods: pd.DataFrame,
+    events: pd.DataFrame,
+    messages: pd.DataFrame,
+    manual_state: dict[str, Any],
+) -> None:
+    """Dedicated UI for driver-chat digest projects inside the platform namespace."""
+    st.header(project_name)
+    st.caption("Профиль проекта: дайджест водительских чатов. Данные хранятся отдельно внутри текущего проекта платформы.")
+    level = st.sidebar.selectbox(
+        "Уровень сборки инфоповодов",
+        ["balanced", "macro", "detailed"],
+        index=0,
+        format_func=lambda x: {
+            "balanced": "Сбалансировано — рекомендовано",
+            "macro": "Крупные темы — для отчета",
+            "detailed": "Подробно — первичные инфоповоды",
+        }.get(x, x),
+        key="taxi_event_detail_level",
+    )
+    events_agg = aggregate_taxi_events(events, level=level)
+    render_taxi_overview_statistics(events_agg, messages)
+    render_taxi_summary(project_id, selected_period_ids, messages, events_agg, periods, role)
+    st.markdown("---")
+    render_events(project_id, role, events_agg, messages, manual_state)
+    st.markdown("---")
+    render_messages_block(messages)
+    if len(selected_period_ids) >= 2:
+        with st.expander("Динамика по периодам", expanded=False):
+            render_period_dynamics(messages, periods, selected_period_ids)
+
+
 def main() -> None:
     args = parse_args()
     st.set_page_config(page_title=APP_TITLE, layout="wide")
@@ -1385,8 +1611,11 @@ def main() -> None:
         return
 
     project_row = projects[projects["project_id"].astype(str) == str(project_id)]
-    project_name = str(project_row.iloc[0].get("project_name") if not project_row.empty else project_id)
+    current_project_row = project_row.iloc[0] if not project_row.empty else None
+    project_name = str(current_project_row.get("project_name") if current_project_row is not None else project_id)
+    project_profile = project_topic_profile(current_project_row)
     st.sidebar.markdown(f"**Текущий проект:**  \n{project_name}")
+    st.sidebar.caption(f"Профиль: {ALGORITHM_PROFILE_OPTIONS.get(project_profile, project_profile)}")
 
     if page == "Загрузка файла":
         render_upload_page(project_id, role, args.work_dir)
@@ -1404,6 +1633,20 @@ def main() -> None:
         events, discussions, messages, discussion_messages, event_discussions = load_generated_tables(project_id, selected_period_ids)
     enriched_messages = enrich_messages(messages, event_discussions, discussion_messages, events)
     events, enriched_messages, manual_state = apply_manual_overrides(project_id, events, enriched_messages)
+
+    if is_taxi_project_profile(project_profile):
+        render_taxi_dashboard(
+            project_id,
+            project_name,
+            role,
+            selected_period_ids,
+            periods,
+            events,
+            enriched_messages,
+            manual_state,
+        )
+        return
+
     events_agg = aggregate_events(events)
 
     # Brand Analytics projects must show only system tags from columns after
