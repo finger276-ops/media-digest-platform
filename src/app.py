@@ -12,6 +12,7 @@ from typing import Any
 
 import pandas as pd
 import streamlit as st
+import altair as alt
 
 from import_adapters import read_source_table, get_excel_sheet_names
 from io_utils import read_table
@@ -36,7 +37,7 @@ from platform_store import (
 from preprocess import run_preprocess_from_dataframe
 
 APP_TITLE = "Платформа дайджестов"
-APP_VERSION = "4.1.1: единый верхний блок + фильтр малых инфоповодов"
+APP_VERSION = "4.1.4: визуализация сравнений"
 
 ALGORITHM_PROFILE_OPTIONS = {
     "universal": "Универсальный",
@@ -618,6 +619,105 @@ def _comparison_row(metric: dict[str, Any], previous: dict[str, Any] | None = No
     return row
 
 
+def _comparison_visual_rows(comparison: list[dict[str, Any]]) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for item in comparison:
+        sent = item.get("sentiment", {}) or {}
+        total = max(1, int(sent.get("total", 0) or 0))
+        rows.append({
+            "Период": item.get("label", item.get("period_id", "")),
+            "Сообщения": int(item.get("messages", 0) or 0),
+            "Аудитория": int(item.get("audience", 0) or 0),
+            "Охват": int(item.get("reach", 0) or 0),
+            "Вовлеченность": int(item.get("engagement", 0) or 0),
+            "Позитив, %": round(float(sent.get("positive", 0) or 0) / total * 100, 1),
+            "Нейтрал, %": round(float(sent.get("neutral", 0) or 0) / total * 100, 1),
+            "Негатив, %": round(float(sent.get("negative", 0) or 0) / total * 100, 1),
+            "Позитив": int(sent.get("positive", 0) or 0),
+            "Нейтрал": int(sent.get("neutral", 0) or 0),
+            "Негатив": int(sent.get("negative", 0) or 0),
+        })
+    return pd.DataFrame(rows)
+
+
+def _render_sentiment_donut(period_label: str, sentiment: dict[str, Any], *, key: str) -> None:
+    total = int((sentiment or {}).get("total", 0) or 0)
+    if total <= 0:
+        st.caption(f"{period_label}: нет данных для круговой диаграммы")
+        return
+    pie = pd.DataFrame([
+        {"Тональность": "Позитив", "Сообщений": int((sentiment or {}).get("positive", 0) or 0)},
+        {"Тональность": "Нейтрал", "Сообщений": int((sentiment or {}).get("neutral", 0) or 0)},
+        {"Тональность": "Негатив", "Сообщений": int((sentiment or {}).get("negative", 0) or 0)},
+    ])
+    pie = pie[pie["Сообщений"] > 0]
+    if pie.empty:
+        st.caption(f"{period_label}: нет данных для круговой диаграммы")
+        return
+    chart = alt.Chart(pie).mark_arc(innerRadius=50).encode(
+        theta=alt.Theta(field="Сообщений", type="quantitative"),
+        color=alt.Color(field="Тональность", type="nominal", legend=alt.Legend(title="Тональность")),
+        tooltip=["Тональность", "Сообщений"],
+    ).properties(height=260, title=period_label)
+    st.altair_chart(chart, use_container_width=True)
+
+
+def render_period_comparison_charts(comparison: list[dict[str, Any]]) -> None:
+    if not comparison:
+        return
+    chart_df = _comparison_visual_rows(comparison)
+    if chart_df.empty:
+        return
+
+    st.subheader("Визуализация сравнений")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**Динамика основных метрик**")
+        st.line_chart(chart_df.set_index("Период")[["Сообщения", "Аудитория", "Охват", "Вовлеченность"]])
+    with c2:
+        st.markdown("**Динамика долей тональности, %**")
+        st.line_chart(chart_df.set_index("Период")[["Позитив, %", "Нейтрал, %", "Негатив, %"]])
+
+    st.markdown("**Столбчатое сравнение по периодам**")
+    metric_map = {
+        "Сообщения": "Сообщения",
+        "Аудитория": "Аудитория",
+        "Охват": "Охват",
+        "Вовлеченность": "Вовлеченность",
+    }
+    selected_metric = st.selectbox(
+        "Метрика для столбчатого графика",
+        list(metric_map.keys()),
+        index=0,
+        key=f"comparison_metric_{abs(hash(tuple(chart_df['Период'].tolist())))}",
+    )
+    metric_col = metric_map[selected_metric]
+    bar_df = chart_df[["Период", metric_col]].rename(columns={metric_col: "Значение"})
+    bar = alt.Chart(bar_df).mark_bar().encode(
+        x=alt.X("Период:N", sort=None, title="Период"),
+        y=alt.Y("Значение:Q", title=selected_metric),
+        tooltip=["Период", alt.Tooltip("Значение:Q", format=",")],
+    ).properties(height=320)
+    st.altair_chart(bar, use_container_width=True)
+
+    if len(comparison) >= 2:
+        st.markdown("**Круговые диаграммы тональности**")
+        p1, p2 = st.columns(2)
+        previous, current = comparison[-2], comparison[-1]
+        with p1:
+            _render_sentiment_donut(str(previous.get("label", "Предыдущий период")), previous.get("sentiment", {}), key="prev")
+        with p2:
+            _render_sentiment_donut(str(current.get("label", "Последний период")), current.get("sentiment", {}), key="curr")
+
+        if len(comparison) > 2:
+            p3, p4 = st.columns(2)
+            first, last = comparison[0], comparison[-1]
+            with p3:
+                _render_sentiment_donut(str(first.get("label", "Первый период")), first.get("sentiment", {}), key="first")
+            with p4:
+                _render_sentiment_donut(str(last.get("label", "Последний период")), last.get("sentiment", {}), key="last")
+
+
 def render_period_comparison_metrics(messages: pd.DataFrame, periods: pd.DataFrame, period_ids: list[str]) -> dict[str, Any] | None:
     """Render sequential comparison when two or more periods are selected."""
     comparison = _period_metrics_for_comparison(messages, periods, period_ids)
@@ -658,6 +758,8 @@ def render_period_comparison_metrics(messages: pd.DataFrame, periods: pd.DataFra
         delta=_pp_delta(current["negative_share"], previous["negative_share"]),
         help=f"{format_int(current['sentiment'].get('negative', 0))} сообщений в последнем периоде",
     )
+
+    render_period_comparison_charts(comparison)
 
     table_rows = []
     prev_item: dict[str, Any] | None = None
