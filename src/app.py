@@ -732,6 +732,11 @@ def _render_sentiment_donut(period_label: str, sentiment: dict[str, Any], *, key
     pie = pie.copy()
     pie["Доля"] = pie["Сообщений"] / total * 100
     pie["Подпись"] = pie.apply(lambda r: f"{r['Тональность']}: {_chart_number_label(r['Доля'], percent=True)}", axis=1)
+    color_map = dict(zip(SENTIMENT_COLOR_DOMAIN, SENTIMENT_COLOR_RANGE))
+    pie["Цвет"] = pie["Тональность"].map(color_map).fillna("#999999")
+
+    # Чтобы подписи не накладывались друг на друга, для круговой диаграммы показываем
+    # сам donut отдельно, а значения — списком рядом с диаграммой.
     base = alt.Chart(pie).encode(
         theta=alt.Theta(field="Сообщений", type="quantitative"),
         color=alt.Color(
@@ -747,8 +752,26 @@ def _render_sentiment_donut(period_label: str, sentiment: dict[str, Any], *, key
         ],
     )
     arcs = base.mark_arc(innerRadius=50)
-    labels = base.mark_text(radius=chart_label_radius(label_settings), **chart_label_text_kwargs(label_settings, chart_type="donut")).encode(text="Подпись:N")
-    st.altair_chart((arcs + labels).properties(height=260, title=period_label), use_container_width=True)
+
+    left, right = st.columns([3, 2])
+    with left:
+        st.altair_chart(arcs.properties(height=260, title=period_label), use_container_width=True)
+    with right:
+        st.markdown("**Значения**")
+        for _, row in pie.sort_values("Сообщений", ascending=False).iterrows():
+            tone = str(row.get("Тональность", ""))
+            color = str(row.get("Цвет", "#999999"))
+            count = format_int(row.get("Сообщений", 0))
+            share = _chart_number_label(row.get("Доля", 0), percent=True)
+            st.markdown(
+                f"<div style='margin: 0 0 8px 0; line-height:1.35'>"
+                f"<span style='color:{color}; font-size:18px;'>●</span> "
+                f"<span style='font-weight:600'>{tone}</span><br>"
+                f"<span style='color:#666'>Сообщений:</span> {count}<br>"
+                f"<span style='color:#666'>Доля:</span> {share}"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
 
 
 def render_period_comparison_charts(comparison: list[dict[str, Any]], *, label_settings: dict[str, Any] | None = None) -> None:
