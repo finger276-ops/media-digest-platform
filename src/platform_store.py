@@ -150,15 +150,30 @@ def chunked(items: list[Any], size: int = CHUNK_SIZE) -> Iterable[list[Any]]:
         yield items[i:i + size]
 
 
-def _fetch_all(client: Client, table: str, *, filters: dict[str, Any] | None = None, order: str | None = None) -> list[dict[str, Any]]:
+def _fetch_all(
+    client: Client,
+    table: str,
+    *,
+    filters: dict[str, Any] | None = None,
+    order: str | None = None,
+    select: str = "*",
+) -> list[dict[str, Any]]:
+    """Paginated select with optional column projection.
+
+    `select` is important for large payload tables: for dashboard rendering we
+    usually only need `period_id` and `payload`, not every metadata column.
+    """
     rows: list[dict[str, Any]] = []
     start = 0
     while True:
-        query = client.table(table).select("*")
+        query = client.table(table).select(select)
         if filters:
             for key, value in filters.items():
                 if isinstance(value, (list, tuple, set)):
-                    query = query.in_(key, list(value))
+                    value_list = [str(v) for v in value if str(v).strip()]
+                    if not value_list:
+                        return rows
+                    query = query.in_(key, value_list)
                 else:
                     query = query.eq(key, value)
         if order:
@@ -367,28 +382,49 @@ def save_processed_tables(
 
 
 def load_table(project_id: str, period_ids: list[str], table_name: str) -> pd.DataFrame:
+    """Load a generated table for multiple periods in batched Supabase queries."""
+    period_ids = [str(pid) for pid in (period_ids or []) if str(pid).strip()]
     if not period_ids:
         return pd.DataFrame()
+
     all_payloads: list[dict[str, Any]] = []
     client = get_supabase_client()
-    for period_id in period_ids:
-        rows = _fetch_all(client, "platform_table_rows", filters={"project_id": project_id, "period_id": period_id, "table_name": table_name})
+
+    # Keep batches modest to avoid overly long PostgREST URLs for large selections.
+    for period_batch in chunked(period_ids, 50):
+        rows = _fetch_all(
+            client,
+            "platform_table_rows",
+            filters={"project_id": project_id, "period_id": list(period_batch), "table_name": table_name},
+            select="period_id,payload",
+        )
         for row in rows:
             payload = row.get("payload") or {}
             if isinstance(payload, dict):
                 payload.setdefault("project_id", project_id)
-                payload.setdefault("period_id", period_id)
+                payload.setdefault("period_id", row.get("period_id") or payload.get("period_id"))
                 all_payloads.append(payload)
     return pd.DataFrame(all_payloads)
 
 
 def _prefix_ids(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    """Prefix generated ids by period without a row-wise DataFrame.apply."""
     if df is None or df.empty or "period_id" not in df.columns:
         return df
     df = df.copy()
+    period = df["period_id"].fillna("").astype(str)
     for col in columns:
-        if col in df.columns:
-            df[col] = df.apply(lambda r: f"{r['period_id']}__{r[col]}" if pd.notna(r[col]) and str(r[col]).strip() and not str(r[col]).startswith(str(r['period_id']) + "__") else r[col], axis=1)
+        if col not in df.columns:
+            continue
+        values = df[col].fillna("").astype(str)
+        non_empty = values.str.strip().ne("")
+        already_prefixed = pd.Series(
+            [v.startswith(p + "__") if p else False for v, p in zip(values.tolist(), period.tolist())],
+            index=df.index,
+        )
+        mask = non_empty & period.str.strip().ne("") & (~already_prefixed)
+        if mask.any():
+            df.loc[mask, col] = period.loc[mask] + "__" + values.loc[mask]
     return df
 
 

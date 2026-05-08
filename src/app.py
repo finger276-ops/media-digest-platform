@@ -37,7 +37,7 @@ from platform_store import (
 from preprocess import run_preprocess_from_dataframe
 
 APP_TITLE = "Платформа дайджестов"
-APP_VERSION = "4.1.7: настройки подписей графиков"
+APP_VERSION = "4.3.0: оптимизация загрузки и кеширования"
 
 ALGORITHM_PROFILE_OPTIONS = {
     "universal": "Универсальный",
@@ -64,6 +64,93 @@ DEFAULT_CHART_LABEL_SETTINGS = {
     "position": "top",
     "show_donut_legend": False,
 }
+
+
+# -----------------------------------------------------------------------------
+# Performance helpers
+# -----------------------------------------------------------------------------
+
+_store_list_projects = list_projects
+_store_list_periods = list_periods
+_store_load_generated_tables = load_generated_tables
+_store_list_manual = list_manual
+_store_create_project = create_project
+_store_update_project = update_project
+_store_save_processed_tables = save_processed_tables
+_store_update_period_metadata = update_period_metadata
+_store_delete_period = delete_period
+_store_save_manual = save_manual
+_store_delete_manual = delete_manual
+
+
+def clear_platform_caches() -> None:
+    """Clear Streamlit data caches after writes that change project data."""
+    try:
+        st.cache_data.clear()
+    except Exception:
+        pass
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def list_projects(include_inactive: bool = False) -> pd.DataFrame:  # type: ignore[no-redef]
+    return _store_list_projects(include_inactive=include_inactive)
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def list_periods(project_id: str, include_inactive: bool = False) -> pd.DataFrame:  # type: ignore[no-redef]
+    return _store_list_periods(project_id, include_inactive=include_inactive)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_load_generated_tables(project_id: str, period_ids_tuple: tuple[str, ...]):
+    return _store_load_generated_tables(project_id, list(period_ids_tuple))
+
+
+def load_generated_tables(project_id: str, period_ids: list[str]):  # type: ignore[no-redef]
+    period_ids_tuple = tuple(str(x) for x in (period_ids or []) if str(x).strip())
+    return _cached_load_generated_tables(project_id, period_ids_tuple)
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def list_manual(project_id: str, table_name: str | None = None) -> pd.DataFrame:  # type: ignore[no-redef]
+    return _store_list_manual(project_id, table_name=table_name)
+
+
+def create_project(*args, **kwargs):  # type: ignore[no-redef]
+    result = _store_create_project(*args, **kwargs)
+    clear_platform_caches()
+    return result
+
+
+def update_project(*args, **kwargs) -> None:  # type: ignore[no-redef]
+    _store_update_project(*args, **kwargs)
+    clear_platform_caches()
+
+
+def save_processed_tables(*args, **kwargs) -> None:  # type: ignore[no-redef]
+    _store_save_processed_tables(*args, **kwargs)
+    clear_platform_caches()
+
+
+def update_period_metadata(*args, **kwargs) -> None:  # type: ignore[no-redef]
+    _store_update_period_metadata(*args, **kwargs)
+    clear_platform_caches()
+
+
+def delete_period(*args, **kwargs):  # type: ignore[no-redef]
+    result = _store_delete_period(*args, **kwargs)
+    clear_platform_caches()
+    return result
+
+
+def save_manual(*args, **kwargs) -> None:  # type: ignore[no-redef]
+    _store_save_manual(*args, **kwargs)
+    clear_platform_caches()
+
+
+def delete_manual(*args, **kwargs) -> None:  # type: ignore[no-redef]
+    _store_delete_manual(*args, **kwargs)
+    clear_platform_caches()
 
 
 def project_topic_profile(project_row: pd.Series | None) -> str:
@@ -309,6 +396,18 @@ def numeric_series(df: pd.DataFrame, columns: list[str]) -> pd.Series:
     if df is None or df.empty:
         return pd.Series(dtype=float)
 
+    # Prefer pre-parsed dashboard columns when available. This avoids reparsing
+    # audience/reach/engagement on every rerun and every chart/table render.
+    precomputed_map = {
+        "_audience": {"audience", "Аудитория"},
+        "_reach": {"views", "Просмотры", "Просмотров", "reach", "Охват"},
+        "_engagement": {"engagement", "Вовлечённость", "Вовлеченность", "engagement_count"},
+    }
+    requested = set(columns or [])
+    for pre_col, aliases in precomputed_map.items():
+        if pre_col in df.columns and requested & aliases:
+            return pd.to_numeric(df[pre_col], errors="coerce").fillna(0)
+
     fallback = pd.Series([0] * len(df), index=df.index, dtype=float)
 
     for col in columns:
@@ -334,6 +433,28 @@ def numeric_series(df: pd.DataFrame, columns: list[str]) -> pd.Series:
         fallback = series
 
     return fallback
+
+
+def prepare_dashboard_messages(messages: pd.DataFrame) -> pd.DataFrame:
+    """Add reusable normalized columns for dashboard calculations."""
+    if messages is None or messages.empty:
+        return messages
+    work = messages.copy()
+    if "_audience" not in work.columns:
+        work["_audience"] = numeric_series(work, ["audience", "Аудитория"]).astype(int)
+    if "_reach" not in work.columns:
+        work["_reach"] = numeric_series(work, ["views", "Просмотры", "Просмотров", "reach", "Охват"]).astype(int)
+    if "_engagement" not in work.columns:
+        work["_engagement"] = numeric_series(work, ["engagement", "Вовлечённость", "Вовлеченность", "engagement_count"]).astype(int)
+    if "_sentiment_lower" not in work.columns:
+        work["_sentiment_lower"] = work.get("sentiment", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str).str.lower().str.replace("ё", "е", regex=False)
+    if "_is_negative_bool" not in work.columns:
+        work["_is_negative_bool"] = work["_sentiment_lower"].str.contains("нег|negative|отриц", regex=True, na=False)
+        if "is_negative" in work.columns:
+            work["_is_negative_bool"] = work["_is_negative_bool"] | work["is_negative"].astype(str).str.lower().isin(["true", "1", "yes", "да", "негатив", "negative"])
+    if "_period_id_str" not in work.columns and "period_id" in work.columns:
+        work["_period_id_str"] = work["period_id"].astype(str)
+    return work
 
 
 AUTO_GENERATED_TAGS_TO_HIDE = {
@@ -434,6 +555,7 @@ def render_overview_statistics(messages: pd.DataFrame) -> None:
     c4.metric("Суммарная вовлеченность", format_int(engagement))
 
 
+@st.cache_data(show_spinner=False)
 def build_tag_statistics(messages: pd.DataFrame) -> pd.DataFrame:
     """Build tag-level analytics: messages, total views/reach and engagement."""
     if messages is None or messages.empty or "tags" not in messages.columns:
@@ -524,12 +646,17 @@ def sentiment_counts(messages: pd.DataFrame) -> dict[str, int]:
     if total == 0:
         return {"positive": 0, "neutral": 0, "negative": 0, "total": 0}
 
-    sentiment = messages.get("sentiment", pd.Series([""] * total, index=messages.index)).fillna("").astype(str).str.lower().str.replace("ё", "е", regex=False)
+    if "_sentiment_lower" in messages.columns:
+        sentiment = messages["_sentiment_lower"].fillna("").astype(str)
+    else:
+        sentiment = messages.get("sentiment", pd.Series([""] * total, index=messages.index)).fillna("").astype(str).str.lower().str.replace("ё", "е", regex=False)
     positive_mask = sentiment.str.contains("позит|positive|полож", regex=True, na=False)
     negative_mask = sentiment.str.contains("нег|negative|отриц", regex=True, na=False)
     neutral_mask = sentiment.str.contains("нейтр|neutral", regex=True, na=False)
 
-    if "is_negative" in messages.columns:
+    if "_is_negative_bool" in messages.columns:
+        negative_mask = messages["_is_negative_bool"].astype(bool)
+    elif "is_negative" in messages.columns:
         negative_mask = negative_mask | messages["is_negative"].astype(str).str.lower().isin(["true", "1", "yes", "да", "негатив", "negative"])
 
     positive = int(positive_mask.sum())
@@ -1733,6 +1860,7 @@ def render_period_history(project_id: str, role: str) -> None:
                 st.cache_data.clear()
                 st.rerun()
 
+@st.cache_data(show_spinner=False)
 def enrich_messages(messages: pd.DataFrame, event_discussions: pd.DataFrame, discussion_messages: pd.DataFrame, events: pd.DataFrame) -> pd.DataFrame:
     """Attach event ids/titles to messages safely.
 
@@ -1829,6 +1957,7 @@ def enrich_messages(messages: pd.DataFrame, event_discussions: pd.DataFrame, dis
     return out
 
 
+@st.cache_data(show_spinner=False)
 def aggregate_events(events: pd.DataFrame) -> pd.DataFrame:
     if events.empty:
         return events
@@ -2028,6 +2157,7 @@ def recompute_event_counts(events: pd.DataFrame, messages: pd.DataFrame) -> pd.D
     return out
 
 
+@st.cache_data(show_spinner=False)
 def apply_manual_overrides(project_id: str, events: pd.DataFrame, messages: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
     state = get_manual_state(project_id)
     events_out = events.copy() if events is not None else pd.DataFrame()
@@ -2790,6 +2920,7 @@ def main() -> None:
         events, discussions, messages, discussion_messages, event_discussions = load_generated_tables(project_id, selected_period_ids)
     enriched_messages = enrich_messages(messages, event_discussions, discussion_messages, events)
     events, enriched_messages, manual_state = apply_manual_overrides(project_id, events, enriched_messages)
+    enriched_messages = prepare_dashboard_messages(enriched_messages)
 
     if is_taxi_project_profile(project_profile):
         render_taxi_dashboard(
@@ -2813,6 +2944,7 @@ def main() -> None:
     # `Обработано`. This prevents legacy taxi/generic labels from appearing
     # in the tag block after algorithm updates.
     enriched_messages = clean_brand_analytics_tags(enriched_messages)
+    enriched_messages = prepare_dashboard_messages(enriched_messages)
 
     metrics = render_project_intro(
         project_name,

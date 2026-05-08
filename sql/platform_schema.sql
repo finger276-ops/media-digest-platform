@@ -60,3 +60,17 @@ create index if not exists idx_platform_periods_project_status on public.platfor
 create index if not exists idx_platform_table_rows_lookup on public.platform_table_rows(project_id, period_id, table_name);
 create index if not exists idx_platform_manual_rows_lookup on public.platform_manual_rows(project_id, table_name);
 create index if not exists idx_platform_members_email on public.platform_project_members(user_email);
+
+
+-- Performance indexes for large multi-period dashboards.
+create index if not exists idx_platform_periods_project_status_uploaded
+    on public.platform_periods(project_id, status, uploaded_at desc);
+
+create index if not exists idx_platform_table_rows_project_table_period
+    on public.platform_table_rows(project_id, table_name, period_id);
+
+create index if not exists idx_platform_table_rows_project_period_table
+    on public.platform_table_rows(project_id, period_id, table_name);
+
+create index if not exists idx_platform_manual_rows_project_table_updated
+    on public.platform_manual_rows(project_id, table_name, updated_at desc);
