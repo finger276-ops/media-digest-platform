@@ -37,7 +37,7 @@ from platform_store import (
 from preprocess import run_preprocess_from_dataframe
 
 APP_TITLE = "Платформа дайджестов"
-APP_VERSION = "4.1.4: визуализация сравнений"
+APP_VERSION = "4.1.5: цвета тональности"
 
 ALGORITHM_PROFILE_OPTIONS = {
     "universal": "Универсальный",
@@ -48,6 +48,9 @@ ALGORITHM_PROFILE_OPTIONS = {
 }
 
 TAXI_PROJECT_PROFILES = {"driver_chats", "taxi_legacy"}
+
+SENTIMENT_COLOR_DOMAIN = ["Позитив", "Нейтрал", "Негатив"]
+SENTIMENT_COLOR_RANGE = ["#2ca02c", "#9e9e9e", "#d62728"]
 
 
 def project_topic_profile(project_row: pd.Series | None) -> str:
@@ -656,7 +659,7 @@ def _render_sentiment_donut(period_label: str, sentiment: dict[str, Any], *, key
         return
     chart = alt.Chart(pie).mark_arc(innerRadius=50).encode(
         theta=alt.Theta(field="Сообщений", type="quantitative"),
-        color=alt.Color(field="Тональность", type="nominal", legend=alt.Legend(title="Тональность")),
+        color=alt.Color(field="Тональность", type="nominal", scale=alt.Scale(domain=SENTIMENT_COLOR_DOMAIN, range=SENTIMENT_COLOR_RANGE), legend=alt.Legend(title="Тональность")),
         tooltip=["Тональность", "Сообщений"],
     ).properties(height=260, title=period_label)
     st.altair_chart(chart, use_container_width=True)
@@ -676,7 +679,23 @@ def render_period_comparison_charts(comparison: list[dict[str, Any]]) -> None:
         st.line_chart(chart_df.set_index("Период")[["Сообщения", "Аудитория", "Охват", "Вовлеченность"]])
     with c2:
         st.markdown("**Динамика долей тональности, %**")
-        st.line_chart(chart_df.set_index("Период")[["Позитив, %", "Нейтрал, %", "Негатив, %"]])
+        sentiment_long = chart_df[["Период", "Позитив, %", "Нейтрал, %", "Негатив, %"]].melt(
+            id_vars="Период",
+            var_name="Тональность",
+            value_name="Доля, %",
+        )
+        sentiment_long["Тональность"] = sentiment_long["Тональность"].str.replace(", %", "", regex=False)
+        sentiment_line = alt.Chart(sentiment_long).mark_line(point=True).encode(
+            x=alt.X("Период:N", sort=None, title="Период"),
+            y=alt.Y("Доля, %:Q", title="Доля, %"),
+            color=alt.Color(
+                "Тональность:N",
+                scale=alt.Scale(domain=SENTIMENT_COLOR_DOMAIN, range=SENTIMENT_COLOR_RANGE),
+                legend=alt.Legend(title="Тональность"),
+            ),
+            tooltip=["Период", "Тональность", alt.Tooltip("Доля, %:Q", format=".1f")],
+        ).properties(height=320)
+        st.altair_chart(sentiment_line, use_container_width=True)
 
     st.markdown("**Столбчатое сравнение по периодам**")
     metric_map = {
