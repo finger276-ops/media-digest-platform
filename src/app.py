@@ -37,7 +37,7 @@ from platform_store import (
 from preprocess import run_preprocess_from_dataframe
 
 APP_TITLE = "Платформа дайджестов"
-APP_VERSION = "4.1.5: цвета тональности"
+APP_VERSION = "4.1.7: настройки подписей графиков"
 
 ALGORITHM_PROFILE_OPTIONS = {
     "universal": "Универсальный",
@@ -51,6 +51,18 @@ TAXI_PROJECT_PROFILES = {"driver_chats", "taxi_legacy"}
 
 SENTIMENT_COLOR_DOMAIN = ["Позитив", "Нейтрал", "Негатив"]
 SENTIMENT_COLOR_RANGE = ["#2ca02c", "#9e9e9e", "#d62728"]
+
+CHART_LABEL_POSITION_OPTIONS = {
+    "top": "У верхнего края",
+    "center": "В центре",
+    "bottom": "У нижнего края",
+}
+CHART_LABEL_FONT_OPTIONS = ["Arial", "Inter", "Roboto", "Verdana", "Tahoma", "Times New Roman"]
+DEFAULT_CHART_LABEL_SETTINGS = {
+    "font": "Arial",
+    "font_size": 11,
+    "position": "top",
+}
 
 
 def project_topic_profile(project_row: pd.Series | None) -> str:
@@ -146,6 +158,54 @@ def project_settings_from_row(row) -> dict[str, Any]:
     except Exception:
         settings = {}
     return settings if isinstance(settings, dict) else {}
+
+
+def chart_label_settings_from_project_settings(settings: dict[str, Any] | None) -> dict[str, Any]:
+    raw = {}
+    if isinstance(settings, dict):
+        raw = settings.get("chart_label_settings") or {}
+    if not isinstance(raw, dict):
+        raw = {}
+    result = dict(DEFAULT_CHART_LABEL_SETTINGS)
+    font = str(raw.get("font") or result["font"]).strip()
+    result["font"] = font or result["font"]
+    try:
+        size = int(raw.get("font_size", result["font_size"]))
+    except Exception:
+        size = int(result["font_size"])
+    result["font_size"] = max(8, min(28, size))
+    position = str(raw.get("position") or result["position"]).strip()
+    result["position"] = position if position in CHART_LABEL_POSITION_OPTIONS else result["position"]
+    return result
+
+
+def chart_label_text_kwargs(settings: dict[str, Any] | None, *, chart_type: str = "line") -> dict[str, Any]:
+    cfg = chart_label_settings_from_project_settings({"chart_label_settings": settings or {}})
+    position = cfg.get("position", "top")
+    kwargs: dict[str, Any] = {
+        "align": "center",
+        "font": cfg.get("font", "Arial"),
+        "size": int(cfg.get("font_size", 11)),
+    }
+    if position == "center":
+        kwargs.update({"baseline": "middle", "dy": 0})
+    elif position == "bottom":
+        kwargs.update({"baseline": "top", "dy": 10})
+    else:
+        kwargs.update({"baseline": "bottom", "dy": -8})
+    if chart_type == "bar" and position == "bottom":
+        kwargs.update({"baseline": "bottom", "dy": -4})
+    return kwargs
+
+
+def chart_label_radius(settings: dict[str, Any] | None) -> int:
+    cfg = chart_label_settings_from_project_settings({"chart_label_settings": settings or {}})
+    position = cfg.get("position", "top")
+    if position == "center":
+        return 72
+    if position == "bottom":
+        return 54
+    return 104
 
 
 
@@ -655,7 +715,7 @@ def _chart_number_label(value: Any, *, percent: bool = False) -> str:
     return format_int(number)
 
 
-def _render_sentiment_donut(period_label: str, sentiment: dict[str, Any], *, key: str) -> None:
+def _render_sentiment_donut(period_label: str, sentiment: dict[str, Any], *, key: str, label_settings: dict[str, Any] | None = None) -> None:
     total = int((sentiment or {}).get("total", 0) or 0)
     if total <= 0:
         st.caption(f"{period_label}: нет данных для круговой диаграммы")
@@ -687,11 +747,11 @@ def _render_sentiment_donut(period_label: str, sentiment: dict[str, Any], *, key
         ],
     )
     arcs = base.mark_arc(innerRadius=50)
-    labels = base.mark_text(radius=92, size=12).encode(text="Подпись:N")
+    labels = base.mark_text(radius=chart_label_radius(label_settings), **chart_label_text_kwargs(label_settings, chart_type="donut")).encode(text="Подпись:N")
     st.altair_chart((arcs + labels).properties(height=260, title=period_label), use_container_width=True)
 
 
-def render_period_comparison_charts(comparison: list[dict[str, Any]]) -> None:
+def render_period_comparison_charts(comparison: list[dict[str, Any]], *, label_settings: dict[str, Any] | None = None) -> None:
     if not comparison:
         return
     chart_df = _comparison_visual_rows(comparison)
@@ -715,7 +775,7 @@ def render_period_comparison_charts(comparison: list[dict[str, Any]]) -> None:
             tooltip=["Период", "Метрика", alt.Tooltip("Значение:Q", format=",")],
         )
         metrics_line = base_metrics.mark_line(point=True)
-        metrics_labels = base_metrics.mark_text(align="center", baseline="bottom", dy=-8, size=10).encode(text="Подпись:N")
+        metrics_labels = base_metrics.mark_text(**chart_label_text_kwargs(label_settings, chart_type="line")).encode(text="Подпись:N")
         st.altair_chart((metrics_line + metrics_labels).properties(height=320), use_container_width=True)
     with c2:
         st.markdown("**Динамика долей тональности, %**")
@@ -737,7 +797,7 @@ def render_period_comparison_charts(comparison: list[dict[str, Any]]) -> None:
             tooltip=["Период", "Тональность", alt.Tooltip("Доля, %:Q", format=".1f")],
         )
         sentiment_line = base_sentiment.mark_line(point=True)
-        sentiment_labels = base_sentiment.mark_text(align="center", baseline="bottom", dy=-8, size=10).encode(text="Подпись:N")
+        sentiment_labels = base_sentiment.mark_text(**chart_label_text_kwargs(label_settings, chart_type="line")).encode(text="Подпись:N")
         st.altair_chart((sentiment_line + sentiment_labels).properties(height=320), use_container_width=True)
 
     st.markdown("**Столбчатое сравнение по периодам**")
@@ -756,13 +816,29 @@ def render_period_comparison_charts(comparison: list[dict[str, Any]]) -> None:
     metric_col = metric_map[selected_metric]
     bar_df = chart_df[["Период", metric_col]].rename(columns={metric_col: "Значение"})
     bar_df["Подпись"] = bar_df["Значение"].apply(_chart_number_label)
+    label_cfg = chart_label_settings_from_project_settings({"chart_label_settings": label_settings or {}})
+    if label_cfg.get("position") == "center":
+        bar_df["_label_y"] = pd.to_numeric(bar_df["Значение"], errors="coerce").fillna(0) / 2
+    elif label_cfg.get("position") == "bottom":
+        max_value = float(pd.to_numeric(bar_df["Значение"], errors="coerce").fillna(0).max() or 0)
+        bar_df["_label_y"] = max_value * 0.03
+    else:
+        bar_df["_label_y"] = pd.to_numeric(bar_df["Значение"], errors="coerce").fillna(0)
     bar_base = alt.Chart(bar_df).encode(
         x=alt.X("Период:N", sort=None, title="Период"),
         y=alt.Y("Значение:Q", title=selected_metric),
         tooltip=["Период", alt.Tooltip("Значение:Q", format=",")],
     )
     bar = bar_base.mark_bar()
-    bar_labels = bar_base.mark_text(align="center", baseline="bottom", dy=-6).encode(text="Подпись:N")
+    bar_label_kwargs = chart_label_text_kwargs(label_settings, chart_type="bar")
+    if label_cfg.get("position") in {"center", "bottom"}:
+        bar_label_kwargs["dy"] = 0
+        bar_label_kwargs["baseline"] = "middle" if label_cfg.get("position") == "center" else "bottom"
+    bar_labels = alt.Chart(bar_df).mark_text(**bar_label_kwargs).encode(
+        x=alt.X("Период:N", sort=None),
+        y=alt.Y("_label_y:Q"),
+        text="Подпись:N",
+    )
     st.altair_chart((bar + bar_labels).properties(height=320), use_container_width=True)
 
     if len(comparison) >= 2:
@@ -770,20 +846,20 @@ def render_period_comparison_charts(comparison: list[dict[str, Any]]) -> None:
         p1, p2 = st.columns(2)
         previous, current = comparison[-2], comparison[-1]
         with p1:
-            _render_sentiment_donut(str(previous.get("label", "Предыдущий период")), previous.get("sentiment", {}), key="prev")
+            _render_sentiment_donut(str(previous.get("label", "Предыдущий период")), previous.get("sentiment", {}), key="prev", label_settings=label_settings)
         with p2:
-            _render_sentiment_donut(str(current.get("label", "Последний период")), current.get("sentiment", {}), key="curr")
+            _render_sentiment_donut(str(current.get("label", "Последний период")), current.get("sentiment", {}), key="curr", label_settings=label_settings)
 
         if len(comparison) > 2:
             p3, p4 = st.columns(2)
             first, last = comparison[0], comparison[-1]
             with p3:
-                _render_sentiment_donut(str(first.get("label", "Первый период")), first.get("sentiment", {}), key="first")
+                _render_sentiment_donut(str(first.get("label", "Первый период")), first.get("sentiment", {}), key="first", label_settings=label_settings)
             with p4:
-                _render_sentiment_donut(str(last.get("label", "Последний период")), last.get("sentiment", {}), key="last")
+                _render_sentiment_donut(str(last.get("label", "Последний период")), last.get("sentiment", {}), key="last", label_settings=label_settings)
 
 
-def render_period_comparison_metrics(messages: pd.DataFrame, periods: pd.DataFrame, period_ids: list[str]) -> dict[str, Any] | None:
+def render_period_comparison_metrics(messages: pd.DataFrame, periods: pd.DataFrame, period_ids: list[str], *, chart_label_settings: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """Render sequential comparison when two or more periods are selected."""
     comparison = _period_metrics_for_comparison(messages, periods, period_ids)
     if len(comparison) < 2:
@@ -824,7 +900,7 @@ def render_period_comparison_metrics(messages: pd.DataFrame, periods: pd.DataFra
         help=f"{format_int(current['sentiment'].get('negative', 0))} сообщений в последнем периоде",
     )
 
-    render_period_comparison_charts(comparison)
+    render_period_comparison_charts(comparison, label_settings=chart_label_settings)
 
     table_rows = []
     prev_item: dict[str, Any] | None = None
@@ -851,7 +927,7 @@ def render_period_comparison_metrics(messages: pd.DataFrame, periods: pd.DataFra
     return aggregate_metrics
 
 
-def render_project_intro(project_name: str, messages: pd.DataFrame, periods: pd.DataFrame, period_ids: list[str], *, profile_label: str = "") -> dict[str, Any]:
+def render_project_intro(project_name: str, messages: pd.DataFrame, periods: pd.DataFrame, period_ids: list[str], *, profile_label: str = "", chart_label_settings: dict[str, Any] | None = None) -> dict[str, Any]:
     """Unified top block for all project profiles."""
     st.header(project_name)
     if profile_label:
@@ -860,7 +936,7 @@ def render_project_intro(project_name: str, messages: pd.DataFrame, periods: pd.
 
     st.subheader("Период и основные метрики")
     if len([x for x in (period_ids or []) if str(x).strip()]) >= 2 and isinstance(messages, pd.DataFrame) and "period_id" in messages.columns:
-        metrics = render_period_comparison_metrics(messages, periods, period_ids)
+        metrics = render_period_comparison_metrics(messages, periods, period_ids, chart_label_settings=chart_label_settings)
         if metrics is not None:
             metrics["project_name"] = project_name
             return metrics
@@ -1233,12 +1309,44 @@ def render_project_manager(projects: pd.DataFrame) -> None:
                 format_func=lambda x: ALGORITHM_PROFILE_OPTIONS.get(x, x),
                 key=f"edit_topic_profile_{project_id}",
             )
+            current_chart_labels = chart_label_settings_from_project_settings(current_settings)
+            with st.expander("Настройки подписей на графиках", expanded=False):
+                chart_font = st.selectbox(
+                    "Шрифт значений",
+                    CHART_LABEL_FONT_OPTIONS,
+                    index=CHART_LABEL_FONT_OPTIONS.index(current_chart_labels.get("font", "Arial")) if current_chart_labels.get("font", "Arial") in CHART_LABEL_FONT_OPTIONS else 0,
+                    key=f"chart_label_font_{project_id}",
+                )
+                chart_font_size = st.slider(
+                    "Размер шрифта",
+                    min_value=8,
+                    max_value=28,
+                    value=int(current_chart_labels.get("font_size", 11)),
+                    step=1,
+                    key=f"chart_label_size_{project_id}",
+                )
+                position_keys = list(CHART_LABEL_POSITION_OPTIONS.keys())
+                current_position = current_chart_labels.get("position", "top")
+                chart_position = st.radio(
+                    "Местоположение значений",
+                    position_keys,
+                    index=position_keys.index(current_position) if current_position in position_keys else 0,
+                    format_func=lambda x: CHART_LABEL_POSITION_OPTIONS.get(x, x),
+                    horizontal=True,
+                    key=f"chart_label_position_{project_id}",
+                )
+                st.caption("Настройка применяется к подписям на линейных, столбчатых и круговых графиках сравнения периодов.")
             st.caption("Коды доступа заполняйте только если хотите заменить текущие.")
             new_viewer_code = st.text_input("Новый код просмотра", type="password", key=f"edit_viewer_code_{project_id}")
             new_editor_code = st.text_input("Новый код редактора", type="password", key=f"edit_editor_code_{project_id}")
             if st.button("Сохранить проект", key=f"save_project_{project_id}"):
                 updated_settings = dict(current_settings)
                 updated_settings["topic_profile"] = new_topic_profile
+                updated_settings["chart_label_settings"] = {
+                    "font": chart_font,
+                    "font_size": int(chart_font_size),
+                    "position": chart_position,
+                }
                 update_project(
                     project_id,
                     project_name=new_name,
@@ -2380,6 +2488,7 @@ def render_taxi_dashboard(
     events: pd.DataFrame,
     messages: pd.DataFrame,
     manual_state: dict[str, Any],
+    chart_label_settings: dict[str, Any] | None = None,
 ) -> None:
     """Dedicated UI for driver-chat digest projects inside the platform namespace."""
     level = st.sidebar.selectbox(
@@ -2402,6 +2511,7 @@ def render_taxi_dashboard(
         periods,
         selected_period_ids,
         profile_label="Дайджест водительских чатов",
+        chart_label_settings=chart_label_settings,
     )
     render_period_summary(
         project_id,
@@ -2466,6 +2576,8 @@ def main() -> None:
     current_project_row = project_row.iloc[0] if not project_row.empty else None
     project_name = str(current_project_row.get("project_name") if current_project_row is not None else project_id)
     project_profile = project_topic_profile(current_project_row)
+    current_project_settings = project_settings_from_row(current_project_row) if current_project_row is not None else {}
+    chart_label_settings = chart_label_settings_from_project_settings(current_project_settings)
     st.sidebar.markdown(f"**Текущий проект:**  \n{project_name}")
     st.sidebar.caption(f"Профиль: {ALGORITHM_PROFILE_OPTIONS.get(project_profile, project_profile)}")
 
@@ -2496,6 +2608,7 @@ def main() -> None:
             events,
             enriched_messages,
             manual_state,
+            chart_label_settings=chart_label_settings,
         )
         return
 
@@ -2514,6 +2627,7 @@ def main() -> None:
         periods,
         selected_period_ids,
         profile_label=ALGORITHM_PROFILE_OPTIONS.get(project_profile, project_profile),
+        chart_label_settings=chart_label_settings,
     )
     render_period_summary(
         project_id,
