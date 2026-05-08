@@ -5,7 +5,8 @@ import os
 import tempfile
 import uuid
 import re
-from datetime import date
+from io import BytesIO
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -339,6 +340,289 @@ def format_int(value: Any) -> str:
         return f"{int(float(value)):,}".replace(",", " ")
     except Exception:
         return "0"
+
+
+def selected_period_label(periods: pd.DataFrame, period_ids: list[str]) -> str:
+    """Human-readable label for the currently selected period set."""
+    ids = [str(x) for x in (period_ids or []) if str(x).strip()]
+    if not ids:
+        return "выбранный период"
+    if periods is None or periods.empty or "period_id" not in periods.columns:
+        return ", ".join(ids[:3]) + (f" и еще {len(ids) - 3}" if len(ids) > 3 else "")
+
+    subset = periods[periods["period_id"].astype(str).isin(ids)].copy()
+    if subset.empty:
+        return ", ".join(ids[:3]) + (f" и еще {len(ids) - 3}" if len(ids) > 3 else "")
+
+    if len(subset) == 1:
+        row = subset.iloc[0]
+        name = str(row.get("period_name") or "").strip()
+        period = fmt_period(row)
+        return f"{name} · {period}" if name and period else name or period or ids[0]
+
+    dates: list[pd.Timestamp] = []
+    for col in ["date_from", "date_to", "start_date", "end_date"]:
+        if col in subset.columns:
+            parsed = pd.to_datetime(subset[col], errors="coerce", dayfirst=True).dropna()
+            dates.extend(parsed.tolist())
+    if dates:
+        start_s = fmt_date(min(dates))
+        end_s = fmt_date(max(dates))
+        date_part = f"{start_s}–{end_s}" if start_s and end_s and start_s != end_s else start_s or end_s
+    else:
+        date_part = ""
+
+    names = [str(x).strip() for x in subset.get("period_name", pd.Series(dtype=str)).fillna("").tolist() if str(x).strip()]
+    if len(names) <= 3 and names:
+        name_part = "; ".join(names)
+    else:
+        name_part = f"{len(subset)} период(а/ов)"
+    return f"{name_part} · {date_part}" if date_part else name_part
+
+
+def sentiment_counts(messages: pd.DataFrame) -> dict[str, int]:
+    """Return positive/neutral/negative counts for any project profile."""
+    total = int(len(messages)) if isinstance(messages, pd.DataFrame) else 0
+    if total == 0:
+        return {"positive": 0, "neutral": 0, "negative": 0, "total": 0}
+
+    sentiment = messages.get("sentiment", pd.Series([""] * total, index=messages.index)).fillna("").astype(str).str.lower().str.replace("ё", "е", regex=False)
+    positive_mask = sentiment.str.contains("позит|positive|полож", regex=True, na=False)
+    negative_mask = sentiment.str.contains("нег|negative|отриц", regex=True, na=False)
+    neutral_mask = sentiment.str.contains("нейтр|neutral", regex=True, na=False)
+
+    if "is_negative" in messages.columns:
+        negative_mask = negative_mask | messages["is_negative"].astype(str).str.lower().isin(["true", "1", "yes", "да", "негатив", "negative"])
+
+    positive = int(positive_mask.sum())
+    negative = int(negative_mask.sum())
+    neutral_detected = int(neutral_mask.sum())
+    neutral = max(0, total - positive - negative)
+    if neutral_detected and neutral_detected > neutral:
+        neutral = neutral_detected
+        # Keep total stable if imported data has overlapping/dirty sentiment values.
+        overflow = positive + negative + neutral - total
+        if overflow > 0:
+            neutral = max(0, neutral - overflow)
+    return {"positive": positive, "neutral": neutral, "negative": negative, "total": total}
+
+
+def percent_text(count: int, total: int) -> str:
+    return f"{count / total * 100:.0f}%" if total else "0%"
+
+
+def overview_metrics(messages: pd.DataFrame) -> dict[str, Any]:
+    total_messages = int(len(messages)) if isinstance(messages, pd.DataFrame) else 0
+    return {
+        "messages": total_messages,
+        "audience": int(numeric_series(messages, ["audience", "Аудитория"]).sum()) if total_messages else 0,
+        "reach": int(numeric_series(messages, ["views", "Просмотры", "Просмотров", "reach", "Охват"]).sum()) if total_messages else 0,
+        "engagement": int(numeric_series(messages, ["engagement", "Вовлечённость", "Вовлеченность", "engagement_count"]).sum()) if total_messages else 0,
+        "sentiment": sentiment_counts(messages),
+    }
+
+
+def render_project_intro(project_name: str, messages: pd.DataFrame, periods: pd.DataFrame, period_ids: list[str], *, profile_label: str = "") -> dict[str, Any]:
+    """Unified top block for all project profiles."""
+    st.header(project_name)
+    if profile_label:
+        st.caption(f"Профиль проекта: {profile_label}")
+    period_label = selected_period_label(periods, period_ids)
+    metrics = overview_metrics(messages)
+    sent = metrics["sentiment"]
+    total = int(sent.get("total", 0))
+
+    st.subheader("Период и основные метрики")
+    st.caption(f"Период: {period_label}")
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Сообщений", format_int(metrics["messages"]))
+    c2.metric("Суммарная аудитория", format_int(metrics["audience"]))
+    c3.metric("Суммарный охват", format_int(metrics["reach"]))
+    c4.metric("Суммарная вовлеченность", format_int(metrics["engagement"]))
+
+    t1, t2, t3 = st.columns(3)
+    t1.metric("Позитив", f"{percent_text(sent.get('positive', 0), total)}", help=f"{format_int(sent.get('positive', 0))} сообщений")
+    t2.metric("Нейтрал", f"{percent_text(sent.get('neutral', 0), total)}", help=f"{format_int(sent.get('neutral', 0))} сообщений")
+    t3.metric("Негатив", f"{percent_text(sent.get('negative', 0), total)}", help=f"{format_int(sent.get('negative', 0))} сообщений")
+
+    metrics["period_label"] = period_label
+    metrics["project_name"] = project_name
+    return metrics
+
+
+def clean_summary_for_export(text: str) -> str:
+    value = str(text or "").strip()
+    value = value.replace("**", "")
+    value = re.sub(r"^\s*•\s*", "", value, flags=re.MULTILINE)
+    return value
+
+
+def safe_export_filename(project_name: str, period_label: str, ext: str) -> str:
+    raw = f"summary_{project_name}_{period_label}"
+    safe = re.sub(r"[^0-9A-Za-zА-Яа-я_.-]+", "_", raw, flags=re.UNICODE).strip("_")
+    return f"{safe[:140] or 'summary'}.{ext}"
+
+
+def summary_export_payload(project_name: str, period_label: str, summary_text: str, metrics: dict[str, Any]) -> dict[str, Any]:
+    sent = metrics.get("sentiment", {}) if isinstance(metrics, dict) else {}
+    return {
+        "project_name": project_name,
+        "period_label": period_label,
+        "summary_text": clean_summary_for_export(summary_text),
+        "messages": int(metrics.get("messages", 0) or 0),
+        "audience": int(metrics.get("audience", 0) or 0),
+        "reach": int(metrics.get("reach", 0) or 0),
+        "engagement": int(metrics.get("engagement", 0) or 0),
+        "positive": int(sent.get("positive", 0) or 0),
+        "neutral": int(sent.get("neutral", 0) or 0),
+        "negative": int(sent.get("negative", 0) or 0),
+        "total": int(sent.get("total", 0) or 0),
+        "created_at": datetime.now().strftime("%d.%m.%Y %H:%M"),
+    }
+
+
+def generate_summary_docx(payload: dict[str, Any]) -> bytes:
+    try:
+        from docx import Document
+        from docx.shared import Pt
+    except Exception as exc:
+        raise RuntimeError("Для выгрузки Word добавьте python-docx в requirements.txt.") from exc
+
+    doc = Document()
+    styles = doc.styles
+    styles["Normal"].font.name = "Arial"
+    styles["Normal"].font.size = Pt(10.5)
+
+    p = doc.add_paragraph()
+    r = p.add_run(str(payload.get("project_name") or "Проект"))
+    r.bold = True
+    r.font.size = Pt(16)
+    doc.add_paragraph(f"Период: {payload.get('period_label') or 'выбранный период'}")
+    doc.add_paragraph(f"Дата выгрузки: {payload.get('created_at') or ''}")
+
+    total = max(1, int(payload.get("total", 0) or 0))
+    doc.add_paragraph(
+        "Основные метрики: "
+        f"сообщений — {format_int(payload.get('messages', 0))}; "
+        f"аудитория — {format_int(payload.get('audience', 0))}; "
+        f"охват — {format_int(payload.get('reach', 0))}; "
+        f"вовлеченность — {format_int(payload.get('engagement', 0))}."
+    )
+    doc.add_paragraph(
+        "Тональность: "
+        f"позитив — {percent_text(int(payload.get('positive', 0) or 0), total)}; "
+        f"нейтрал — {percent_text(int(payload.get('neutral', 0) or 0), total)}; "
+        f"негатив — {percent_text(int(payload.get('negative', 0) or 0), total)}."
+    )
+
+    p = doc.add_paragraph()
+    p.add_run("Саммари периода").bold = True
+    for block in str(payload.get("summary_text") or "").split("\n"):
+        block = block.strip()
+        if block:
+            doc.add_paragraph(block)
+
+    out = BytesIO()
+    doc.save(out)
+    return out.getvalue()
+
+
+def _pdf_font_name() -> str:
+    try:
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+    except Exception as exc:
+        raise RuntimeError("Для выгрузки PDF добавьте reportlab в requirements.txt.") from exc
+    for path in [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    ]:
+        if Path(path).exists():
+            try:
+                pdfmetrics.registerFont(TTFont("PlatformSans", path))
+                return "PlatformSans"
+            except Exception:
+                continue
+    return "Helvetica"
+
+
+def generate_summary_pdf(payload: dict[str, Any]) -> bytes:
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+        from reportlab.lib.units import cm
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+        from xml.sax.saxutils import escape as xml_escape
+    except Exception as exc:
+        raise RuntimeError("Для выгрузки PDF добавьте reportlab в requirements.txt.") from exc
+
+    font_name = _pdf_font_name()
+    out = BytesIO()
+    doc = SimpleDocTemplate(out, pagesize=A4, leftMargin=1.7 * cm, rightMargin=1.7 * cm, topMargin=1.5 * cm, bottomMargin=1.5 * cm)
+    base = getSampleStyleSheet()
+    normal = ParagraphStyle("PlatformNormal", parent=base["Normal"], fontName=font_name, fontSize=10, leading=14)
+    title = ParagraphStyle("PlatformTitle", parent=normal, fontName=font_name, fontSize=16, leading=20, spaceAfter=10)
+    heading = ParagraphStyle("PlatformHeading", parent=normal, fontName=font_name, fontSize=12, leading=16, spaceBefore=8, spaceAfter=6)
+
+    total = max(1, int(payload.get("total", 0) or 0))
+    story = [
+        Paragraph(f"<b>{xml_escape(str(payload.get('project_name') or 'Проект'))}</b>", title),
+        Paragraph(xml_escape(f"Период: {payload.get('period_label') or 'выбранный период'}"), normal),
+        Paragraph(xml_escape(f"Дата выгрузки: {payload.get('created_at') or ''}"), normal),
+        Spacer(1, 8),
+        Paragraph("<b>Основные метрики</b>", heading),
+        Paragraph(xml_escape(
+            f"Сообщений — {format_int(payload.get('messages', 0))}; "
+            f"аудитория — {format_int(payload.get('audience', 0))}; "
+            f"охват — {format_int(payload.get('reach', 0))}; "
+            f"вовлеченность — {format_int(payload.get('engagement', 0))}."
+        ), normal),
+        Paragraph(xml_escape(
+            f"Тональность: позитив — {percent_text(int(payload.get('positive', 0) or 0), total)}; "
+            f"нейтрал — {percent_text(int(payload.get('neutral', 0) or 0), total)}; "
+            f"негатив — {percent_text(int(payload.get('negative', 0) or 0), total)}."
+        ), normal),
+        Spacer(1, 8),
+        Paragraph("<b>Саммари периода</b>", heading),
+    ]
+    for block in str(payload.get("summary_text") or "").split("\n"):
+        block = block.strip()
+        if block:
+            story.append(Paragraph(xml_escape(block), normal))
+    doc.build(story)
+    return out.getvalue()
+
+
+def render_summary_export_buttons(project_name: str, period_label: str, summary_text: str, metrics: dict[str, Any], *, key_prefix: str) -> None:
+    payload = summary_export_payload(project_name, period_label, summary_text, metrics)
+    c1, c2 = st.columns(2)
+    with c1:
+        try:
+            st.download_button(
+                "Скачать Word",
+                data=generate_summary_docx(payload),
+                file_name=safe_export_filename(project_name, period_label, "docx"),
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True,
+                key=f"{key_prefix}_docx",
+            )
+        except Exception as exc:
+            st.warning(str(exc))
+    with c2:
+        try:
+            st.download_button(
+                "Скачать PDF",
+                data=generate_summary_pdf(payload),
+                file_name=safe_export_filename(project_name, period_label, "pdf"),
+                mime="application/pdf",
+                use_container_width=True,
+                key=f"{key_prefix}_pdf",
+            )
+        except Exception as exc:
+            st.warning(str(exc))
 
 
 def render_tag_statistics(messages: pd.DataFrame) -> None:
@@ -1181,20 +1465,49 @@ def build_auto_summary(messages: pd.DataFrame, events_agg: pd.DataFrame, periods
     return "\n\n".join(lines)
 
 
-def render_summary(project_id: str, period_ids: list[str], messages: pd.DataFrame, events_agg: pd.DataFrame, periods: pd.DataFrame, role: str) -> None:
-    st.subheader("Саммари")
-    key = "summary::" + "__".join(sorted(period_ids))
+def summary_storage_key(period_ids: list[str], profile: str = "") -> str:
+    prefix = "summary"
+    if is_taxi_project_profile(profile):
+        prefix = "summary::taxi"
+    return prefix + "::" + "__".join(sorted(str(x) for x in (period_ids or []) if str(x).strip()))
+
+
+def render_period_summary(
+    project_id: str,
+    project_name: str,
+    period_ids: list[str],
+    messages: pd.DataFrame,
+    events_agg: pd.DataFrame,
+    periods: pd.DataFrame,
+    role: str,
+    *,
+    profile: str = "",
+    metrics: dict[str, Any] | None = None,
+) -> None:
+    """Unified editable/exportable period summary for all project profiles."""
+    st.subheader("Саммари периода")
+    key = summary_storage_key(period_ids, profile)
     manual = get_manual(project_id, key)
-    auto_summary = build_auto_summary(messages, events_agg, periods, period_ids)
-    summary_text = (manual or {}).get("summary") or auto_summary
+    auto_summary = build_taxi_auto_summary(messages, events_agg, periods, period_ids) if is_taxi_project_profile(profile) else build_auto_summary(messages, events_agg, periods, period_ids)
+    summary_text = str((manual or {}).get("summary") or "").strip() or auto_summary
     st.markdown(summary_text.replace("\n", "  \n"))
+
+    metrics = metrics or overview_metrics(messages)
+    metrics.setdefault("period_label", selected_period_label(periods, period_ids))
+    metrics.setdefault("project_name", project_name)
+    period_label = str(metrics.get("period_label") or selected_period_label(periods, period_ids))
+
+    with st.expander("Выгрузить саммари", expanded=False):
+        st.caption("В файл попадут название проекта, период, основные метрики, тональность и текст саммари.")
+        render_summary_export_buttons(project_name, period_label, summary_text, metrics, key_prefix=f"summary_export_{abs(hash(key))}")
+
     if role_rank(role) >= role_rank("editor"):
-        with st.expander("Редактировать саммари"):
+        with st.expander("Редактировать саммари", expanded=False):
             edited = st.text_area("Текст саммари", value=summary_text, height=220, key=f"summary_{key}")
             c1, c2 = st.columns(2)
             with c1:
                 if st.button("Сохранить саммари", key=f"save_{key}"):
-                    save_manual(project_id, "summaries", key, {"summary": edited})
+                    save_manual(project_id, "summaries", key, {"summary": edited, "period_ids": period_ids, "profile": profile})
                     st.success("Саммари сохранено.")
                     st.rerun()
             with c2:
@@ -1202,6 +1515,11 @@ def render_summary(project_id: str, period_ids: list[str], messages: pd.DataFram
                     delete_manual(project_id, key)
                     st.success("Вернули автоматическое саммари.")
                     st.rerun()
+
+
+def render_summary(project_id: str, period_ids: list[str], messages: pd.DataFrame, events_agg: pd.DataFrame, periods: pd.DataFrame, role: str) -> None:
+    """Backward-compatible wrapper for older calls."""
+    render_period_summary(project_id, "Проект", period_ids, messages, events_agg, periods, role)
 
 
 def render_period_dynamics(messages: pd.DataFrame, periods: pd.DataFrame, period_ids: list[str]) -> None:
@@ -1628,8 +1946,6 @@ def render_taxi_dashboard(
     manual_state: dict[str, Any],
 ) -> None:
     """Dedicated UI for driver-chat digest projects inside the platform namespace."""
-    st.header(project_name)
-    st.caption("Профиль проекта: дайджест водительских чатов. Данные хранятся отдельно внутри текущего проекта платформы.")
     level = st.sidebar.selectbox(
         "Уровень сборки инфоповодов",
         ["balanced", "macro", "detailed"],
@@ -1642,8 +1958,24 @@ def render_taxi_dashboard(
         key="taxi_event_detail_level",
     )
     events_agg = aggregate_taxi_events(events, level=level)
-    render_taxi_overview_statistics(events_agg, messages)
-    render_taxi_summary(project_id, selected_period_ids, messages, events_agg, periods, role)
+    metrics = render_project_intro(
+        project_name,
+        messages,
+        periods,
+        selected_period_ids,
+        profile_label="Дайджест водительских чатов",
+    )
+    render_period_summary(
+        project_id,
+        project_name,
+        selected_period_ids,
+        messages,
+        events_agg,
+        periods,
+        role,
+        profile="driver_chats",
+        metrics=metrics,
+    )
     st.markdown("---")
     render_events(project_id, role, events_agg, messages, manual_state)
     st.markdown("---")
@@ -1735,8 +2067,24 @@ def main() -> None:
     # in the tag block after algorithm updates.
     enriched_messages = clean_brand_analytics_tags(enriched_messages)
 
-    render_overview_statistics(enriched_messages)
-    render_summary(project_id, selected_period_ids, enriched_messages, events_agg, periods, role)
+    metrics = render_project_intro(
+        project_name,
+        enriched_messages,
+        periods,
+        selected_period_ids,
+        profile_label=ALGORITHM_PROFILE_OPTIONS.get(project_profile, project_profile),
+    )
+    render_period_summary(
+        project_id,
+        project_name,
+        selected_period_ids,
+        enriched_messages,
+        events_agg,
+        periods,
+        role,
+        profile=project_profile,
+        metrics=metrics,
+    )
     render_tag_statistics(enriched_messages)
     render_events(project_id, role, events_agg, enriched_messages, manual_state)
     render_messages_block(enriched_messages)
