@@ -754,17 +754,98 @@ def render_period_history(project_id: str, role: str) -> None:
                 st.rerun()
 
 def enrich_messages(messages: pd.DataFrame, event_discussions: pd.DataFrame, discussion_messages: pd.DataFrame, events: pd.DataFrame) -> pd.DataFrame:
-    if messages.empty:
-        return messages
+    """Attach event ids/titles to messages safely.
+
+    Some project profiles, especially Brand Analytics story-based imports, may
+    have generated event rows but no discussion/event link table in older
+    periods. The previous version assumed that the merge through
+    discussion_messages/event_discussions always created an `event_id` column and
+    crashed with KeyError when it did not.
+    """
+    if messages is None or messages.empty:
+        return messages if isinstance(messages, pd.DataFrame) else pd.DataFrame()
+
     out = messages.copy()
-    if not event_discussions.empty and not discussion_messages.empty:
+    if "message_id" not in out.columns:
+        out["message_id"] = out.index.astype(str)
+    out["message_id"] = out["message_id"].fillna("").astype(str)
+
+    # 1) Preferred path: message -> discussion -> event links.
+    if (
+        isinstance(event_discussions, pd.DataFrame)
+        and isinstance(discussion_messages, pd.DataFrame)
+        and not event_discussions.empty
+        and not discussion_messages.empty
+        and "discussion_id" in event_discussions.columns
+        and "discussion_id" in discussion_messages.columns
+    ):
         link = discussion_messages.merge(event_discussions, on="discussion_id", how="left")
         if "message_id" in link.columns and "event_id" in link.columns:
-            msg_event = link[["message_id", "event_id"]].drop_duplicates("message_id")
-            out = out.merge(msg_event, on="message_id", how="left")
-    if not events.empty and "event_id" in events.columns:
-        titles = events[["event_id", "event_title"]].drop_duplicates("event_id")
-        out = out.merge(titles, on="event_id", how="left")
+            msg_event = (
+                link[["message_id", "event_id"]]
+                .dropna(subset=["message_id"])
+                .drop_duplicates("message_id")
+            )
+            msg_event["message_id"] = msg_event["message_id"].fillna("").astype(str)
+            out = out.merge(msg_event, on="message_id", how="left", suffixes=("", "_linked"))
+            if "event_id_linked" in out.columns:
+                if "event_id" not in out.columns:
+                    out["event_id"] = out["event_id_linked"]
+                else:
+                    out["event_id"] = out["event_id"].fillna(out["event_id_linked"])
+                out = out.drop(columns=["event_id_linked"])
+
+    # 2) Fallback for story-based BA periods: map source topic/story to event.
+    if "event_id" not in out.columns:
+        out["event_id"] = ""
+    out["event_id"] = out["event_id"].fillna("").astype(str)
+
+    if isinstance(events, pd.DataFrame) and not events.empty and "event_id" in events.columns:
+        events_work = events.copy()
+        events_work["event_id"] = events_work["event_id"].fillna("").astype(str)
+
+        needs_fallback = out["event_id"].str.strip().eq("").all()
+        if needs_fallback:
+            topic_map: dict[str, str] = {}
+            if "source_main_topic" in events_work.columns:
+                for _, row in events_work.dropna(subset=["event_id"]).iterrows():
+                    key = str(row.get("source_main_topic") or "").strip().lower()
+                    if key and key not in topic_map:
+                        topic_map[key] = str(row.get("event_id"))
+            if "event_title" in events_work.columns:
+                for _, row in events_work.dropna(subset=["event_id"]).iterrows():
+                    key = str(row.get("event_title") or "").strip().lower()
+                    if key and key not in topic_map:
+                        topic_map[key] = str(row.get("event_id"))
+
+            if topic_map:
+                source_col = None
+                for candidate in ["source_main_topic", "source_topics", "event_title"]:
+                    if candidate in out.columns:
+                        source_col = candidate
+                        break
+                if source_col:
+                    keys = out[source_col].fillna("").astype(str).str.split(";").str[0].str.strip().str.lower()
+                    out["event_id"] = keys.map(topic_map).fillna(out["event_id"])
+
+        # Add/fill event title without requiring a merge key to exist.
+        if "event_title" in events_work.columns:
+            title_map = (
+                events_work.drop_duplicates("event_id")
+                .set_index("event_id")["event_title"]
+                .fillna("")
+                .astype(str)
+                .to_dict()
+            )
+            mapped_titles = out["event_id"].fillna("").astype(str).map(title_map).fillna("")
+            if "event_title" not in out.columns:
+                out["event_title"] = mapped_titles
+            else:
+                current = out["event_title"].fillna("").astype(str)
+                out["event_title"] = current.where(current.str.strip().ne(""), mapped_titles)
+
+    if "event_title" not in out.columns:
+        out["event_title"] = ""
     return out
 
 
