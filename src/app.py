@@ -37,7 +37,7 @@ from platform_store import (
 from preprocess import run_preprocess_from_dataframe
 
 APP_TITLE = "Платформа дайджестов"
-APP_VERSION = "4.3.0: оптимизация загрузки и кеширования"
+APP_VERSION = "4.3.1: исправление кириллицы в PDF"
 
 ALGORITHM_PROFILE_OPTIONS = {
     "universal": "Универсальный",
@@ -1312,25 +1312,83 @@ def generate_summary_docx(payload: dict[str, Any]) -> bytes:
     return out.getvalue()
 
 
+def _pdf_font_candidates() -> list[tuple[str, str | None]]:
+    """Return regular/bold TTF candidates that support Cyrillic.
+
+    Streamlit Cloud images do not always include system DejaVu/Noto fonts. If we
+    fall back to ReportLab core Helvetica, Cyrillic is rendered as black squares.
+    To make PDF export portable, we also look for the DejaVu Sans bundled with
+    matplotlib when the package is installed.
+    """
+    candidates: list[tuple[str, str | None]] = []
+
+    env_path = os.getenv("PLATFORM_PDF_FONT_PATH", "").strip()
+    if env_path:
+        candidates.append((env_path, None))
+
+    # Optional project-local fonts. Do not commit font files unless licensing is clear;
+    # this path is only for private deployments that provide their own font.
+    here = Path(__file__).resolve().parent
+    candidates.extend([
+        (str(here / "assets" / "fonts" / "DejaVuSans.ttf"), str(here / "assets" / "fonts" / "DejaVuSans-Bold.ttf")),
+        (str(here.parent / "assets" / "fonts" / "DejaVuSans.ttf"), str(here.parent / "assets" / "fonts" / "DejaVuSans-Bold.ttf")),
+    ])
+
+    # Common Linux/Streamlit Cloud system fonts.
+    candidates.extend([
+        ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+        ("/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf"),
+        ("/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf", "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf"),
+        ("/usr/share/fonts/truetype/freefont/FreeSans.ttf", "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf"),
+        ("/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf", "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf"),
+        ("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf", "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"),
+    ])
+
+    try:
+        import matplotlib  # type: ignore
+
+        mpl_fonts = Path(matplotlib.get_data_path()) / "fonts" / "ttf"
+        candidates.append((str(mpl_fonts / "DejaVuSans.ttf"), str(mpl_fonts / "DejaVuSans-Bold.ttf")))
+    except Exception:
+        pass
+
+    return candidates
+
+
 def _pdf_font_name() -> str:
     try:
         from reportlab.pdfbase import pdfmetrics
         from reportlab.pdfbase.ttfonts import TTFont
     except Exception as exc:
         raise RuntimeError("Для выгрузки PDF добавьте reportlab в requirements.txt.") from exc
-    for path in [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf",
-        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-    ]:
-        if Path(path).exists():
-            try:
-                pdfmetrics.registerFont(TTFont("PlatformSans", path))
-                return "PlatformSans"
-            except Exception:
-                continue
-    return "Helvetica"
+
+    for regular_path, bold_path in _pdf_font_candidates():
+        regular = Path(regular_path)
+        if not regular.exists():
+            continue
+        try:
+            pdfmetrics.registerFont(TTFont("PlatformSans", str(regular)))
+            bold = Path(bold_path) if bold_path else None
+            if bold is not None and bold.exists():
+                pdfmetrics.registerFont(TTFont("PlatformSans-Bold", str(bold)))
+                try:
+                    pdfmetrics.registerFontFamily(
+                        "PlatformSans",
+                        normal="PlatformSans",
+                        bold="PlatformSans-Bold",
+                        italic="PlatformSans",
+                        boldItalic="PlatformSans-Bold",
+                    )
+                except Exception:
+                    pass
+            return "PlatformSans"
+        except Exception:
+            continue
+
+    raise RuntimeError(
+        "Не найден TTF-шрифт с поддержкой кириллицы для PDF. "
+        "Проверьте, что установлен matplotlib>=3.8 или задайте PLATFORM_PDF_FONT_PATH."
+    )
 
 
 def generate_summary_pdf(payload: dict[str, Any]) -> bytes:
