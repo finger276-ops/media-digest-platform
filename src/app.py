@@ -5,6 +5,7 @@ import os
 import tempfile
 import uuid
 import re
+import textwrap
 from io import BytesIO
 from datetime import date, datetime
 from pathlib import Path
@@ -1266,10 +1267,100 @@ def summary_export_payload(project_name: str, period_label: str, summary_text: s
     }
 
 
+def generate_summary_infographic_png(payload: dict[str, Any]) -> bytes:
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import FancyBboxPatch, Rectangle
+    except Exception as exc:
+        raise RuntimeError("Для инфографики нужен matplotlib>=3.8 в requirements.txt.") from exc
+
+    plt.rcParams["font.family"] = "DejaVu Sans"
+    fig = plt.figure(figsize=(8.27, 11.69), dpi=160)
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.axis("off")
+    fig.patch.set_facecolor("white")
+
+    def card(x: float, y: float, w: float, h: float, title: str, value: str, subtitle: str = "") -> None:
+        patch = FancyBboxPatch((x, y), w, h, boxstyle="round,pad=0.012,rounding_size=0.02", linewidth=1, edgecolor="#d9e0ea", facecolor="#f7f9fc")
+        ax.add_patch(patch)
+        ax.text(x + 0.02, y + h - 0.035, title, fontsize=10, color="#4b5563", va="top", ha="left")
+        ax.text(x + 0.02, y + h / 2, value, fontsize=18, color="#111827", va="center", ha="left", fontweight="bold")
+        if subtitle:
+            ax.text(x + 0.02, y + 0.02, subtitle, fontsize=8.5, color="#6b7280", va="bottom", ha="left")
+
+    project = str(payload.get("project_name") or "Проект")
+    period = str(payload.get("period_label") or "выбранный период")
+    created = str(payload.get("created_at") or "")
+    summary_lines = [line.strip("•- ").strip() for line in str(payload.get("summary_text") or "").split("\n") if line.strip()]
+
+    ax.text(0.06, 0.95, project, fontsize=22, fontweight="bold", color="#111827", va="top", ha="left")
+    ax.text(0.06, 0.92, f"Период: {period}", fontsize=11.5, color="#4b5563", va="top", ha="left")
+    ax.text(0.06, 0.902, f"Дата выгрузки: {created}", fontsize=9.5, color="#6b7280", va="top", ha="left")
+
+    card(0.06, 0.79, 0.2, 0.085, "Сообщения", format_int(payload.get("messages", 0)))
+    card(0.285, 0.79, 0.2, 0.085, "Аудитория", format_int(payload.get("audience", 0)))
+    card(0.51, 0.79, 0.2, 0.085, "Охват", format_int(payload.get("reach", 0)))
+    card(0.735, 0.79, 0.2, 0.085, "Вовлеченность", format_int(payload.get("engagement", 0)))
+
+    total = max(1, int(payload.get("total", 0) or 0))
+    pos = int(payload.get("positive", 0) or 0)
+    neu = int(payload.get("neutral", 0) or 0)
+    neg = int(payload.get("negative", 0) or 0)
+    values = [pos, neu, neg]
+    labels = ["Позитив", "Нейтрал", "Негатив"]
+    colors = ["#22c55e", "#9ca3af", "#ef4444"]
+
+    ax.text(0.06, 0.745, "Тональность", fontsize=13, fontweight="bold", color="#111827", va="top")
+    pie_ax = fig.add_axes([0.06, 0.54, 0.28, 0.18])
+    pie_ax.axis("equal")
+    pie_ax.pie(values, colors=colors, startangle=90, counterclock=False, wedgeprops={"width": 0.42, "edgecolor": "white"})
+    pie_ax.text(0, 0.05, format_int(total), ha="center", va="center", fontsize=16, fontweight="bold", color="#111827")
+    pie_ax.text(0, -0.12, "сообщений", ha="center", va="center", fontsize=9, color="#6b7280")
+    pie_ax.set_xticks([])
+    pie_ax.set_yticks([])
+
+    y0 = 0.69
+    for i, (lab, val, col) in enumerate(zip(labels, values, colors)):
+        yy = y0 - i * 0.055
+        ax.add_patch(Rectangle((0.38, yy - 0.012), 0.018, 0.018, facecolor=col, edgecolor="none"))
+        ax.text(0.405, yy, lab, fontsize=11, color="#111827", va="center", ha="left")
+        ax.text(0.56, yy, format_int(val), fontsize=11, color="#111827", va="center", ha="right", fontweight="bold")
+        ax.text(0.58, yy, percent_text(val, total), fontsize=10, color="#6b7280", va="center", ha="left")
+
+    ax.text(0.06, 0.49, "Саммари периода", fontsize=13, fontweight="bold", color="#111827", va="top")
+    summary_y = 0.46
+    line_count = 0
+    for block in summary_lines[:6]:
+        wrapped = textwrap.wrap(block, width=72) or [block]
+        bullet = True
+        for seg in wrapped:
+            prefix = "• " if bullet else "  "
+            ax.text(0.07, summary_y, prefix + seg, fontsize=10.5, color="#111827", va="top", ha="left")
+            summary_y -= 0.025
+            line_count += 1
+            bullet = False
+            if line_count >= 8:
+                break
+        summary_y -= 0.008
+        if line_count >= 8:
+            break
+
+    ax.text(0.06, 0.05, "Инфографика сформирована автоматически на основе выбранного периода и текущего саммари.", fontsize=9, color="#6b7280", va="bottom", ha="left")
+
+    out = BytesIO()
+    fig.savefig(out, format="png", bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    return out.getvalue()
+
+
 def generate_summary_docx(payload: dict[str, Any]) -> bytes:
     try:
         from docx import Document
-        from docx.shared import Pt
+        from docx.shared import Pt, Inches
     except Exception as exc:
         raise RuntimeError("Для выгрузки Word добавьте python-docx в requirements.txt.") from exc
 
@@ -1299,6 +1390,13 @@ def generate_summary_docx(payload: dict[str, Any]) -> bytes:
         f"нейтрал — {percent_text(int(payload.get('neutral', 0) or 0), total)}; "
         f"негатив — {percent_text(int(payload.get('negative', 0) or 0), total)}."
     )
+
+    try:
+        infographic_png = generate_summary_infographic_png(payload)
+        doc.add_paragraph()
+        doc.add_picture(BytesIO(infographic_png), width=Inches(6.2))
+    except Exception:
+        pass
 
     p = doc.add_paragraph()
     p.add_run("Саммари периода").bold = True
@@ -1396,7 +1494,7 @@ def generate_summary_pdf(payload: dict[str, Any]) -> bytes:
         from reportlab.lib.pagesizes import A4
         from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
         from reportlab.lib.units import cm
-        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, PageBreak
         from xml.sax.saxutils import escape as xml_escape
     except Exception as exc:
         raise RuntimeError("Для выгрузки PDF добавьте reportlab в requirements.txt.") from exc
@@ -1428,8 +1526,19 @@ def generate_summary_pdf(payload: dict[str, Any]) -> bytes:
             f"негатив — {percent_text(int(payload.get('negative', 0) or 0), total)}."
         ), normal),
         Spacer(1, 8),
-        Paragraph("<b>Саммари периода</b>", heading),
     ]
+
+    try:
+        infographic_png = generate_summary_infographic_png(payload)
+        infographic_io = BytesIO(infographic_png)
+        infographic_io.seek(0)
+        story.append(Paragraph("<b>Инфографика</b>", heading))
+        story.append(Image(infographic_io, width=17.0 * cm, height=24.0 * cm))
+        story.append(PageBreak())
+    except Exception:
+        pass
+
+    story.append(Paragraph("<b>Саммари периода</b>", heading))
     for block in str(payload.get("summary_text") or "").split("\n"):
         block = block.strip()
         if block:
