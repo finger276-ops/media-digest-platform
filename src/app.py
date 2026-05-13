@@ -17,7 +17,7 @@ import altair as alt
 
 from import_adapters import read_source_table, get_excel_sheet_names
 from io_utils import read_table
-from platform_store import (
+from services.cached_store import (
     supabase_configured,
     list_projects,
     create_project,
@@ -34,11 +34,30 @@ from platform_store import (
     list_manual,
     save_manual,
     delete_manual,
+    clear_platform_caches,
 )
 from preprocess import run_preprocess_from_dataframe
+from services.metrics_compute import (
+    numeric_series,
+    prepare_dashboard_messages,
+    format_int,
+    sentiment_counts,
+    percent_text,
+    overview_metrics,
+)
+from services.tag_compute import (
+    split_pipe_values,
+    normalize_tag_key,
+    declared_ba_tag_set,
+    is_brand_analytics_messages,
+    clean_brand_analytics_tags,
+    build_tag_statistics_compute,
+)
+from services.message_compute import message_text_column, message_link_column
+from services.perf import perf_block, render_perf_sidebar, reset_perf_events
 
 APP_TITLE = "Платформа дайджестов"
-APP_VERSION = "4.3.1: исправление кириллицы в PDF"
+APP_VERSION = "4.3.5: cached store and performance diagnostics"
 
 ALGORITHM_PROFILE_OPTIONS = {
     "universal": "Универсальный",
@@ -66,92 +85,6 @@ DEFAULT_CHART_LABEL_SETTINGS = {
     "show_donut_legend": False,
 }
 
-
-# -----------------------------------------------------------------------------
-# Performance helpers
-# -----------------------------------------------------------------------------
-
-_store_list_projects = list_projects
-_store_list_periods = list_periods
-_store_load_generated_tables = load_generated_tables
-_store_list_manual = list_manual
-_store_create_project = create_project
-_store_update_project = update_project
-_store_save_processed_tables = save_processed_tables
-_store_update_period_metadata = update_period_metadata
-_store_delete_period = delete_period
-_store_save_manual = save_manual
-_store_delete_manual = delete_manual
-
-
-def clear_platform_caches() -> None:
-    """Clear Streamlit data caches after writes that change project data."""
-    try:
-        st.cache_data.clear()
-    except Exception:
-        pass
-
-
-@st.cache_data(ttl=120, show_spinner=False)
-def list_projects(include_inactive: bool = False) -> pd.DataFrame:  # type: ignore[no-redef]
-    return _store_list_projects(include_inactive=include_inactive)
-
-
-@st.cache_data(ttl=120, show_spinner=False)
-def list_periods(project_id: str, include_inactive: bool = False) -> pd.DataFrame:  # type: ignore[no-redef]
-    return _store_list_periods(project_id, include_inactive=include_inactive)
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def _cached_load_generated_tables(project_id: str, period_ids_tuple: tuple[str, ...]):
-    return _store_load_generated_tables(project_id, list(period_ids_tuple))
-
-
-def load_generated_tables(project_id: str, period_ids: list[str]):  # type: ignore[no-redef]
-    period_ids_tuple = tuple(str(x) for x in (period_ids or []) if str(x).strip())
-    return _cached_load_generated_tables(project_id, period_ids_tuple)
-
-
-@st.cache_data(ttl=120, show_spinner=False)
-def list_manual(project_id: str, table_name: str | None = None) -> pd.DataFrame:  # type: ignore[no-redef]
-    return _store_list_manual(project_id, table_name=table_name)
-
-
-def create_project(*args, **kwargs):  # type: ignore[no-redef]
-    result = _store_create_project(*args, **kwargs)
-    clear_platform_caches()
-    return result
-
-
-def update_project(*args, **kwargs) -> None:  # type: ignore[no-redef]
-    _store_update_project(*args, **kwargs)
-    clear_platform_caches()
-
-
-def save_processed_tables(*args, **kwargs) -> None:  # type: ignore[no-redef]
-    _store_save_processed_tables(*args, **kwargs)
-    clear_platform_caches()
-
-
-def update_period_metadata(*args, **kwargs) -> None:  # type: ignore[no-redef]
-    _store_update_period_metadata(*args, **kwargs)
-    clear_platform_caches()
-
-
-def delete_period(*args, **kwargs):  # type: ignore[no-redef]
-    result = _store_delete_period(*args, **kwargs)
-    clear_platform_caches()
-    return result
-
-
-def save_manual(*args, **kwargs) -> None:  # type: ignore[no-redef]
-    _store_save_manual(*args, **kwargs)
-    clear_platform_caches()
-
-
-def delete_manual(*args, **kwargs) -> None:  # type: ignore[no-redef]
-    _store_delete_manual(*args, **kwargs)
-    clear_platform_caches()
 
 
 def project_topic_profile(project_row: pd.Series | None) -> str:
@@ -371,175 +304,14 @@ def normalize_text(value: Any) -> str:
     return str(value or "").strip()
 
 
-def split_pipe_values(value: Any) -> list[str]:
-    """Split platform pipe-separated tags into clean unique labels."""
-    raw = str(value or "").replace(";", "|").replace(",", "|")
-    result: list[str] = []
-    seen: set[str] = set()
-    for item in raw.split("|"):
-        label = " ".join(str(item or "").split()).strip()
-        if not label:
-            continue
-        key = label.lower().replace("ё", "е")
-        if key not in seen:
-            seen.add(key)
-            result.append(label)
-    return result
-
-
-def numeric_series(df: pd.DataFrame, columns: list[str]) -> pd.Series:
-    """Return a parsed numeric series from the first useful existing column.
-
-    If a processed metric column exists but contains only zeros while a raw
-    alias is also present, try the raw alias before giving up. This helps with
-    older uploaded periods and mixed Brand Analytics exports.
-    """
-    if df is None or df.empty:
-        return pd.Series(dtype=float)
-
-    # Prefer pre-parsed dashboard columns when available. This avoids reparsing
-    # audience/reach/engagement on every rerun and every chart/table render.
-    precomputed_map = {
-        "_audience": {"audience", "Аудитория"},
-        "_reach": {"views", "Просмотры", "Просмотров", "reach", "Охват"},
-        "_engagement": {"engagement", "Вовлечённость", "Вовлеченность", "engagement_count"},
-    }
-    requested = set(columns or [])
-    for pre_col, aliases in precomputed_map.items():
-        if pre_col in df.columns and requested & aliases:
-            return pd.to_numeric(df[pre_col], errors="coerce").fillna(0)
-
-    fallback = pd.Series([0] * len(df), index=df.index, dtype=float)
-
-    for col in columns:
-        if col not in df.columns:
-            continue
-        series = (
-            df[col]
-            .fillna("")
-            .astype(str)
-            .str.replace("\ufeff", "", regex=False)
-            .str.replace("\u00a0", "", regex=False)
-            .str.replace("\u202f", "", regex=False)
-            .str.replace(" ", "", regex=False)
-            .str.replace("\t", "", regex=False)
-            .str.replace(r"[^0-9\-]", "", regex=True)
-            .pipe(pd.to_numeric, errors="coerce")
-            .fillna(0)
-        )
-        # Use the first column with a non-zero value. Keep a zero fallback in
-        # case all aliases are empty or genuinely zero.
-        if float(series.sum()) != 0:
-            return series
-        fallback = series
-
-    return fallback
-
-
-def prepare_dashboard_messages(messages: pd.DataFrame) -> pd.DataFrame:
-    """Add reusable normalized columns for dashboard calculations."""
-    if messages is None or messages.empty:
-        return messages
-    work = messages.copy()
-    if "_audience" not in work.columns:
-        work["_audience"] = numeric_series(work, ["audience", "Аудитория"]).astype(int)
-    if "_reach" not in work.columns:
-        work["_reach"] = numeric_series(work, ["views", "Просмотры", "Просмотров", "reach", "Охват"]).astype(int)
-    if "_engagement" not in work.columns:
-        work["_engagement"] = numeric_series(work, ["engagement", "Вовлечённость", "Вовлеченность", "engagement_count"]).astype(int)
-    if "_sentiment_lower" not in work.columns:
-        work["_sentiment_lower"] = work.get("sentiment", pd.Series([""] * len(work), index=work.index)).fillna("").astype(str).str.lower().str.replace("ё", "е", regex=False)
-    if "_is_negative_bool" not in work.columns:
-        work["_is_negative_bool"] = work["_sentiment_lower"].str.contains("нег|negative|отриц", regex=True, na=False)
-        if "is_negative" in work.columns:
-            work["_is_negative_bool"] = work["_is_negative_bool"] | work["is_negative"].astype(str).str.lower().isin(["true", "1", "yes", "да", "негатив", "negative"])
-    if "_period_id_str" not in work.columns and "period_id" in work.columns:
-        work["_period_id_str"] = work["period_id"].astype(str)
-    return work
-
-
-AUTO_GENERATED_TAGS_TO_HIDE = {
-    "коэффициент", "законы и налоги", "яндекс", "wb такси", "фастен",
-    "приложение и сбои", "яндекс про", "забастовка", "аэропорты",
-    "детские кресла", "карты и навигация",
-    "проблемы, жалобы и негативный опыт", "цены, стоимость и условия",
-    "качество продукта или услуги", "наличие, поставки и логистика",
-    "монтаж, применение и эксплуатация", "документы, сертификаты и требования",
-    "безопасность и пожарные свойства", "безопасность и риски",
-    "экология и энергоэффективность", "конкуренты и сравнение на рынке",
-    "поддержка и клиентский сервис", "общие обсуждения", "прочие обсуждения", "без тега",
-}
-
-
-def normalize_tag_key(value: Any) -> str:
-    return str(value or "").strip().lower().replace("ё", "е")
-
-
-def declared_ba_tag_set(messages: pd.DataFrame) -> set[str]:
-    """Return Brand Analytics tag names declared in source_tag_columns."""
-    if messages is None or messages.empty or "source_tag_columns" not in messages.columns:
-        return set()
-    tags: set[str] = set()
-    for raw in messages["source_tag_columns"].dropna().astype(str).unique().tolist():
-        for item in str(raw or "").replace(";", "|").replace(",", "|").split("|"):
-            label = " ".join(str(item or "").split()).strip()
-            if label:
-                tags.add(normalize_tag_key(label))
-    return tags
-
-
-def is_brand_analytics_messages(messages: pd.DataFrame) -> bool:
-    if messages is None or messages.empty:
-        return False
-    if "source_system" in messages.columns:
-        values = messages["source_system"].fillna("").astype(str).str.lower()
-        if values.eq("brand_analytics").any():
-            return True
-    return bool(declared_ba_tag_set(messages))
-
-
-def clean_brand_analytics_tags(messages: pd.DataFrame) -> pd.DataFrame:
-    """Keep only real Brand Analytics tags from columns after `Обработано`."""
-    if messages is None or messages.empty or "tags" not in messages.columns:
-        return messages
-    if not is_brand_analytics_messages(messages):
-        return messages
-
-    allowed = declared_ba_tag_set(messages)
-    out = messages.copy()
-
-    def filter_tags(value: Any) -> str:
-        cleaned: list[str] = []
-        seen: set[str] = set()
-        for label in split_pipe_values(value):
-            key = normalize_tag_key(label)
-            if not key or key in seen:
-                continue
-            if key in AUTO_GENERATED_TAGS_TO_HIDE:
-                continue
-            if allowed and key not in allowed:
-                continue
-            seen.add(key)
-            cleaned.append(label)
-        return "|".join(cleaned)
-
-    out["tags"] = out["tags"].apply(filter_tags)
-    out["tag_count"] = out["tags"].apply(lambda x: len(split_pipe_values(x)))
-    return out
-
-
-def message_text_column(df: pd.DataFrame) -> str | None:
-    for col in ["text", "text_clean", "message_text", "message_raw", "Сообщение"]:
-        if col in df.columns:
-            return col
+def first_existing_col(df: pd.DataFrame, columns: list[str | None]) -> str | None:
+    if df is None or not isinstance(df, pd.DataFrame):
+        return None
+    for col in columns or []:
+        if col and col in df.columns:
+            return str(col)
     return None
 
-
-def message_link_column(df: pd.DataFrame) -> str | None:
-    for col in ["url", "message_link", "Ссылка"]:
-        if col in df.columns:
-            return col
-    return None
 
 
 def render_overview_statistics(messages: pd.DataFrame) -> None:
@@ -558,50 +330,7 @@ def render_overview_statistics(messages: pd.DataFrame) -> None:
 
 @st.cache_data(show_spinner=False)
 def build_tag_statistics(messages: pd.DataFrame) -> pd.DataFrame:
-    """Build tag-level analytics: messages, total views/reach and engagement."""
-    if messages is None or messages.empty or "tags" not in messages.columns:
-        return pd.DataFrame(columns=["Тег", "Сообщений", "Аудитория", "Охват", "Вовлеченность", "Негатив"])
-
-    work = messages.copy()
-    work["_tag"] = work["tags"].fillna("").astype(str).apply(split_pipe_values)
-    work = work.explode("_tag")
-    work["_tag"] = work["_tag"].fillna("").astype(str).str.strip()
-    work = work[work["_tag"] != ""]
-    if work.empty:
-        return pd.DataFrame(columns=["Тег", "Сообщений", "Аудитория", "Охват", "Вовлеченность", "Негатив"])
-
-    work["_audience"] = numeric_series(work, ["audience", "Аудитория"])
-    work["_reach"] = numeric_series(work, ["views", "Просмотры", "Просмотров", "reach", "Охват"])
-    work["_engagement"] = numeric_series(work, ["engagement", "Вовлечённость", "Вовлеченность", "engagement_count"])
-    if "sentiment" in work.columns:
-        work["_negative"] = work["sentiment"].fillna("").astype(str).str.lower().str.contains("нег", regex=True).astype(int)
-    else:
-        work["_negative"] = 0
-
-    stats = (
-        work.groupby("_tag", as_index=False)
-        .agg(
-            Сообщений=("message_id", "nunique") if "message_id" in work.columns else ("_tag", "size"),
-            Аудитория=("_audience", "sum"),
-            Охват=("_reach", "sum"),
-            Вовлеченность=("_engagement", "sum"),
-            Негатив=("_negative", "sum"),
-        )
-        .rename(columns={"_tag": "Тег"})
-    )
-    for col in ["Сообщений", "Аудитория", "Охват", "Вовлеченность", "Негатив"]:
-        if col in stats.columns:
-            stats[col] = pd.to_numeric(stats[col], errors="coerce").fillna(0).astype(int)
-    stats["Доля негатива"] = (stats["Негатив"] / stats["Сообщений"].replace(0, pd.NA) * 100).fillna(0).round(1)
-    return stats.sort_values(["Сообщений", "Аудитория", "Охват", "Вовлеченность"], ascending=False).reset_index(drop=True)
-
-
-def format_int(value: Any) -> str:
-    try:
-        return f"{int(float(value)):,}".replace(",", " ")
-    except Exception:
-        return "0"
-
+    return build_tag_statistics_compute(messages)
 
 def selected_period_label(periods: pd.DataFrame, period_ids: list[str]) -> str:
     """Human-readable label for the currently selected period set."""
@@ -639,53 +368,6 @@ def selected_period_label(periods: pd.DataFrame, period_ids: list[str]) -> str:
     else:
         name_part = f"{len(subset)} период(а/ов)"
     return f"{name_part} · {date_part}" if date_part else name_part
-
-
-def sentiment_counts(messages: pd.DataFrame) -> dict[str, int]:
-    """Return positive/neutral/negative counts for any project profile."""
-    total = int(len(messages)) if isinstance(messages, pd.DataFrame) else 0
-    if total == 0:
-        return {"positive": 0, "neutral": 0, "negative": 0, "total": 0}
-
-    if "_sentiment_lower" in messages.columns:
-        sentiment = messages["_sentiment_lower"].fillna("").astype(str)
-    else:
-        sentiment = messages.get("sentiment", pd.Series([""] * total, index=messages.index)).fillna("").astype(str).str.lower().str.replace("ё", "е", regex=False)
-    positive_mask = sentiment.str.contains("позит|positive|полож", regex=True, na=False)
-    negative_mask = sentiment.str.contains("нег|negative|отриц", regex=True, na=False)
-    neutral_mask = sentiment.str.contains("нейтр|neutral", regex=True, na=False)
-
-    if "_is_negative_bool" in messages.columns:
-        negative_mask = messages["_is_negative_bool"].astype(bool)
-    elif "is_negative" in messages.columns:
-        negative_mask = negative_mask | messages["is_negative"].astype(str).str.lower().isin(["true", "1", "yes", "да", "негатив", "negative"])
-
-    positive = int(positive_mask.sum())
-    negative = int(negative_mask.sum())
-    neutral_detected = int(neutral_mask.sum())
-    neutral = max(0, total - positive - negative)
-    if neutral_detected and neutral_detected > neutral:
-        neutral = neutral_detected
-        # Keep total stable if imported data has overlapping/dirty sentiment values.
-        overflow = positive + negative + neutral - total
-        if overflow > 0:
-            neutral = max(0, neutral - overflow)
-    return {"positive": positive, "neutral": neutral, "negative": negative, "total": total}
-
-
-def percent_text(count: int, total: int) -> str:
-    return f"{count / total * 100:.0f}%" if total else "0%"
-
-
-def overview_metrics(messages: pd.DataFrame) -> dict[str, Any]:
-    total_messages = int(len(messages)) if isinstance(messages, pd.DataFrame) else 0
-    return {
-        "messages": total_messages,
-        "audience": int(numeric_series(messages, ["audience", "Аудитория"]).sum()) if total_messages else 0,
-        "reach": int(numeric_series(messages, ["views", "Просмотры", "Просмотров", "reach", "Охват"]).sum()) if total_messages else 0,
-        "engagement": int(numeric_series(messages, ["engagement", "Вовлечённость", "Вовлеченность", "engagement_count"]).sum()) if total_messages else 0,
-        "sentiment": sentiment_counts(messages),
-    }
 
 
 def _period_row_label(row: pd.Series, fallback: str = "") -> str:
@@ -1249,12 +931,85 @@ def safe_export_filename(project_name: str, period_label: str, ext: str) -> str:
     return f"{safe[:140] or 'summary'}.{ext}"
 
 
-def summary_export_payload(project_name: str, period_label: str, summary_text: str, metrics: dict[str, Any]) -> dict[str, Any]:
+def export_top_tags(messages: pd.DataFrame | None, limit: int = 5) -> list[dict[str, Any]]:
+    if messages is None or not isinstance(messages, pd.DataFrame) or messages.empty:
+        return []
+    try:
+        stats = build_tag_statistics(messages).head(limit).copy()
+    except Exception:
+        return []
+    result: list[dict[str, Any]] = []
+    for _, row in stats.iterrows():
+        tag = str(row.get("Тег") or "").strip()
+        if not tag:
+            continue
+        result.append({
+            "name": tag,
+            "messages": int(row.get("Сообщений", 0) or 0),
+            "audience": int(row.get("Аудитория", 0) or 0),
+            "reach": int(row.get("Охват", 0) or 0),
+            "engagement": int(row.get("Вовлеченность", 0) or 0),
+        })
+    return result
+
+
+def export_top_events(events: pd.DataFrame | None, limit: int = 5) -> list[dict[str, Any]]:
+    if events is None or not isinstance(events, pd.DataFrame) or events.empty:
+        return []
+    work = events.copy()
+    title_col = first_existing_col(work, ["display_title", "event_title", "title", "Сюжет / инфоповод", "Сюжет"])
+    if title_col is None:
+        return []
+    work["_title"] = work[title_col].fillna("").astype(str).str.strip()
+    # Технические категории не должны попадать в клиентскую инфографику.
+    work = work[(work["_title"] != "") & (~work["_title"].str.lower().isin({"без сюжета", "без_сюжета", "без темы", "прочее"}))]
+    if work.empty:
+        return []
+    count_col = first_existing_col(work, ["message_count", "messages", "Сообщений"])
+    reach_col = first_existing_col(work, ["views", "reach", "Охват", "Просмотры", "Просмотров"])
+    engagement_col = first_existing_col(work, ["engagement", "Вовлеченность", "Вовлечённость"])
+    work["_messages"] = numeric_series(work, [count_col]).astype(int) if count_col else 0
+    work["_reach"] = numeric_series(work, [reach_col]).astype(int) if reach_col else 0
+    work["_engagement"] = numeric_series(work, [engagement_col]).astype(int) if engagement_col else 0
+    work = work.sort_values(["_messages", "_reach", "_engagement"], ascending=False).head(limit)
+    result: list[dict[str, Any]] = []
+    for _, row in work.iterrows():
+        result.append({
+            "name": str(row.get("_title") or "").strip(),
+            "messages": int(row.get("_messages", 0) or 0),
+            "reach": int(row.get("_reach", 0) or 0),
+            "engagement": int(row.get("_engagement", 0) or 0),
+        })
+    return result
+
+
+def summary_highlights(summary_text: str, limit: int = 4) -> list[str]:
+    lines: list[str] = []
+    for raw in str(summary_text or "").replace("\r", "\n").split("\n"):
+        line = raw.strip().strip("•-").strip()
+        if line and line not in lines:
+            lines.append(line)
+        if len(lines) >= limit:
+            break
+    if lines:
+        return lines
+    return ["Саммари пока не заполнено."]
+
+
+def summary_export_payload(
+    project_name: str,
+    period_label: str,
+    summary_text: str,
+    metrics: dict[str, Any],
+    messages: pd.DataFrame | None = None,
+    events_agg: pd.DataFrame | None = None,
+) -> dict[str, Any]:
     sent = metrics.get("sentiment", {}) if isinstance(metrics, dict) else {}
     return {
         "project_name": project_name,
         "period_label": period_label,
         "summary_text": clean_summary_for_export(summary_text),
+        "summary_highlights": summary_highlights(summary_text),
         "messages": int(metrics.get("messages", 0) or 0),
         "audience": int(metrics.get("audience", 0) or 0),
         "reach": int(metrics.get("reach", 0) or 0),
@@ -1263,8 +1018,42 @@ def summary_export_payload(project_name: str, period_label: str, summary_text: s
         "neutral": int(sent.get("neutral", 0) or 0),
         "negative": int(sent.get("negative", 0) or 0),
         "total": int(sent.get("total", 0) or 0),
+        "comparison_sequence": metrics.get("comparison_sequence") or [],
+        "top_tags": export_top_tags(messages, limit=5),
+        "top_events": export_top_events(events_agg, limit=5),
         "created_at": datetime.now().strftime("%d.%m.%Y %H:%M"),
     }
+
+
+def _short_label(value: Any, max_len: int = 34) -> str:
+    text = str(value or "").strip()
+    return text if len(text) <= max_len else text[: max_len - 1].rstrip() + "…"
+
+
+def _metric_delta_for_export(current: Any, previous: Any) -> str:
+    try:
+        cur = float(current or 0)
+        prev = float(previous or 0)
+    except Exception:
+        return ""
+    diff = cur - prev
+    if prev:
+        pct = diff / abs(prev) * 100
+        return f"{diff:+,.0f} / {pct:+.1f}%".replace(",", " ")
+    if diff:
+        return f"{diff:+,.0f}".replace(",", " ")
+    return "0"
+
+
+def _draw_export_card(ax, x: float, y: float, w: float, h: float, title: str, value: str, subtitle: str = "") -> None:
+    import matplotlib.pyplot as plt  # noqa: F401
+    from matplotlib.patches import FancyBboxPatch
+    patch = FancyBboxPatch((x, y), w, h, boxstyle="round,pad=0.012,rounding_size=0.018", linewidth=1, edgecolor="#d9e0ea", facecolor="#f8fafc")
+    ax.add_patch(patch)
+    ax.text(x + 0.022, y + h - 0.035, title, fontsize=9.5, color="#4b5563", va="top", ha="left")
+    ax.text(x + 0.022, y + h / 2 + 0.005, value, fontsize=15, color="#111827", va="center", ha="left", fontweight="bold")
+    if subtitle:
+        ax.text(x + 0.022, y + 0.018, subtitle, fontsize=8.4, color="#6b7280", va="bottom", ha="left")
 
 
 def generate_summary_infographic_png(payload: dict[str, Any]) -> bytes:
@@ -1272,84 +1061,123 @@ def generate_summary_infographic_png(payload: dict[str, Any]) -> bytes:
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
-        from matplotlib.patches import FancyBboxPatch, Rectangle
+        from matplotlib.patches import Rectangle
     except Exception as exc:
         raise RuntimeError("Для инфографики нужен matplotlib>=3.8 в requirements.txt.") from exc
 
     plt.rcParams["font.family"] = "DejaVu Sans"
-    fig = plt.figure(figsize=(8.27, 11.69), dpi=160)
+    fig = plt.figure(figsize=(8.27, 11.69), dpi=170)
     ax = fig.add_axes([0, 0, 1, 1])
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
     ax.axis("off")
     fig.patch.set_facecolor("white")
 
-    def card(x: float, y: float, w: float, h: float, title: str, value: str, subtitle: str = "") -> None:
-        patch = FancyBboxPatch((x, y), w, h, boxstyle="round,pad=0.012,rounding_size=0.02", linewidth=1, edgecolor="#d9e0ea", facecolor="#f7f9fc")
-        ax.add_patch(patch)
-        ax.text(x + 0.02, y + h - 0.035, title, fontsize=10, color="#4b5563", va="top", ha="left")
-        ax.text(x + 0.02, y + h / 2, value, fontsize=18, color="#111827", va="center", ha="left", fontweight="bold")
-        if subtitle:
-            ax.text(x + 0.02, y + 0.02, subtitle, fontsize=8.5, color="#6b7280", va="bottom", ha="left")
-
-    project = str(payload.get("project_name") or "Проект")
-    period = str(payload.get("period_label") or "выбранный период")
+    project = _short_label(payload.get("project_name") or "Проект", 52)
+    period = _short_label(payload.get("period_label") or "выбранный период", 70)
     created = str(payload.get("created_at") or "")
-    summary_lines = [line.strip("•- ").strip() for line in str(payload.get("summary_text") or "").split("\n") if line.strip()]
+    comparison = payload.get("comparison_sequence") or []
 
-    ax.text(0.06, 0.95, project, fontsize=22, fontweight="bold", color="#111827", va="top", ha="left")
-    ax.text(0.06, 0.92, f"Период: {period}", fontsize=11.5, color="#4b5563", va="top", ha="left")
-    ax.text(0.06, 0.902, f"Дата выгрузки: {created}", fontsize=9.5, color="#6b7280", va="top", ha="left")
+    ax.text(0.06, 0.955, project, fontsize=21, fontweight="bold", color="#111827", va="top", ha="left")
+    ax.text(0.06, 0.925, f"Период: {period}", fontsize=10.5, color="#4b5563", va="top", ha="left")
+    ax.text(0.06, 0.905, f"Дата выгрузки: {created}", fontsize=8.8, color="#6b7280", va="top", ha="left")
 
-    card(0.06, 0.79, 0.2, 0.085, "Сообщения", format_int(payload.get("messages", 0)))
-    card(0.285, 0.79, 0.2, 0.085, "Аудитория", format_int(payload.get("audience", 0)))
-    card(0.51, 0.79, 0.2, 0.085, "Охват", format_int(payload.get("reach", 0)))
-    card(0.735, 0.79, 0.2, 0.085, "Вовлеченность", format_int(payload.get("engagement", 0)))
+    # 2×2-сетка метрик: большие числа больше не накладываются.
+    if len(comparison) >= 2:
+        previous, current = comparison[-2], comparison[-1]
+        metric_cards = [
+            ("Сообщения", current.get("messages", 0), _metric_delta_for_export(current.get("messages", 0), previous.get("messages", 0))),
+            ("Аудитория", current.get("audience", 0), _metric_delta_for_export(current.get("audience", 0), previous.get("audience", 0))),
+            ("Охват", current.get("reach", 0), _metric_delta_for_export(current.get("reach", 0), previous.get("reach", 0))),
+            ("Вовлеченность", current.get("engagement", 0), _metric_delta_for_export(current.get("engagement", 0), previous.get("engagement", 0))),
+        ]
+        ax.text(0.06, 0.868, f"Последний период: {_short_label(current.get('label'), 42)}", fontsize=9.2, color="#6b7280", va="top")
+    else:
+        metric_cards = [
+            ("Сообщения", payload.get("messages", 0), ""),
+            ("Аудитория", payload.get("audience", 0), ""),
+            ("Охват", payload.get("reach", 0), ""),
+            ("Вовлеченность", payload.get("engagement", 0), ""),
+        ]
+
+    xs = [0.06, 0.52]
+    ys = [0.775, 0.67]
+    for idx, (title, value, subtitle) in enumerate(metric_cards):
+        _draw_export_card(ax, xs[idx % 2], ys[idx // 2], 0.40, 0.08, title, format_int(value), f"к пред. периоду: {subtitle}" if subtitle else "")
 
     total = max(1, int(payload.get("total", 0) or 0))
     pos = int(payload.get("positive", 0) or 0)
     neu = int(payload.get("neutral", 0) or 0)
     neg = int(payload.get("negative", 0) or 0)
-    values = [pos, neu, neg]
-    labels = ["Позитив", "Нейтрал", "Негатив"]
-    colors = ["#22c55e", "#9ca3af", "#ef4444"]
+    if len(comparison) >= 2:
+        sent = comparison[-1].get("sentiment", {}) or {}
+        total = max(1, int(sent.get("total", 0) or 0))
+        pos = int(sent.get("positive", 0) or 0)
+        neu = int(sent.get("neutral", 0) or 0)
+        neg = int(sent.get("negative", 0) or 0)
 
-    ax.text(0.06, 0.745, "Тональность", fontsize=13, fontweight="bold", color="#111827", va="top")
-    pie_ax = fig.add_axes([0.06, 0.54, 0.28, 0.18])
+    ax.text(0.06, 0.605, "Тональность", fontsize=13, fontweight="bold", color="#111827", va="top")
+    pie_ax = fig.add_axes([0.06, 0.43, 0.24, 0.16])
     pie_ax.axis("equal")
+    values = [max(pos, 0), max(neu, 0), max(neg, 0)]
+    colors = ["#22c55e", "#9ca3af", "#ef4444"]
+    labels = ["Позитив", "Нейтрал", "Негатив"]
     pie_ax.pie(values, colors=colors, startangle=90, counterclock=False, wedgeprops={"width": 0.42, "edgecolor": "white"})
-    pie_ax.text(0, 0.05, format_int(total), ha="center", va="center", fontsize=16, fontweight="bold", color="#111827")
-    pie_ax.text(0, -0.12, "сообщений", ha="center", va="center", fontsize=9, color="#6b7280")
+    pie_ax.text(0, 0.05, format_int(total), ha="center", va="center", fontsize=14, fontweight="bold", color="#111827")
+    pie_ax.text(0, -0.12, "сообщений", ha="center", va="center", fontsize=8.5, color="#6b7280")
     pie_ax.set_xticks([])
     pie_ax.set_yticks([])
 
-    y0 = 0.69
+    y0 = 0.565
     for i, (lab, val, col) in enumerate(zip(labels, values, colors)):
-        yy = y0 - i * 0.055
-        ax.add_patch(Rectangle((0.38, yy - 0.012), 0.018, 0.018, facecolor=col, edgecolor="none"))
-        ax.text(0.405, yy, lab, fontsize=11, color="#111827", va="center", ha="left")
-        ax.text(0.56, yy, format_int(val), fontsize=11, color="#111827", va="center", ha="right", fontweight="bold")
-        ax.text(0.58, yy, percent_text(val, total), fontsize=10, color="#6b7280", va="center", ha="left")
+        yy = y0 - i * 0.044
+        ax.add_patch(Rectangle((0.33, yy - 0.011), 0.016, 0.016, facecolor=col, edgecolor="none"))
+        ax.text(0.355, yy, lab, fontsize=10, color="#111827", va="center", ha="left")
+        ax.text(0.50, yy, format_int(val), fontsize=10, color="#111827", va="center", ha="right", fontweight="bold")
+        ax.text(0.52, yy, percent_text(val, total), fontsize=9, color="#6b7280", va="center", ha="left")
 
-    ax.text(0.06, 0.49, "Саммари периода", fontsize=13, fontweight="bold", color="#111827", va="top")
-    summary_y = 0.46
+    # Топы добавляют аналитическую ценность, а не просто дублируют KPI.
+    top_tags = payload.get("top_tags") or []
+    top_events = payload.get("top_events") or []
+    ax.text(0.06, 0.395, "Топ тегов", fontsize=12.5, fontweight="bold", color="#111827", va="top")
+    y = 0.367
+    if top_tags:
+        for item in top_tags[:5]:
+            ax.text(0.07, y, f"• {_short_label(item.get('name'), 36)}", fontsize=9.2, color="#111827", va="top")
+            ax.text(0.43, y, f"{format_int(item.get('messages', 0))} сообщ.", fontsize=8.8, color="#6b7280", va="top", ha="right")
+            y -= 0.03
+    else:
+        ax.text(0.07, y, "Нет тегов для отображения", fontsize=9.2, color="#6b7280", va="top")
+
+    ax.text(0.52, 0.395, "Топ инфоповодов", fontsize=12.5, fontweight="bold", color="#111827", va="top")
+    y = 0.367
+    if top_events:
+        for item in top_events[:5]:
+            ax.text(0.53, y, f"• {_short_label(item.get('name'), 38)}", fontsize=9.2, color="#111827", va="top")
+            ax.text(0.92, y, f"{format_int(item.get('messages', 0))} сообщ.", fontsize=8.8, color="#6b7280", va="top", ha="right")
+            y -= 0.03
+    else:
+        ax.text(0.53, y, "Нет инфоповодов для отображения", fontsize=9.2, color="#6b7280", va="top")
+
+    ax.text(0.06, 0.215, "Главное", fontsize=12.5, fontweight="bold", color="#111827", va="top")
+    summary_y = 0.188
     line_count = 0
-    for block in summary_lines[:6]:
-        wrapped = textwrap.wrap(block, width=72) or [block]
+    for block in (payload.get("summary_highlights") or [])[:4]:
+        wrapped = textwrap.wrap(str(block), width=90) or [str(block)]
         bullet = True
-        for seg in wrapped:
+        for seg in wrapped[:2]:
             prefix = "• " if bullet else "  "
-            ax.text(0.07, summary_y, prefix + seg, fontsize=10.5, color="#111827", va="top", ha="left")
-            summary_y -= 0.025
+            ax.text(0.07, summary_y, prefix + seg, fontsize=9.4, color="#111827", va="top", ha="left")
+            summary_y -= 0.024
             line_count += 1
             bullet = False
             if line_count >= 8:
                 break
-        summary_y -= 0.008
+        summary_y -= 0.005
         if line_count >= 8:
             break
 
-    ax.text(0.06, 0.05, "Инфографика сформирована автоматически на основе выбранного периода и текущего саммари.", fontsize=9, color="#6b7280", va="bottom", ha="left")
+    ax.text(0.06, 0.045, "Инфографика сформирована автоматически на основе выбранного периода и текущего саммари.", fontsize=8.4, color="#6b7280", va="bottom", ha="left")
 
     out = BytesIO()
     fig.savefig(out, format="png", bbox_inches="tight", facecolor="white")
@@ -1507,36 +1335,40 @@ def generate_summary_pdf(payload: dict[str, Any]) -> bytes:
     title = ParagraphStyle("PlatformTitle", parent=normal, fontName=font_name, fontSize=16, leading=20, spaceAfter=10)
     heading = ParagraphStyle("PlatformHeading", parent=normal, fontName=font_name, fontSize=12, leading=16, spaceBefore=8, spaceAfter=6)
 
-    total = max(1, int(payload.get("total", 0) or 0))
-    story = [
-        Paragraph(f"<b>{xml_escape(str(payload.get('project_name') or 'Проект'))}</b>", title),
-        Paragraph(xml_escape(f"Период: {payload.get('period_label') or 'выбранный период'}"), normal),
-        Paragraph(xml_escape(f"Дата выгрузки: {payload.get('created_at') or ''}"), normal),
-        Spacer(1, 8),
-        Paragraph("<b>Основные метрики</b>", heading),
-        Paragraph(xml_escape(
-            f"Сообщений — {format_int(payload.get('messages', 0))}; "
-            f"аудитория — {format_int(payload.get('audience', 0))}; "
-            f"охват — {format_int(payload.get('reach', 0))}; "
-            f"вовлеченность — {format_int(payload.get('engagement', 0))}."
-        ), normal),
-        Paragraph(xml_escape(
-            f"Тональность: позитив — {percent_text(int(payload.get('positive', 0) or 0), total)}; "
-            f"нейтрал — {percent_text(int(payload.get('neutral', 0) or 0), total)}; "
-            f"негатив — {percent_text(int(payload.get('negative', 0) or 0), total)}."
-        ), normal),
-        Spacer(1, 8),
-    ]
-
+    story = []
+    infographic_added = False
     try:
         infographic_png = generate_summary_infographic_png(payload)
         infographic_io = BytesIO(infographic_png)
         infographic_io.seek(0)
-        story.append(Paragraph("<b>Инфографика</b>", heading))
-        story.append(Image(infographic_io, width=17.0 * cm, height=24.0 * cm))
+        # Инфографика теперь первая страница PDF, без дублирующей текстовой страницы.
+        story.append(Image(infographic_io, width=18.0 * cm, height=25.4 * cm))
         story.append(PageBreak())
+        infographic_added = True
     except Exception:
         pass
+
+    total = max(1, int(payload.get("total", 0) or 0))
+    if not infographic_added:
+        story.extend([
+            Paragraph(f"<b>{xml_escape(str(payload.get('project_name') or 'Проект'))}</b>", title),
+            Paragraph(xml_escape(f"Период: {payload.get('period_label') or 'выбранный период'}"), normal),
+            Paragraph(xml_escape(f"Дата выгрузки: {payload.get('created_at') or ''}"), normal),
+            Spacer(1, 8),
+            Paragraph("<b>Основные метрики</b>", heading),
+            Paragraph(xml_escape(
+                f"Сообщений — {format_int(payload.get('messages', 0))}; "
+                f"аудитория — {format_int(payload.get('audience', 0))}; "
+                f"охват — {format_int(payload.get('reach', 0))}; "
+                f"вовлеченность — {format_int(payload.get('engagement', 0))}."
+            ), normal),
+            Paragraph(xml_escape(
+                f"Тональность: позитив — {percent_text(int(payload.get('positive', 0) or 0), total)}; "
+                f"нейтрал — {percent_text(int(payload.get('neutral', 0) or 0), total)}; "
+                f"негатив — {percent_text(int(payload.get('negative', 0) or 0), total)}."
+            ), normal),
+            Spacer(1, 8),
+        ])
 
     story.append(Paragraph("<b>Саммари периода</b>", heading))
     for block in str(payload.get("summary_text") or "").split("\n"):
@@ -1547,9 +1379,18 @@ def generate_summary_pdf(payload: dict[str, Any]) -> bytes:
     return out.getvalue()
 
 
-def render_summary_export_buttons(project_name: str, period_label: str, summary_text: str, metrics: dict[str, Any], *, key_prefix: str) -> None:
-    payload = summary_export_payload(project_name, period_label, summary_text, metrics)
-    c1, c2 = st.columns(2)
+def render_summary_export_buttons(
+    project_name: str,
+    period_label: str,
+    summary_text: str,
+    metrics: dict[str, Any],
+    *,
+    key_prefix: str,
+    messages: pd.DataFrame | None = None,
+    events_agg: pd.DataFrame | None = None,
+) -> None:
+    payload = summary_export_payload(project_name, period_label, summary_text, metrics, messages=messages, events_agg=events_agg)
+    c1, c2, c3 = st.columns(3)
     with c1:
         try:
             st.download_button(
@@ -1571,6 +1412,18 @@ def render_summary_export_buttons(project_name: str, period_label: str, summary_
                 mime="application/pdf",
                 use_container_width=True,
                 key=f"{key_prefix}_pdf",
+            )
+        except Exception as exc:
+            st.warning(str(exc))
+    with c3:
+        try:
+            st.download_button(
+                "Скачать инфографику PNG",
+                data=generate_summary_infographic_png(payload),
+                file_name=safe_export_filename(project_name, period_label, "png"),
+                mime="image/png",
+                use_container_width=True,
+                key=f"{key_prefix}_png",
             )
         except Exception as exc:
             st.warning(str(exc))
@@ -1931,7 +1784,7 @@ def render_upload_page(project_id: str, role: str, work_dir: str) -> None:
             replace=True,
         )
     st.success("Период сохранен в платформенной базе.")
-    st.cache_data.clear()
+    clear_platform_caches(project_id)
 
 
 def render_period_history(project_id: str, role: str) -> None:
@@ -2024,7 +1877,7 @@ def render_period_history(project_id: str, role: str) -> None:
                     st.warning("Физическое удаление не завершилось, поэтому период скрыт из интерфейса. Для полной очистки можно повторить удаление позже или выполнить очистку в Supabase.")
                 else:
                     st.success(f"Выгрузка удалена. Удалено строк данных: {table_count}. Удалено связанных ручных правок: {manual_count}.")
-                st.cache_data.clear()
+                clear_platform_caches(project_id)
                 st.rerun()
 
 @st.cache_data(show_spinner=False)
@@ -2491,8 +2344,8 @@ def render_period_summary(
     period_label = str(metrics.get("period_label") or selected_period_label(periods, period_ids))
 
     with st.expander("Выгрузить саммари", expanded=False):
-        st.caption("В файл попадут название проекта, период, основные метрики, тональность и текст саммари.")
-        render_summary_export_buttons(project_name, period_label, summary_text, metrics, key_prefix=f"summary_export_{abs(hash(key))}")
+        st.caption("Можно скачать Word, PDF или отдельную PNG-инфографику. В инфографику попадут метрики, тональность, топ-теги, топ-инфоповоды и ключевые тезисы саммари.")
+        render_summary_export_buttons(project_name, period_label, summary_text, metrics, key_prefix=f"summary_export_{abs(hash(key))}", messages=messages, events_agg=events_agg)
 
     if role_rank(role) >= role_rank("editor"):
         with st.expander("Редактировать саммари", expanded=False):
@@ -3026,6 +2879,7 @@ def render_taxi_dashboard(
 
 def main() -> None:
     args = parse_args()
+    reset_perf_events()
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     st.title(APP_TITLE)
     st.caption(APP_VERSION)
@@ -3070,6 +2924,8 @@ def main() -> None:
     chart_label_settings = chart_label_settings_from_project_settings(current_project_settings)
     st.sidebar.markdown(f"**Текущий проект:**  \n{project_name}")
     st.sidebar.caption(f"Профиль: {ALGORITHM_PROFILE_OPTIONS.get(project_profile, project_profile)}")
+    if role == "admin":
+        st.sidebar.checkbox("Диагностика скорости", value=False, key="platform_perf_debug")
 
     if page == "Загрузка файла":
         render_upload_page(project_id, role, args.work_dir)
@@ -3084,10 +2940,15 @@ def main() -> None:
         return
 
     with st.spinner("Загружаю данные проекта..."):
-        events, discussions, messages, discussion_messages, event_discussions = load_generated_tables(project_id, selected_period_ids)
-    enriched_messages = enrich_messages(messages, event_discussions, discussion_messages, events)
-    events, enriched_messages, manual_state = apply_manual_overrides(project_id, events, enriched_messages)
-    enriched_messages = prepare_dashboard_messages(enriched_messages)
+        with perf_block("dashboard.load_generated_tables", project_id=project_id, periods=len(selected_period_ids)):
+            events, discussions, messages, discussion_messages, event_discussions = load_generated_tables(project_id, selected_period_ids)
+    with perf_block("dashboard.enrich_messages", project_id=project_id):
+        enriched_messages = enrich_messages(messages, event_discussions, discussion_messages, events)
+    with perf_block("dashboard.apply_manual_overrides", project_id=project_id):
+        events, enriched_messages, manual_state = apply_manual_overrides(project_id, events, enriched_messages)
+    with perf_block("dashboard.prepare_messages", project_id=project_id):
+        enriched_messages = prepare_dashboard_messages(enriched_messages)
+    render_perf_sidebar()
 
     if is_taxi_project_profile(project_profile):
         render_taxi_dashboard(
