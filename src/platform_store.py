@@ -764,6 +764,14 @@ def content_type_for_filename(filename: str) -> str:
         return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     if suffix == ".xls":
         return "application/vnd.ms-excel"
+    if suffix in {".png"}:
+        return "image/png"
+    if suffix in {".jpg", ".jpeg"}:
+        return "image/jpeg"
+    if suffix in {".webp"}:
+        return "image/webp"
+    if suffix in {".svg"}:
+        return "image/svg+xml"
     return "application/octet-stream"
 
 
@@ -799,3 +807,64 @@ def save_uploaded_file_to_storage(project_id: str, period_id: str, filename: str
     except TypeError:
         client.storage.from_(bucket).upload(path, file_bytes)
     return path
+
+
+
+def storage_public_url(storage_path: str) -> str:
+    """Return a public URL for a Storage path when the bucket is public.
+
+    Private buckets may still return a URL that is not directly accessible; report
+    generation uses `download_storage_file` when a storage path is available.
+    """
+    storage_path = str(storage_path or "").strip()
+    if not storage_path:
+        return ""
+    try:
+        client = get_supabase_client()
+        url = client.storage.from_(storage_bucket_name()).get_public_url(storage_path)
+        return str(url or "")
+    except Exception:
+        return ""
+
+
+def download_storage_file(storage_path: str) -> bytes:
+    storage_path = str(storage_path or "").strip()
+    if not storage_path:
+        return b""
+    client = get_supabase_client()
+    data = client.storage.from_(storage_bucket_name()).download(storage_path)
+    if isinstance(data, bytes):
+        return data
+    if isinstance(data, bytearray):
+        return bytes(data)
+    return bytes(data or b"")
+
+
+def delete_storage_file(storage_path: str) -> bool:
+    return delete_uploaded_file_from_storage(storage_path)
+
+
+def save_report_logo_to_storage(project_id: str, filename: str, file_bytes: bytes) -> dict[str, str]:
+    """Save a project report logo and return storage metadata.
+
+    Uses the same configured Storage bucket as raw uploads. The file is stored
+    under `_assets/logos/{project_id}/...` so it is isolated from period files.
+    """
+    client = get_supabase_client()
+    bucket = storage_bucket_name()
+    safe_project = ascii_storage_component(project_id, "project")[:80]
+    safe_name = safe_storage_filename(filename)
+    digest = hashlib.md5(file_bytes or b"").hexdigest()[:10]
+    suffix = Path(filename or "").suffix.lower() or ".png"
+    path = f"_assets/logos/{safe_project}/{digest}_{safe_name}"
+    try:
+        client.storage.from_(bucket).upload(path, file_bytes, {"content-type": content_type_for_filename(filename), "upsert": "true"})
+    except TypeError:
+        client.storage.from_(bucket).upload(path, file_bytes)
+    return {
+        "logo_storage_path": path,
+        "logo_url": storage_public_url(path),
+        "logo_filename": safe_name,
+        "logo_mime_type": content_type_for_filename(filename),
+        "logo_ext": suffix,
+    }

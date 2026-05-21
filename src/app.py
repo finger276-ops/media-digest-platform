@@ -31,6 +31,9 @@ from services.cached_store import (
     delete_period,
     delete_project,
     save_uploaded_file_to_storage,
+    save_report_logo_to_storage,
+    download_storage_file,
+    delete_storage_file,
     get_manual,
     list_manual,
     save_manual,
@@ -58,7 +61,7 @@ from services.message_compute import message_text_column, message_link_column
 from services.perf import perf_block, render_perf_sidebar, reset_perf_events
 
 APP_TITLE = "Платформа дайджестов"
-APP_VERSION = "4.5.1: client view init hotfix"
+APP_VERSION = "4.5.2: report logo upload"
 
 ALGORITHM_PROFILE_OPTIONS = {
     "universal": "Универсальный",
@@ -100,6 +103,9 @@ DEFAULT_REPORT_BRANDING = {
     "background_color": "#ffffff",
     "footer_text": "",
     "logo_url": "",
+    "logo_storage_path": "",
+    "logo_filename": "",
+    "logo_mime_type": "",
 }
 
 COMPARISON_CHART_BLOCKS = [
@@ -177,7 +183,7 @@ def report_branding_from_project_settings(settings: dict[str, Any] | None, *, pr
     if not isinstance(raw, dict):
         raw = {}
     result = dict(DEFAULT_REPORT_BRANDING)
-    result.update({k: str(raw.get(k) or result.get(k) or "").strip() for k in ["client_name", "report_title", "footer_text", "logo_url"]})
+    result.update({k: str(raw.get(k) or result.get(k) or "").strip() for k in ["client_name", "report_title", "footer_text", "logo_url", "logo_storage_path", "logo_filename", "logo_mime_type"]})
     result["accent_color"] = _valid_hex_color(raw.get("accent_color"), result["accent_color"])
     result["background_color"] = _valid_hex_color(raw.get("background_color"), result["background_color"])
     if not result.get("client_name"):
@@ -1168,6 +1174,39 @@ def summary_highlights(summary_text: str, limit: int = 4) -> list[str]:
     return ["Саммари пока не заполнено."]
 
 
+def _load_report_logo_bytes(branding: dict[str, Any] | None) -> bytes:
+    """Load logo bytes from Storage path or, as fallback, from public URL."""
+    branding = branding or {}
+    storage_path = str(branding.get("logo_storage_path") or "").strip()
+    if storage_path:
+        try:
+            return download_storage_file(storage_path)
+        except Exception:
+            pass
+    url = str(branding.get("logo_url") or "").strip()
+    if url.startswith(("http://", "https://")):
+        try:
+            from urllib.request import urlopen
+
+            with urlopen(url, timeout=6) as response:  # nosec - user-provided report asset URL
+                return response.read()
+        except Exception:
+            return b""
+    return b""
+
+
+def _logo_image_from_payload(payload: dict[str, Any]):
+    logo_bytes = payload.get("logo_bytes") or b""
+    if not logo_bytes:
+        return None
+    try:
+        from PIL import Image as PILImage
+
+        return PILImage.open(BytesIO(logo_bytes)).convert("RGBA")
+    except Exception:
+        return None
+
+
 def summary_export_payload(
     project_name: str,
     period_label: str,
@@ -1190,6 +1229,10 @@ def summary_export_payload(
         "background_color": branding.get("background_color") or "#ffffff",
         "footer_text": branding.get("footer_text") or "",
         "logo_url": branding.get("logo_url") or "",
+        "logo_storage_path": branding.get("logo_storage_path") or "",
+        "logo_filename": branding.get("logo_filename") or "",
+        "logo_mime_type": branding.get("logo_mime_type") or "",
+        "logo_bytes": _load_report_logo_bytes(branding),
         "report_template": report_template,
         "report_template_label": REPORT_TEMPLATE_OPTIONS.get(report_template, report_template),
         "period_label": period_label,
@@ -1309,6 +1352,16 @@ def generate_summary_infographic_png(payload: dict[str, Any]) -> bytes:
     ax.text(0.060, 0.935, project, fontsize=19, fontweight="bold", color="white", va="top", ha="left")
     ax.text(0.060, 0.904, f"{template_label} · {period}".strip(" ·"), fontsize=8.6, color="#e5e7eb", va="top", ha="left")
     ax.text(0.935, 0.965, created, fontsize=8.0, color="#e5e7eb", va="top", ha="right")
+
+    logo_img = _logo_image_from_payload(payload)
+    if logo_img is not None:
+        from matplotlib.patches import FancyBboxPatch
+
+        box = FancyBboxPatch((0.785, 0.902), 0.150, 0.055, boxstyle="round,pad=0.006,rounding_size=0.010", linewidth=0, facecolor="white", alpha=0.94)
+        ax.add_patch(box)
+        logo_ax = fig.add_axes([0.795, 0.910, 0.130, 0.040])
+        logo_ax.imshow(logo_img)
+        logo_ax.axis("off")
 
     # Metrics: two rows, enough height for large numbers and deltas.
     if len(comparison) >= 2:
@@ -2374,10 +2427,32 @@ def render_project_manager(projects: pd.DataFrame) -> None:
                     help="Например: подготовлено агентством / внутренний аналитический отчет.",
                 )
                 report_logo_url = st.text_input(
-                    "URL логотипа (резерв под следующий этап)",
+                    "URL логотипа",
                     value=str(current_branding.get("logo_url") or ""),
                     key=f"report_logo_url_{project_id}",
-                    help="Поле сохраняется в настройках проекта. Визуальная вставка логотипа будет подключена отдельным этапом.",
+                    help="Можно указать публичную ссылку на логотип или загрузить файл ниже. Для стабильной выгрузки лучше использовать загрузку файла.",
+                )
+                current_logo_path = str(current_branding.get("logo_storage_path") or "").strip()
+                if current_logo_path or report_logo_url:
+                    st.caption(f"Текущий логотип: {current_branding.get('logo_filename') or report_logo_url or current_logo_path}")
+                    try:
+                        if current_logo_path:
+                            st.image(download_storage_file(current_logo_path), width=160)
+                        elif report_logo_url:
+                            st.image(report_logo_url, width=160)
+                    except Exception:
+                        st.caption("Предпросмотр логотипа недоступен, но ссылка/путь сохранены в настройках.")
+                report_logo_file = st.file_uploader(
+                    "Загрузить / заменить логотип",
+                    type=["png", "jpg", "jpeg", "webp"],
+                    key=f"report_logo_file_{project_id}",
+                    help="Рекомендуемый формат — PNG с прозрачным фоном, ширина 600–1200 px, вес до 1 МБ.",
+                )
+                remove_report_logo = st.checkbox(
+                    "Удалить сохраненный логотип",
+                    value=False,
+                    key=f"remove_report_logo_{project_id}",
+                    help="Удалит файл логотипа из Storage и очистит настройки логотипа после сохранения проекта.",
                 )
                 st.caption("Брендирование применяется к Word/PDF/PNG-выгрузкам саммари и клиентских отчетов.")
 
@@ -2431,13 +2506,46 @@ def render_project_manager(projects: pd.DataFrame) -> None:
                     "position": chart_position,
                     "show_donut_legend": bool(show_donut_legend),
                 }
+                logo_storage_path = str(current_branding.get("logo_storage_path") or "").strip()
+                logo_filename = str(current_branding.get("logo_filename") or "").strip()
+                logo_mime_type = str(current_branding.get("logo_mime_type") or "").strip()
+                logo_url_value = str(report_logo_url or "").strip()
+
+                if remove_report_logo:
+                    if logo_storage_path:
+                        delete_storage_file(logo_storage_path)
+                    logo_storage_path = ""
+                    logo_filename = ""
+                    logo_mime_type = ""
+                    logo_url_value = ""
+
+                if report_logo_file is not None:
+                    logo_bytes = report_logo_file.getvalue()
+                    if len(logo_bytes) > 2 * 1024 * 1024:
+                        st.error("Логотип слишком большой. Загрузите файл до 2 МБ.")
+                        st.stop()
+                    if logo_storage_path:
+                        delete_storage_file(logo_storage_path)
+                    try:
+                        logo_meta = save_report_logo_to_storage(project_id, report_logo_file.name, logo_bytes)
+                        logo_storage_path = str(logo_meta.get("logo_storage_path") or "")
+                        logo_url_value = str(logo_meta.get("logo_url") or logo_url_value or "")
+                        logo_filename = str(logo_meta.get("logo_filename") or report_logo_file.name)
+                        logo_mime_type = str(logo_meta.get("logo_mime_type") or report_logo_file.type or "")
+                    except Exception as exc:
+                        st.error(f"Не удалось загрузить логотип в Storage: {exc}")
+                        st.stop()
+
                 updated_settings["report_branding"] = {
                     "client_name": report_client_name,
                     "report_title": report_title,
                     "accent_color": report_accent_color,
                     "background_color": report_background_color,
                     "footer_text": report_footer_text,
-                    "logo_url": report_logo_url,
+                    "logo_url": logo_url_value,
+                    "logo_storage_path": logo_storage_path,
+                    "logo_filename": logo_filename,
+                    "logo_mime_type": logo_mime_type,
                 }
                 updated_settings["dashboard_view_settings"] = {
                     "default_view_mode": default_view_mode,

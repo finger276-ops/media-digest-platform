@@ -16,6 +16,10 @@ from services.perf import perf_block
 supabase_configured = store.supabase_configured
 make_period_id = store.make_period_id
 save_uploaded_file_to_storage = store.save_uploaded_file_to_storage
+save_report_logo_to_storage = store.save_report_logo_to_storage
+download_storage_file = store.download_storage_file
+delete_storage_file = store.delete_storage_file
+storage_public_url = store.storage_public_url
 
 
 def _session_versions() -> dict[str, int]:
