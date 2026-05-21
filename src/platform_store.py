@@ -635,6 +635,83 @@ def delete_period(
 
 
 
+def delete_project(project_id: str, *, delete_storage: bool = True) -> dict[str, Any]:
+    """Permanently delete a project and its related platform data.
+
+    The schema uses ON DELETE CASCADE, but we still remove periods through
+    delete_period() first so large platform_table_rows chunks are deleted in
+    safe batches and raw uploaded files can be removed from Storage.
+    """
+    client = get_supabase_client()
+    project_id = str(project_id or "").strip()
+    if not project_id:
+        raise ValueError("project_id is required")
+
+    periods = list_periods(project_id, include_inactive=True)
+    period_results: list[dict[str, Any]] = []
+    table_rows_deleted = 0
+    manual_rows_deleted = 0
+    storage_deleted = 0
+    warnings: list[str] = []
+
+    if isinstance(periods, pd.DataFrame) and not periods.empty and "period_id" in periods.columns:
+        for period_id in periods["period_id"].fillna("").astype(str).tolist():
+            if not period_id:
+                continue
+            try:
+                result = delete_period(
+                    project_id,
+                    period_id,
+                    hard=True,
+                    delete_storage=delete_storage,
+                    cleanup_manual=True,
+                )
+                period_results.append({"period_id": period_id, **(result or {})})
+                table_rows_deleted += int((result or {}).get("table_rows_deleted", 0) or 0)
+                manual_rows_deleted += int((result or {}).get("manual_rows_deleted", 0) or 0)
+                storage_deleted += 1 if bool((result or {}).get("storage_deleted", False)) else 0
+                warnings.extend([str(x) for x in (result or {}).get("warnings", []) if str(x).strip()])
+            except Exception as exc:
+                warnings.append(f"Период {period_id} не удалось удалить полностью: {_api_error_message(exc)}")
+
+    # Final cleanup for rows that are not tied to a specific period or survived fallback mode.
+    cleanup_counts: dict[str, int | None] = {
+        "manual_rows": None,
+        "members": None,
+        "periods": None,
+        "project": None,
+    }
+    for table_name, label in [
+        ("platform_manual_rows", "manual_rows"),
+        ("platform_project_members", "members"),
+        ("platform_periods", "periods"),
+    ]:
+        try:
+            response = client.table(table_name).delete().eq("project_id", project_id).execute()
+            data = response.data or []
+            cleanup_counts[label] = len(data) if isinstance(data, list) else None
+        except Exception as exc:
+            warnings.append(f"Не удалось очистить {table_name}: {_api_error_message(exc)}")
+
+    try:
+        response = client.table("platform_projects").delete().eq("project_id", project_id).execute()
+        data = response.data or []
+        cleanup_counts["project"] = len(data) if isinstance(data, list) else None
+    except Exception as exc:
+        raise RuntimeError(f"Не удалось удалить проект: {_api_error_message(exc)}") from exc
+
+    return {
+        "project_id": project_id,
+        "periods_deleted": len(period_results),
+        "period_results": period_results,
+        "table_rows_deleted": table_rows_deleted,
+        "manual_rows_deleted": manual_rows_deleted,
+        "storage_files_deleted": storage_deleted,
+        "cleanup_counts": cleanup_counts,
+        "warnings": warnings,
+    }
+
+
 def list_manual(project_id: str, table_name: str | None = None) -> pd.DataFrame:
     filters: dict[str, Any] = {"project_id": project_id}
     if table_name:

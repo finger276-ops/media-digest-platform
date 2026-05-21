@@ -166,6 +166,14 @@ def delete_period(project_id: str, period_id: str, **kwargs):
     return result
 
 
+def delete_project(project_id: str, **kwargs):
+    with perf_block("store.delete_project", project_id=project_id):
+        result = store.delete_project(project_id, **kwargs)
+    clear_platform_caches(project_id)
+    clear_platform_caches(None)
+    return result
+
+
 def save_manual(project_id: str, table_name: str, row_key: str, payload: dict[str, Any]) -> None:
     with perf_block("store.save_manual", project_id=project_id, table_name=table_name):
         store.save_manual(project_id, table_name, row_key, payload)

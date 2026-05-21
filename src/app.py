@@ -29,6 +29,7 @@ from services.cached_store import (
     load_generated_tables,
     update_period_metadata,
     delete_period,
+    delete_project,
     save_uploaded_file_to_storage,
     get_manual,
     list_manual,
@@ -57,7 +58,7 @@ from services.message_compute import message_text_column, message_link_column
 from services.perf import perf_block, render_perf_sidebar, reset_perf_events
 
 APP_TITLE = "Платформа дайджестов"
-APP_VERSION = "4.4.9: client mode and saved dashboard views"
+APP_VERSION = "4.5.0: project deletion"
 
 ALGORITHM_PROFILE_OPTIONS = {
     "universal": "Универсальный",
@@ -2456,6 +2457,44 @@ def render_project_manager(projects: pd.DataFrame) -> None:
                 )
                 st.success("Проект обновлен.")
                 st.rerun()
+
+            with st.expander("Опасная зона: удалить проект", expanded=False):
+                st.warning(
+                    "Удаление проекта необратимо: будут удалены проект, периоды, обработанные строки, "
+                    "ручные правки и доступы. Другие проекты не затрагиваются."
+                )
+                delete_storage_files = st.checkbox(
+                    "Удалить исходные файлы выгрузок из Storage, если они были сохранены",
+                    value=True,
+                    key=f"delete_project_storage_{project_id}",
+                )
+                confirm_delete_project = st.checkbox(
+                    "Я понимаю, что проект будет удален без восстановления",
+                    value=False,
+                    key=f"confirm_delete_project_{project_id}",
+                )
+                delete_disabled = not confirm_delete_project
+                if st.button(
+                    "Удалить проект",
+                    type="secondary",
+                    disabled=delete_disabled,
+                    key=f"delete_project_{project_id}",
+                ):
+                    try:
+                        result = delete_project(project_id, delete_storage=delete_storage_files)
+                        st.success(
+                            "Проект удален: "
+                            f"периодов — {result.get('periods_deleted', 0)}, "
+                            f"строк данных — {format_int(result.get('table_rows_deleted', 0))}, "
+                            f"ручных правок — {format_int(result.get('manual_rows_deleted', 0))}."
+                        )
+                        warnings = result.get("warnings") or []
+                        for warning in warnings:
+                            st.warning(str(warning))
+                        st.rerun()
+                    except Exception as exc:
+                        st.error("Не удалось удалить проект.")
+                        st.exception(exc)
 
 
 def render_period_selector(project_id: str) -> tuple[list[str], pd.DataFrame]:
