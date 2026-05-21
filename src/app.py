@@ -1140,16 +1140,45 @@ def _metric_delta_for_export(current: Any, previous: Any) -> str:
     return "0"
 
 
+def _adaptive_font_size(value: str, *, base: int = 15, min_size: int = 10) -> int:
+    """Keep large metric values readable inside report cards."""
+    length = len(str(value or ""))
+    if length > 15:
+        return max(min_size, base - 5)
+    if length > 12:
+        return max(min_size, base - 4)
+    if length > 9:
+        return max(min_size, base - 2)
+    return base
+
+
 def _draw_export_card(ax, x: float, y: float, w: float, h: float, title: str, value: str, subtitle: str = "", *, accent_color: str = "#2563eb") -> None:
-    import matplotlib.pyplot as plt  # noqa: F401
     from matplotlib.patches import FancyBboxPatch
-    patch = FancyBboxPatch((x, y), w, h, boxstyle="round,pad=0.012,rounding_size=0.018", linewidth=1, edgecolor="#d9e0ea", facecolor="#f8fafc")
+
+    patch = FancyBboxPatch(
+        (x, y),
+        w,
+        h,
+        boxstyle="round,pad=0.014,rounding_size=0.018",
+        linewidth=0.9,
+        edgecolor="#d9e0ea",
+        facecolor="#f8fafc",
+    )
     ax.add_patch(patch)
-    ax.plot([x + 0.015, x + 0.015], [y + 0.018, y + h - 0.018], color=accent_color, linewidth=2.4)
-    ax.text(x + 0.032, y + h - 0.035, title, fontsize=9.5, color="#4b5563", va="top", ha="left")
-    ax.text(x + 0.032, y + h / 2 + 0.005, value, fontsize=15, color="#111827", va="center", ha="left", fontweight="bold")
+    ax.plot([x + 0.016, x + 0.016], [y + 0.022, y + h - 0.022], color=accent_color, linewidth=2.2)
+    ax.text(x + 0.040, y + h - 0.026, title, fontsize=8.8, color="#4b5563", va="top", ha="left")
+    ax.text(
+        x + 0.040,
+        y + h * 0.50,
+        value,
+        fontsize=_adaptive_font_size(value, base=15, min_size=10),
+        color="#111827",
+        va="center",
+        ha="left",
+        fontweight="bold",
+    )
     if subtitle:
-        ax.text(x + 0.032, y + 0.018, subtitle, fontsize=8.4, color="#6b7280", va="bottom", ha="left")
+        ax.text(x + 0.040, y + 0.018, subtitle, fontsize=7.4, color="#6b7280", va="bottom", ha="left")
 
 
 def generate_summary_infographic_png(payload: dict[str, Any]) -> bytes:
@@ -1161,30 +1190,37 @@ def generate_summary_infographic_png(payload: dict[str, Any]) -> bytes:
     except Exception as exc:
         raise RuntimeError("Для инфографики нужен matplotlib>=3.8 в requirements.txt.") from exc
 
-    plt.rcParams["font.family"] = "DejaVu Sans"
+    plt.rcParams.update({
+        "font.family": "DejaVu Sans",
+        "font.size": 9,
+        "axes.unicode_minus": False,
+    })
     fig = plt.figure(figsize=(8.27, 11.69), dpi=170)
     ax = fig.add_axes([0, 0, 1, 1])
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
     ax.axis("off")
+
     background = _valid_hex_color(payload.get("background_color"), "#ffffff")
     accent = _valid_hex_color(payload.get("accent_color"), "#2563eb")
     fig.patch.set_facecolor(background)
+    ax.add_patch(Rectangle((0, 0), 1, 1, facecolor=background, edgecolor="none"))
 
-    project = _short_label(payload.get("client_name") or payload.get("project_name") or "Проект", 52)
-    report_title = _short_label(payload.get("report_title") or "Дайджест упоминаний", 52)
-    template_label = str(payload.get("report_template_label") or "")
-    period = _short_label(payload.get("period_label") or "выбранный период", 70)
+    project = _short_label(payload.get("client_name") or payload.get("project_name") or "Проект", 42)
+    report_title = _short_label(payload.get("report_title") or "Дайджест упоминаний", 44)
+    template_label = _short_label(payload.get("report_template_label") or "", 34)
+    period = _short_label(payload.get("period_label") or "выбранный период", 56)
     created = str(payload.get("created_at") or "")
     comparison = payload.get("comparison_sequence") or []
 
-    ax.add_patch(Rectangle((0, 0.895), 1, 0.105, facecolor=accent, edgecolor="none", alpha=0.95))
-    ax.text(0.06, 0.972, report_title, fontsize=13, fontweight="bold", color="white", va="top", ha="left")
-    ax.text(0.06, 0.945, project, fontsize=21, fontweight="bold", color="white", va="top", ha="left")
-    ax.text(0.06, 0.918, f"{template_label} · {period}", fontsize=9.4, color="#e5e7eb", va="top", ha="left")
-    ax.text(0.78, 0.972, created, fontsize=8.8, color="#e5e7eb", va="top", ha="left")
+    # Header
+    ax.add_patch(Rectangle((0, 0.885), 1, 0.115, facecolor=accent, edgecolor="none", alpha=0.96))
+    ax.text(0.060, 0.965, report_title, fontsize=11.5, fontweight="bold", color="white", va="top", ha="left")
+    ax.text(0.060, 0.935, project, fontsize=19, fontweight="bold", color="white", va="top", ha="left")
+    ax.text(0.060, 0.904, f"{template_label} · {period}".strip(" ·"), fontsize=8.6, color="#e5e7eb", va="top", ha="left")
+    ax.text(0.935, 0.965, created, fontsize=8.0, color="#e5e7eb", va="top", ha="right")
 
-    # 2×2-сетка метрик: большие числа больше не накладываются.
+    # Metrics: two rows, enough height for large numbers and deltas.
     if len(comparison) >= 2:
         previous, current = comparison[-2], comparison[-1]
         metric_cards = [
@@ -1193,7 +1229,7 @@ def generate_summary_infographic_png(payload: dict[str, Any]) -> bytes:
             ("Охват", current.get("reach", 0), _metric_delta_for_export(current.get("reach", 0), previous.get("reach", 0))),
             ("Вовлеченность", current.get("engagement", 0), _metric_delta_for_export(current.get("engagement", 0), previous.get("engagement", 0))),
         ]
-        ax.text(0.06, 0.868, f"Последний период: {_short_label(current.get('label'), 42)}", fontsize=9.2, color="#6b7280", va="top")
+        ax.text(0.060, 0.862, f"Последний период: {_short_label(current.get('label'), 48)}", fontsize=8.2, color="#6b7280", va="top", ha="left")
     else:
         metric_cards = [
             ("Сообщения", payload.get("messages", 0), ""),
@@ -1202,11 +1238,22 @@ def generate_summary_infographic_png(payload: dict[str, Any]) -> bytes:
             ("Вовлеченность", payload.get("engagement", 0), ""),
         ]
 
-    xs = [0.06, 0.52]
-    ys = [0.775, 0.67]
+    xs = [0.060, 0.525]
+    ys = [0.755, 0.635]
     for idx, (title, value, subtitle) in enumerate(metric_cards):
-        _draw_export_card(ax, xs[idx % 2], ys[idx // 2], 0.40, 0.08, title, format_int(value), f"к пред. периоду: {subtitle}" if subtitle else "", accent_color=accent)
+        _draw_export_card(
+            ax,
+            xs[idx % 2],
+            ys[idx // 2],
+            0.405,
+            0.095,
+            title,
+            format_int(value),
+            f"к пред. периоду: {subtitle}" if subtitle else "",
+            accent_color=accent,
+        )
 
+    # Sentiment block
     total = max(1, int(payload.get("total", 0) or 0))
     pos = int(payload.get("positive", 0) or 0)
     neu = int(payload.get("neutral", 0) or 0)
@@ -1218,72 +1265,79 @@ def generate_summary_infographic_png(payload: dict[str, Any]) -> bytes:
         neu = int(sent.get("neutral", 0) or 0)
         neg = int(sent.get("negative", 0) or 0)
 
-    ax.text(0.06, 0.605, "Тональность", fontsize=13, fontweight="bold", color="#111827", va="top")
-    pie_ax = fig.add_axes([0.06, 0.43, 0.24, 0.16])
+    ax.text(0.060, 0.585, "Тональность", fontsize=12, fontweight="bold", color="#111827", va="top", ha="left")
+    pie_ax = fig.add_axes([0.070, 0.427, 0.220, 0.145])
     pie_ax.axis("equal")
     values = [max(pos, 0), max(neu, 0), max(neg, 0)]
     colors = ["#22c55e", "#9ca3af", "#ef4444"]
     labels = ["Позитив", "Нейтрал", "Негатив"]
-    pie_ax.pie(values, colors=colors, startangle=90, counterclock=False, wedgeprops={"width": 0.42, "edgecolor": "white"})
-    pie_ax.text(0, 0.05, format_int(total), ha="center", va="center", fontsize=14, fontweight="bold", color="#111827")
-    pie_ax.text(0, -0.12, "сообщений", ha="center", va="center", fontsize=8.5, color="#6b7280")
+    if sum(values) <= 0:
+        values = [1]
+        pie_colors = ["#d1d5db"]
+    else:
+        pie_colors = colors
+    pie_ax.pie(values, colors=pie_colors, startangle=90, counterclock=False, wedgeprops={"width": 0.42, "edgecolor": "white"})
+    pie_ax.text(0, 0.05, format_int(total), ha="center", va="center", fontsize=12.5, fontweight="bold", color="#111827")
+    pie_ax.text(0, -0.13, "сообщений", ha="center", va="center", fontsize=7.5, color="#6b7280")
     pie_ax.set_xticks([])
     pie_ax.set_yticks([])
 
-    y0 = 0.565
-    for i, (lab, val, col) in enumerate(zip(labels, values, colors)):
-        yy = y0 - i * 0.044
-        ax.add_patch(Rectangle((0.33, yy - 0.011), 0.016, 0.016, facecolor=col, edgecolor="none"))
-        ax.text(0.355, yy, lab, fontsize=10, color="#111827", va="center", ha="left")
-        ax.text(0.50, yy, format_int(val), fontsize=10, color="#111827", va="center", ha="right", fontweight="bold")
-        ax.text(0.52, yy, percent_text(val, total), fontsize=9, color="#6b7280", va="center", ha="left")
+    y0 = 0.545
+    for i, (lab, val, col) in enumerate(zip(labels, [pos, neu, neg], colors)):
+        yy = y0 - i * 0.041
+        ax.add_patch(Rectangle((0.330, yy - 0.010), 0.014, 0.014, facecolor=col, edgecolor="none"))
+        ax.text(0.352, yy, lab, fontsize=9.2, color="#111827", va="center", ha="left")
+        ax.text(0.490, yy, format_int(val), fontsize=9.2, color="#111827", va="center", ha="right", fontweight="bold")
+        ax.text(0.510, yy, percent_text(val, total), fontsize=8.4, color="#6b7280", va="center", ha="left")
 
-    # Топы добавляют аналитическую ценность, а не просто дублируют KPI.
+    # Top lists: safer fixed columns and shorter labels to avoid overlap.
     top_tags = payload.get("top_tags") or []
     top_events = payload.get("top_events") or []
-    ax.text(0.06, 0.395, "Топ тегов", fontsize=12.5, fontweight="bold", color="#111827", va="top")
-    y = 0.367
+    ax.text(0.060, 0.382, "Топ тегов", fontsize=11.5, fontweight="bold", color="#111827", va="top", ha="left")
+    y = 0.354
     if top_tags:
         for item in top_tags[:5]:
-            ax.text(0.07, y, f"• {_short_label(item.get('name'), 36)}", fontsize=9.2, color="#111827", va="top")
-            ax.text(0.43, y, f"{format_int(item.get('messages', 0))} сообщ.", fontsize=8.8, color="#6b7280", va="top", ha="right")
-            y -= 0.03
+            ax.text(0.070, y, f"• {_short_label(item.get('name'), 28)}", fontsize=8.4, color="#111827", va="top", ha="left")
+            ax.text(0.430, y, f"{format_int(item.get('messages', 0))} сообщ.", fontsize=7.8, color="#6b7280", va="top", ha="right")
+            y -= 0.028
     else:
-        ax.text(0.07, y, "Нет тегов для отображения", fontsize=9.2, color="#6b7280", va="top")
+        ax.text(0.070, y, "Нет тегов для отображения", fontsize=8.4, color="#6b7280", va="top", ha="left")
 
-    ax.text(0.52, 0.395, "Топ инфоповодов", fontsize=12.5, fontweight="bold", color="#111827", va="top")
-    y = 0.367
+    ax.text(0.525, 0.382, "Топ инфоповодов", fontsize=11.5, fontweight="bold", color="#111827", va="top", ha="left")
+    y = 0.354
     if top_events:
         for item in top_events[:5]:
-            ax.text(0.53, y, f"• {_short_label(item.get('name'), 38)}", fontsize=9.2, color="#111827", va="top")
-            ax.text(0.92, y, f"{format_int(item.get('messages', 0))} сообщ.", fontsize=8.8, color="#6b7280", va="top", ha="right")
-            y -= 0.03
+            ax.text(0.535, y, f"• {_short_label(item.get('name'), 29)}", fontsize=8.4, color="#111827", va="top", ha="left")
+            ax.text(0.935, y, f"{format_int(item.get('messages', 0))} сообщ.", fontsize=7.8, color="#6b7280", va="top", ha="right")
+            y -= 0.028
     else:
-        ax.text(0.53, y, "Нет инфоповодов для отображения", fontsize=9.2, color="#6b7280", va="top")
+        ax.text(0.535, y, "Нет инфоповодов для отображения", fontsize=8.4, color="#6b7280", va="top", ha="left")
 
-    ax.text(0.06, 0.215, "Главное", fontsize=12.5, fontweight="bold", color="#111827", va="top")
-    summary_y = 0.188
+    # Summary highlights: limited lines with consistent spacing.
+    ax.text(0.060, 0.205, "Главное", fontsize=11.5, fontweight="bold", color="#111827", va="top", ha="left")
+    summary_y = 0.178
     line_count = 0
     for block in (payload.get("summary_highlights") or [])[:4]:
-        wrapped = textwrap.wrap(str(block), width=90) or [str(block)]
+        wrapped = textwrap.wrap(str(block), width=86) or [str(block)]
         bullet = True
         for seg in wrapped[:2]:
             prefix = "• " if bullet else "  "
-            ax.text(0.07, summary_y, prefix + seg, fontsize=9.4, color="#111827", va="top", ha="left")
-            summary_y -= 0.024
+            ax.text(0.070, summary_y, prefix + seg, fontsize=8.4, color="#111827", va="top", ha="left")
+            summary_y -= 0.021
             line_count += 1
             bullet = False
             if line_count >= 8:
                 break
-        summary_y -= 0.005
+        summary_y -= 0.004
         if line_count >= 8:
             break
 
     footer_text = str(payload.get("footer_text") or "Инфографика сформирована автоматически на основе выбранного периода и текущего саммари.")
-    ax.text(0.06, 0.045, footer_text, fontsize=8.4, color="#6b7280", va="bottom", ha="left")
+    ax.text(0.060, 0.045, _short_label(footer_text, 110), fontsize=7.8, color="#6b7280", va="bottom", ha="left")
 
     out = BytesIO()
-    fig.savefig(out, format="png", bbox_inches="tight", facecolor="white")
+    # Do not use bbox_inches="tight": it changes image geometry and can cause PDF scaling/cropping.
+    fig.savefig(out, format="png", facecolor=background)
     plt.close(fig)
     return out.getvalue()
 
@@ -1291,52 +1345,70 @@ def generate_summary_infographic_png(payload: dict[str, Any]) -> bytes:
 def generate_summary_docx(payload: dict[str, Any]) -> bytes:
     try:
         from docx import Document
-        from docx.shared import Pt, Inches
+        from docx.shared import Pt, Inches, Cm
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
     except Exception as exc:
         raise RuntimeError("Для выгрузки Word добавьте python-docx в requirements.txt.") from exc
 
     doc = Document()
+    section = doc.sections[0]
+    section.top_margin = Cm(1.6)
+    section.bottom_margin = Cm(1.6)
+    section.left_margin = Cm(1.7)
+    section.right_margin = Cm(1.7)
+
     styles = doc.styles
     styles["Normal"].font.name = "Arial"
     styles["Normal"].font.size = Pt(10.5)
+    styles["Heading 1"].font.name = "Arial"
+    styles["Heading 1"].font.size = Pt(16)
+    styles["Heading 2"].font.name = "Arial"
+    styles["Heading 2"].font.size = Pt(13)
 
     p = doc.add_paragraph()
     r = p.add_run(str(payload.get("report_title") or "Дайджест упоминаний"))
     r.bold = True
     r.font.size = Pt(16)
+    p.paragraph_format.space_after = Pt(4)
+
     p2 = doc.add_paragraph()
     r2 = p2.add_run(str(payload.get("client_name") or payload.get("project_name") or "Проект"))
     r2.bold = True
     r2.font.size = Pt(13)
-    doc.add_paragraph(f"Шаблон: {payload.get('report_template_label') or ''}")
-    doc.add_paragraph(f"Период: {payload.get('period_label') or 'выбранный период'}")
-    doc.add_paragraph(f"Дата выгрузки: {payload.get('created_at') or ''}")
+    p2.paragraph_format.space_after = Pt(6)
+
+    meta = doc.add_paragraph()
+    meta.add_run(f"Шаблон: {payload.get('report_template_label') or ''}\n")
+    meta.add_run(f"Период: {payload.get('period_label') or 'выбранный период'}\n")
+    meta.add_run(f"Дата выгрузки: {payload.get('created_at') or ''}")
+    meta.paragraph_format.space_after = Pt(8)
+
+    try:
+        infographic_png = generate_summary_infographic_png(payload)
+        pic_p = doc.add_paragraph()
+        pic_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run = pic_p.add_run()
+        run.add_picture(BytesIO(infographic_png), width=Inches(6.4))
+        doc.add_page_break()
+    except Exception:
+        pass
 
     total = max(1, int(payload.get("total", 0) or 0))
+    doc.add_heading("Основные метрики", level=2)
     doc.add_paragraph(
-        "Основные метрики: "
-        f"сообщений — {format_int(payload.get('messages', 0))}; "
+        f"Сообщений — {format_int(payload.get('messages', 0))}; "
         f"аудитория — {format_int(payload.get('audience', 0))}; "
         f"охват — {format_int(payload.get('reach', 0))}; "
         f"вовлеченность — {format_int(payload.get('engagement', 0))}."
     )
     doc.add_paragraph(
-        "Тональность: "
-        f"позитив — {percent_text(int(payload.get('positive', 0) or 0), total)}; "
+        f"Тональность: позитив — {percent_text(int(payload.get('positive', 0) or 0), total)}; "
         f"нейтрал — {percent_text(int(payload.get('neutral', 0) or 0), total)}; "
         f"негатив — {percent_text(int(payload.get('negative', 0) or 0), total)}."
     )
 
-    try:
-        infographic_png = generate_summary_infographic_png(payload)
-        doc.add_paragraph()
-        doc.add_picture(BytesIO(infographic_png), width=Inches(6.2))
-    except Exception:
-        pass
-
     if payload.get("report_template") in {"client_overview", "comparison", "full"}:
-        p = doc.add_paragraph()
-        p.add_run("Что включить в отчет").bold = True
+        doc.add_heading("Что включить в отчет", level=2)
         top_tags = payload.get("top_tags") or []
         top_events = payload.get("top_events") or []
         if top_tags:
@@ -1344,12 +1416,12 @@ def generate_summary_docx(payload: dict[str, Any]) -> bytes:
         if top_events:
             doc.add_paragraph("Топ инфоповодов: " + "; ".join(str(x.get("name") or "") for x in top_events[:5] if x.get("name")))
 
-    p = doc.add_paragraph()
-    p.add_run("Саммари периода").bold = True
+    doc.add_heading("Саммари периода", level=2)
     for block in str(payload.get("summary_text") or "").split("\n"):
         block = block.strip()
         if block:
-            doc.add_paragraph(block)
+            para = doc.add_paragraph(block)
+            para.paragraph_format.space_after = Pt(4)
 
     out = BytesIO()
     doc.save(out)
@@ -1460,7 +1532,7 @@ def generate_summary_pdf(payload: dict[str, Any]) -> bytes:
         infographic_io = BytesIO(infographic_png)
         infographic_io.seek(0)
         # Инфографика теперь первая страница PDF, без дублирующей текстовой страницы.
-        story.append(Image(infographic_io, width=18.0 * cm, height=25.4 * cm))
+        story.append(Image(infographic_io, width=17.2 * cm, height=24.35 * cm))
         story.append(PageBreak())
         infographic_added = True
     except Exception:
