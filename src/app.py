@@ -57,7 +57,7 @@ from services.message_compute import message_text_column, message_link_column
 from services.perf import perf_block, render_perf_sidebar, reset_perf_events
 
 APP_TITLE = "Платформа дайджестов"
-APP_VERSION = "4.4.8: improved comparison chart labels"
+APP_VERSION = "4.4.9: client mode and saved dashboard views"
 
 ALGORITHM_PROFILE_OPTIONS = {
     "universal": "Универсальный",
@@ -100,6 +100,66 @@ DEFAULT_REPORT_BRANDING = {
     "footer_text": "",
     "logo_url": "",
 }
+
+COMPARISON_CHART_BLOCKS = [
+    "Динамика основных метрик",
+    "Динамика тональности",
+    "Сравнение выбранной метрики",
+    "Круговые диаграммы тональности",
+]
+
+DEFAULT_DASHBOARD_VIEW_SETTINGS = {
+    "default_view_mode": "client",  # client / analyst
+    "start_section": "Клиентский обзор",
+    "taxi_start_section": "Клиентский обзор",
+    "comparison_visible_charts": ["Динамика основных метрик", "Динамика тональности"],
+    "client_hide_technical": True,
+}
+
+DASHBOARD_SECTION_OPTIONS = ["Клиентский обзор", "Теги", "Инфоповоды", "Ключевые сообщения", "Динамика"]
+TAXI_DASHBOARD_SECTION_OPTIONS = ["Клиентский обзор", "Инфоповоды", "Ключевые сообщения", "Динамика"]
+
+
+def dashboard_view_settings_from_project_settings(settings: dict[str, Any] | None) -> dict[str, Any]:
+    raw = {}
+    if isinstance(settings, dict):
+        raw = settings.get("dashboard_view_settings") or {}
+    if not isinstance(raw, dict):
+        raw = {}
+    result = dict(DEFAULT_DASHBOARD_VIEW_SETTINGS)
+    mode = str(raw.get("default_view_mode") or result["default_view_mode"]).strip().lower()
+    result["default_view_mode"] = mode if mode in {"client", "analyst"} else result["default_view_mode"]
+    start_section = str(raw.get("start_section") or result["start_section"]).strip()
+    result["start_section"] = start_section if start_section in DASHBOARD_SECTION_OPTIONS else result["start_section"]
+    taxi_start_section = str(raw.get("taxi_start_section") or result["taxi_start_section"]).strip()
+    result["taxi_start_section"] = taxi_start_section if taxi_start_section in TAXI_DASHBOARD_SECTION_OPTIONS else result["taxi_start_section"]
+    raw_charts = raw.get("comparison_visible_charts")
+    if isinstance(raw_charts, list):
+        charts = [str(x) for x in raw_charts if str(x) in COMPARISON_CHART_BLOCKS]
+    else:
+        charts = list(result["comparison_visible_charts"])
+    result["comparison_visible_charts"] = charts or list(DEFAULT_DASHBOARD_VIEW_SETTINGS["comparison_visible_charts"])
+    result["client_hide_technical"] = bool(raw.get("client_hide_technical", result["client_hide_technical"]))
+    return result
+
+
+def dashboard_view_mode_for_session(role: str, settings: dict[str, Any], *, key: str = "dashboard_view_mode") -> str:
+    default_mode = str(settings.get("default_view_mode") or "client")
+    if role_rank(role) < role_rank("editor"):
+        st.sidebar.caption("Вид дашборда: клиентский")
+        return "client"
+    mode_labels = {"client": "Клиентский", "analyst": "Аналитический"}
+    options = ["client", "analyst"]
+    selected = st.sidebar.radio(
+        "Вид дашборда",
+        options,
+        index=options.index(default_mode) if default_mode in options else 0,
+        format_func=lambda x: mode_labels.get(x, x),
+        horizontal=False,
+        key=key,
+        help="Клиентский вид скрывает технические настройки и оставляет чистый презентационный интерфейс. Аналитический вид показывает рабочие настройки и расширенные элементы.",
+    )
+    return selected
 
 
 def _valid_hex_color(value: Any, fallback: str) -> str:
@@ -691,7 +751,7 @@ def _render_value_distribution_donut(df: pd.DataFrame, label_col: str, value_col
             )
 
 
-def render_period_comparison_charts(comparison: list[dict[str, Any]], *, label_settings: dict[str, Any] | None = None) -> None:
+def render_period_comparison_charts(comparison: list[dict[str, Any]], *, label_settings: dict[str, Any] | None = None, visible_blocks_default: list[str] | None = None) -> None:
     if not comparison:
         return
     chart_df = _comparison_visual_rows(comparison)
@@ -701,16 +761,12 @@ def render_period_comparison_charts(comparison: list[dict[str, Any]], *, label_s
     st.subheader("Визуализация сравнений")
     st.caption("Выберите, какие графики показать на стартовой странице. Скрытые графики не рендерятся и не перегружают страницу.")
 
-    chart_blocks = [
-        "Динамика основных метрик",
-        "Динамика тональности",
-        "Сравнение выбранной метрики",
-        "Круговые диаграммы тональности",
-    ]
+    chart_blocks = list(COMPARISON_CHART_BLOCKS)
+    default_blocks = [x for x in (visible_blocks_default or DEFAULT_DASHBOARD_VIEW_SETTINGS["comparison_visible_charts"]) if x in chart_blocks]
     selected_blocks = st.multiselect(
         "Показывать графики",
         chart_blocks,
-        default=["Динамика основных метрик", "Динамика тональности"],
+        default=default_blocks or DEFAULT_DASHBOARD_VIEW_SETTINGS["comparison_visible_charts"],
         key=f"comparison_visible_charts_{abs(hash(tuple(chart_df['Период'].astype(str).tolist())))}",
         help="Можно оставить только нужные визуализации. Это ускоряет отображение страницы при большом числе периодов.",
     )
@@ -918,7 +974,7 @@ def render_period_comparison_charts(comparison: list[dict[str, Any]], *, label_s
 
 
 
-def render_period_comparison_metrics(messages: pd.DataFrame, periods: pd.DataFrame, period_ids: list[str], *, chart_label_settings: dict[str, Any] | None = None) -> dict[str, Any] | None:
+def render_period_comparison_metrics(messages: pd.DataFrame, periods: pd.DataFrame, period_ids: list[str], *, chart_label_settings: dict[str, Any] | None = None, comparison_visible_charts: list[str] | None = None) -> dict[str, Any] | None:
     """Render sequential comparison when two or more periods are selected."""
     comparison = _period_metrics_for_comparison(messages, periods, period_ids)
     if len(comparison) < 2:
@@ -959,7 +1015,7 @@ def render_period_comparison_metrics(messages: pd.DataFrame, periods: pd.DataFra
         help=f"{format_int(current['sentiment'].get('negative', 0))} сообщений в последнем периоде",
     )
 
-    render_period_comparison_charts(comparison, label_settings=chart_label_settings)
+    render_period_comparison_charts(comparison, label_settings=chart_label_settings, visible_blocks_default=comparison_visible_charts)
 
     table_rows = []
     prev_item: dict[str, Any] | None = None
@@ -986,7 +1042,7 @@ def render_period_comparison_metrics(messages: pd.DataFrame, periods: pd.DataFra
     return aggregate_metrics
 
 
-def render_project_intro(project_name: str, messages: pd.DataFrame, periods: pd.DataFrame, period_ids: list[str], *, profile_label: str = "", chart_label_settings: dict[str, Any] | None = None) -> dict[str, Any]:
+def render_project_intro(project_name: str, messages: pd.DataFrame, periods: pd.DataFrame, period_ids: list[str], *, profile_label: str = "", chart_label_settings: dict[str, Any] | None = None, comparison_visible_charts: list[str] | None = None) -> dict[str, Any]:
     """Unified top block for all project profiles.
 
     If several periods are selected, the top cards show aggregate values for
@@ -1025,7 +1081,7 @@ def render_project_intro(project_name: str, messages: pd.DataFrame, periods: pd.
 
     if len(selected_ids) >= 2 and isinstance(messages, pd.DataFrame) and "period_id" in messages.columns:
         st.divider()
-        comparison_metrics = render_period_comparison_metrics(messages, periods, period_ids, chart_label_settings=chart_label_settings)
+        comparison_metrics = render_period_comparison_metrics(messages, periods, period_ids, chart_label_settings=chart_label_settings, comparison_visible_charts=comparison_visible_charts)
         if comparison_metrics is not None:
             metrics["comparison_sequence"] = comparison_metrics.get("comparison_sequence")
             metrics["comparison"] = comparison_metrics.get("comparison")
@@ -2324,6 +2380,44 @@ def render_project_manager(projects: pd.DataFrame) -> None:
                 )
                 st.caption("Брендирование применяется к Word/PDF/PNG-выгрузкам саммари и клиентских отчетов.")
 
+            current_view_settings = dashboard_view_settings_from_project_settings(current_settings)
+            with st.expander("Клиентский режим и сохраненные представления", expanded=False):
+                view_mode_options = ["client", "analyst"]
+                default_view_mode = st.radio(
+                    "Вид дашборда по умолчанию",
+                    view_mode_options,
+                    index=view_mode_options.index(current_view_settings.get("default_view_mode", "client")) if current_view_settings.get("default_view_mode", "client") in view_mode_options else 0,
+                    format_func=lambda x: {"client": "Клиентский", "analyst": "Аналитический"}.get(x, x),
+                    horizontal=True,
+                    key=f"default_view_mode_{project_id}",
+                    help="Клиентский вид подходит для демонстрации заказчику: меньше технических настроек и больше готовой аналитики.",
+                )
+                start_section = st.selectbox(
+                    "Стартовый раздел обычного проекта",
+                    DASHBOARD_SECTION_OPTIONS,
+                    index=DASHBOARD_SECTION_OPTIONS.index(current_view_settings.get("start_section", "Клиентский обзор")) if current_view_settings.get("start_section", "Клиентский обзор") in DASHBOARD_SECTION_OPTIONS else 0,
+                    key=f"start_section_{project_id}",
+                )
+                taxi_start_section = st.selectbox(
+                    "Стартовый раздел водительского проекта",
+                    TAXI_DASHBOARD_SECTION_OPTIONS,
+                    index=TAXI_DASHBOARD_SECTION_OPTIONS.index(current_view_settings.get("taxi_start_section", "Клиентский обзор")) if current_view_settings.get("taxi_start_section", "Клиентский обзор") in TAXI_DASHBOARD_SECTION_OPTIONS else 0,
+                    key=f"taxi_start_section_{project_id}",
+                )
+                default_comparison_charts = st.multiselect(
+                    "Графики сравнения по умолчанию",
+                    COMPARISON_CHART_BLOCKS,
+                    default=[x for x in current_view_settings.get("comparison_visible_charts", DEFAULT_DASHBOARD_VIEW_SETTINGS["comparison_visible_charts"]) if x in COMPARISON_CHART_BLOCKS],
+                    key=f"default_comparison_charts_{project_id}",
+                    help="Эти графики будут включены по умолчанию в блоке «Визуализация сравнений». Пользователь сможет изменить выбор на странице.",
+                )
+                client_hide_technical = st.checkbox(
+                    "Скрывать технические настройки в клиентском виде",
+                    value=bool(current_view_settings.get("client_hide_technical", True)),
+                    key=f"client_hide_technical_{project_id}",
+                )
+                st.caption("Настройки сохраняют подготовленный клиентский вид проекта: стартовый раздел, набор графиков и уровень технических элементов.")
+
             st.caption("Коды доступа заполняйте только если хотите заменить текущие.")
             new_viewer_code = st.text_input("Новый код просмотра", type="password", key=f"edit_viewer_code_{project_id}")
             new_editor_code = st.text_input("Новый код редактора", type="password", key=f"edit_editor_code_{project_id}")
@@ -2343,6 +2437,13 @@ def render_project_manager(projects: pd.DataFrame) -> None:
                     "background_color": report_background_color,
                     "footer_text": report_footer_text,
                     "logo_url": report_logo_url,
+                }
+                updated_settings["dashboard_view_settings"] = {
+                    "default_view_mode": default_view_mode,
+                    "start_section": start_section,
+                    "taxi_start_section": taxi_start_section,
+                    "comparison_visible_charts": list(default_comparison_charts),
+                    "client_hide_technical": bool(client_hide_technical),
                 }
                 update_project(
                     project_id,
@@ -3760,21 +3861,30 @@ def render_taxi_dashboard(
     manual_state: dict[str, Any],
     chart_label_settings: dict[str, Any] | None = None,
     report_branding: dict[str, Any] | None = None,
+    dashboard_view_settings: dict[str, Any] | None = None,
+    client_view: bool = False,
 ) -> None:
     """Dedicated UI for driver-chat digest projects inside the platform namespace."""
-    level = st.sidebar.selectbox(
-        "Уровень сборки инфоповодов",
-        ["balanced", "macro", "detailed"],
-        index=0,
-        format_func=lambda x: {
-            "balanced": "Сбалансировано — рекомендовано",
-            "macro": "Крупные темы — для отчета",
-            "detailed": "Подробно — первичные инфоповоды",
-        }.get(x, x),
-        key="taxi_event_detail_level",
-    )
+    dashboard_view_settings = dashboard_view_settings or dict(DEFAULT_DASHBOARD_VIEW_SETTINGS)
+    if client_view and bool(dashboard_view_settings.get("client_hide_technical", True)):
+        level = "balanced"
+    else:
+        level = st.sidebar.selectbox(
+            "Уровень сборки инфоповодов",
+            ["balanced", "macro", "detailed"],
+            index=0,
+            format_func=lambda x: {
+                "balanced": "Сбалансировано — рекомендовано",
+                "macro": "Крупные темы — для отчета",
+                "detailed": "Подробно — первичные инфоповоды",
+            }.get(x, x),
+            key="taxi_event_detail_level",
+        )
     raw_events_agg = aggregate_taxi_events(events, level=level)
-    min_event_messages = render_min_event_messages_control("driver_chats", raw_events_agg, key="taxi_min_event_messages")
+    if client_view and bool(dashboard_view_settings.get("client_hide_technical", True)):
+        min_event_messages = int(default_min_event_messages("driver_chats", raw_events_agg))
+    else:
+        min_event_messages = render_min_event_messages_control("driver_chats", raw_events_agg, key="taxi_min_event_messages")
     events_agg, hidden_events, hidden_messages = filter_small_events(raw_events_agg, min_event_messages)
     metrics = render_project_intro(
         project_name,
@@ -3783,6 +3893,7 @@ def render_taxi_dashboard(
         selected_period_ids,
         profile_label="Дайджест водительских чатов",
         chart_label_settings=chart_label_settings,
+        comparison_visible_charts=dashboard_view_settings.get("comparison_visible_charts"),
     )
     render_period_summary(
         project_id,
@@ -3799,7 +3910,16 @@ def render_taxi_dashboard(
     section_options = ["Клиентский обзор", "Инфоповоды", "Ключевые сообщения"]
     if len(selected_period_ids) >= 2:
         section_options.append("Динамика")
-    section = st.radio("Раздел аналитики", section_options, horizontal=True, key="taxi_dashboard_section")
+    default_section = str(dashboard_view_settings.get("taxi_start_section") or "Клиентский обзор")
+    if default_section not in section_options:
+        default_section = section_options[0]
+    section = st.radio(
+        "Раздел аналитики",
+        section_options,
+        index=section_options.index(default_section),
+        horizontal=True,
+        key="taxi_dashboard_section",
+    )
 
     if section == "Клиентский обзор":
         render_client_insights(messages, events_agg, periods, selected_period_ids, profile="driver_chats")
@@ -3898,11 +4018,16 @@ def main() -> None:
             manual_state,
             chart_label_settings=chart_label_settings,
             report_branding=report_branding,
+            dashboard_view_settings=dashboard_view_settings,
+            client_view=client_view,
         )
         return
 
     raw_events_agg = aggregate_events(events)
-    min_event_messages = render_min_event_messages_control(project_profile, events, key="main_min_event_messages")
+    if client_view and bool(dashboard_view_settings.get("client_hide_technical", True)):
+        min_event_messages = int(default_min_event_messages(project_profile, events))
+    else:
+        min_event_messages = render_min_event_messages_control(project_profile, events, key="main_min_event_messages")
     events_agg, hidden_events, hidden_messages = filter_small_events(raw_events_agg, min_event_messages)
 
     # Brand Analytics projects must show only system tags from columns after
@@ -3918,6 +4043,7 @@ def main() -> None:
         selected_period_ids,
         profile_label=ALGORITHM_PROFILE_OPTIONS.get(project_profile, project_profile),
         chart_label_settings=chart_label_settings,
+        comparison_visible_charts=dashboard_view_settings.get("comparison_visible_charts"),
     )
     render_period_summary(
         project_id,
@@ -3934,7 +4060,16 @@ def main() -> None:
     section_options = ["Клиентский обзор", "Теги", "Инфоповоды", "Ключевые сообщения"]
     if len(selected_period_ids) >= 2:
         section_options.append("Динамика")
-    section = st.radio("Раздел аналитики", section_options, horizontal=True, key="main_dashboard_section")
+    default_section = str(dashboard_view_settings.get("start_section") or "Клиентский обзор")
+    if default_section not in section_options:
+        default_section = section_options[0]
+    section = st.radio(
+        "Раздел аналитики",
+        section_options,
+        index=section_options.index(default_section),
+        horizontal=True,
+        key="main_dashboard_section",
+    )
 
     if section == "Клиентский обзор":
         render_client_insights(enriched_messages, events_agg, periods, selected_period_ids, profile=project_profile)
