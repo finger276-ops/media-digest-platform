@@ -9,10 +9,80 @@ from __future__ import annotations
 
 import csv
 import re
+import tempfile
+import zipfile
 from pathlib import Path
 from typing import Iterable
 
 import pandas as pd
+
+MINIMAL_XLSX_STYLES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="1"><font><sz val="11"/><color theme="1"/><name val="Calibri"/><family val="2"/><scheme val="minor"/></font></fonts>
+  <fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>
+  <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
+  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+  <cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>
+  <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
+  <dxfs count="0"/>
+  <tableStyles count="0" defaultTableStyle="TableStyleMedium9" defaultPivotStyle="PivotStyleLight16"/>
+</styleSheet>"""
+
+
+def _excel_error_mentions_styles(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "stylesheet" in message or "styles.xml" in message or "could not read stylesheet" in message
+
+
+def _repair_xlsx_styles(path: Path) -> Path:
+    """Return a temporary XLSX copy with a minimal valid styles.xml.
+
+    Some monitoring-system exports contain broken style XML. The worksheet data
+    is still valid, but openpyxl refuses to open the workbook before pandas can
+    read it. Replacing only xl/styles.xml keeps cell values intact and lets the
+    import continue. If the file is not a valid XLSX zip, the original exception
+    will be raised by the caller.
+    """
+    if path.suffix.lower() not in {".xlsx", ".xlsm"}:
+        raise ValueError("Автовосстановление стилей поддерживается только для .xlsx/.xlsm файлов.")
+
+    tmp = tempfile.NamedTemporaryFile(prefix="xlsx_styles_repaired_", suffix=path.suffix.lower(), delete=False)
+    tmp_path = Path(tmp.name)
+    tmp.close()
+
+    with zipfile.ZipFile(path, "r") as zin, zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+        wrote_styles = False
+        for item in zin.infolist():
+            if item.filename == "xl/styles.xml":
+                zout.writestr(item, MINIMAL_XLSX_STYLES)
+                wrote_styles = True
+            else:
+                zout.writestr(item, zin.read(item.filename))
+        if not wrote_styles:
+            zout.writestr("xl/styles.xml", MINIMAL_XLSX_STYLES)
+    return tmp_path
+
+
+def _open_excel_file_resilient(path: Path) -> tuple[pd.ExcelFile, Path]:
+    try:
+        return pd.ExcelFile(path), path
+    except Exception as exc:
+        # openpyxl may raise either a friendly "could not read stylesheet"
+        # ValueError or a raw XMLSyntaxError while parsing xl/styles.xml. For
+        # XLSX/XLSM files it is safe to try one repaired copy before failing.
+        if path.suffix.lower() not in {".xlsx", ".xlsm"}:
+            raise
+        try:
+            repaired = _repair_xlsx_styles(path)
+            return pd.ExcelFile(repaired), repaired
+        except Exception as repair_exc:
+            if _excel_error_mentions_styles(exc):
+                raise ValueError(
+                    "Excel-файл не удалось прочитать из-за поврежденных стилей книги. "
+                    "Попробуйте открыть файл в Excel/LibreOffice и сохранить заново как .xlsx или .csv. "
+                    "Если это выгрузка Brand Analytics, лучше сохранить лист «Сообщения» отдельным CSV."
+                ) from repair_exc
+            raise exc
 
 CANONICAL_COLUMNS = [
     "№",
@@ -191,9 +261,10 @@ def _read_excel_any(path: Path, sheet_name: str | int | None = None) -> pd.DataF
 
     Monitoring exports often contain cover sheets, empty technical sheets or
     analytical tabs. We prefer the raw-message sheet named "Сообщения" and
-    skip empty sheets instead of crashing on preview.iloc[0].
+    skip empty sheets instead of crashing on preview.iloc[0]. If the workbook
+    has broken styles.xml, we automatically read a temporary repaired copy.
     """
-    xls = pd.ExcelFile(path)
+    xls, read_path = _open_excel_file_resilient(path)
     sheets = xls.sheet_names
     if not sheets:
         raise ValueError("В Excel-файле не найдено листов.")
@@ -201,7 +272,7 @@ def _read_excel_any(path: Path, sheet_name: str | int | None = None) -> pd.DataF
     def safe_preview(sheet):
         try:
             preview_df = pd.read_excel(
-                path,
+                read_path,
                 sheet_name=sheet,
                 header=None,
                 dtype=str,
@@ -251,7 +322,7 @@ def _read_excel_any(path: Path, sheet_name: str | int | None = None) -> pd.DataF
             "Проверьте, что в Excel есть лист с колонками: дата, текст/сообщение, url/ссылка, автор или источник."
         )
 
-    df = pd.read_excel(path, sheet_name=selected_sheet, header=selected_header_idx, dtype=str, keep_default_na=False)
+    df = pd.read_excel(read_path, sheet_name=selected_sheet, header=selected_header_idx, dtype=str, keep_default_na=False)
     df = _clean_dataframe(df)
     if df.empty:
         raise ValueError(f"На листе Excel «{selected_sheet}» не найдено данных.")
@@ -474,6 +545,7 @@ def get_excel_sheet_names(path: str | Path) -> list[str]:
     if path.suffix.lower() not in {".xlsx", ".xls", ".xlsm"}:
         return []
     try:
-        return pd.ExcelFile(path).sheet_names
+        xls, _ = _open_excel_file_resilient(path)
+        return xls.sheet_names
     except Exception:
         return []
