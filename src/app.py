@@ -57,7 +57,7 @@ from services.message_compute import message_text_column, message_link_column
 from services.perf import perf_block, render_perf_sidebar, reset_perf_events
 
 APP_TITLE = "Платформа дайджестов"
-APP_VERSION = "4.4.3: client insights in auto summary"
+APP_VERSION = "4.4.4: report templates and branding"
 
 ALGORITHM_PROFILE_OPTIONS = {
     "universal": "Универсальный",
@@ -84,6 +84,46 @@ DEFAULT_CHART_LABEL_SETTINGS = {
     "position": "top",
     "show_donut_legend": False,
 }
+
+REPORT_TEMPLATE_OPTIONS = {
+    "summary": "Краткое саммари",
+    "client_overview": "Клиентский обзор",
+    "comparison": "Сравнительный отчет",
+    "full": "Полный отчет",
+}
+
+DEFAULT_REPORT_BRANDING = {
+    "client_name": "",
+    "report_title": "Дайджест упоминаний",
+    "accent_color": "#2563eb",
+    "background_color": "#ffffff",
+    "footer_text": "",
+    "logo_url": "",
+}
+
+
+def _valid_hex_color(value: Any, fallback: str) -> str:
+    text = str(value or "").strip()
+    if re.match(r"^#[0-9a-fA-F]{6}$", text):
+        return text
+    return fallback
+
+
+def report_branding_from_project_settings(settings: dict[str, Any] | None, *, project_name: str = "") -> dict[str, Any]:
+    raw = {}
+    if isinstance(settings, dict):
+        raw = settings.get("report_branding") or {}
+    if not isinstance(raw, dict):
+        raw = {}
+    result = dict(DEFAULT_REPORT_BRANDING)
+    result.update({k: str(raw.get(k) or result.get(k) or "").strip() for k in ["client_name", "report_title", "footer_text", "logo_url"]})
+    result["accent_color"] = _valid_hex_color(raw.get("accent_color"), result["accent_color"])
+    result["background_color"] = _valid_hex_color(raw.get("background_color"), result["background_color"])
+    if not result.get("client_name"):
+        result["client_name"] = str(project_name or "").strip()
+    if not result.get("report_title"):
+        result["report_title"] = "Дайджест упоминаний"
+    return result
 
 
 
@@ -1045,10 +1085,23 @@ def summary_export_payload(
     metrics: dict[str, Any],
     messages: pd.DataFrame | None = None,
     events_agg: pd.DataFrame | None = None,
+    *,
+    report_template: str = "summary",
+    branding: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     sent = metrics.get("sentiment", {}) if isinstance(metrics, dict) else {}
+    report_template = report_template if report_template in REPORT_TEMPLATE_OPTIONS else "summary"
+    branding = report_branding_from_project_settings({"report_branding": branding or {}}, project_name=project_name)
     return {
         "project_name": project_name,
+        "client_name": branding.get("client_name") or project_name,
+        "report_title": branding.get("report_title") or "Дайджест упоминаний",
+        "accent_color": branding.get("accent_color") or "#2563eb",
+        "background_color": branding.get("background_color") or "#ffffff",
+        "footer_text": branding.get("footer_text") or "",
+        "logo_url": branding.get("logo_url") or "",
+        "report_template": report_template,
+        "report_template_label": REPORT_TEMPLATE_OPTIONS.get(report_template, report_template),
         "period_label": period_label,
         "summary_text": clean_summary_for_export(summary_text),
         "summary_highlights": summary_highlights(summary_text),
@@ -1061,8 +1114,8 @@ def summary_export_payload(
         "negative": int(sent.get("negative", 0) or 0),
         "total": int(sent.get("total", 0) or 0),
         "comparison_sequence": metrics.get("comparison_sequence") or [],
-        "top_tags": export_top_tags(messages, limit=5),
-        "top_events": export_top_events(events_agg, limit=5),
+        "top_tags": export_top_tags(messages, limit=8 if report_template == "full" else 5),
+        "top_events": export_top_events(events_agg, limit=8 if report_template == "full" else 5),
         "created_at": datetime.now().strftime("%d.%m.%Y %H:%M"),
     }
 
@@ -1087,15 +1140,16 @@ def _metric_delta_for_export(current: Any, previous: Any) -> str:
     return "0"
 
 
-def _draw_export_card(ax, x: float, y: float, w: float, h: float, title: str, value: str, subtitle: str = "") -> None:
+def _draw_export_card(ax, x: float, y: float, w: float, h: float, title: str, value: str, subtitle: str = "", *, accent_color: str = "#2563eb") -> None:
     import matplotlib.pyplot as plt  # noqa: F401
     from matplotlib.patches import FancyBboxPatch
     patch = FancyBboxPatch((x, y), w, h, boxstyle="round,pad=0.012,rounding_size=0.018", linewidth=1, edgecolor="#d9e0ea", facecolor="#f8fafc")
     ax.add_patch(patch)
-    ax.text(x + 0.022, y + h - 0.035, title, fontsize=9.5, color="#4b5563", va="top", ha="left")
-    ax.text(x + 0.022, y + h / 2 + 0.005, value, fontsize=15, color="#111827", va="center", ha="left", fontweight="bold")
+    ax.plot([x + 0.015, x + 0.015], [y + 0.018, y + h - 0.018], color=accent_color, linewidth=2.4)
+    ax.text(x + 0.032, y + h - 0.035, title, fontsize=9.5, color="#4b5563", va="top", ha="left")
+    ax.text(x + 0.032, y + h / 2 + 0.005, value, fontsize=15, color="#111827", va="center", ha="left", fontweight="bold")
     if subtitle:
-        ax.text(x + 0.022, y + 0.018, subtitle, fontsize=8.4, color="#6b7280", va="bottom", ha="left")
+        ax.text(x + 0.032, y + 0.018, subtitle, fontsize=8.4, color="#6b7280", va="bottom", ha="left")
 
 
 def generate_summary_infographic_png(payload: dict[str, Any]) -> bytes:
@@ -1113,16 +1167,22 @@ def generate_summary_infographic_png(payload: dict[str, Any]) -> bytes:
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
     ax.axis("off")
-    fig.patch.set_facecolor("white")
+    background = _valid_hex_color(payload.get("background_color"), "#ffffff")
+    accent = _valid_hex_color(payload.get("accent_color"), "#2563eb")
+    fig.patch.set_facecolor(background)
 
-    project = _short_label(payload.get("project_name") or "Проект", 52)
+    project = _short_label(payload.get("client_name") or payload.get("project_name") or "Проект", 52)
+    report_title = _short_label(payload.get("report_title") or "Дайджест упоминаний", 52)
+    template_label = str(payload.get("report_template_label") or "")
     period = _short_label(payload.get("period_label") or "выбранный период", 70)
     created = str(payload.get("created_at") or "")
     comparison = payload.get("comparison_sequence") or []
 
-    ax.text(0.06, 0.955, project, fontsize=21, fontweight="bold", color="#111827", va="top", ha="left")
-    ax.text(0.06, 0.925, f"Период: {period}", fontsize=10.5, color="#4b5563", va="top", ha="left")
-    ax.text(0.06, 0.905, f"Дата выгрузки: {created}", fontsize=8.8, color="#6b7280", va="top", ha="left")
+    ax.add_patch(Rectangle((0, 0.895), 1, 0.105, facecolor=accent, edgecolor="none", alpha=0.95))
+    ax.text(0.06, 0.972, report_title, fontsize=13, fontweight="bold", color="white", va="top", ha="left")
+    ax.text(0.06, 0.945, project, fontsize=21, fontweight="bold", color="white", va="top", ha="left")
+    ax.text(0.06, 0.918, f"{template_label} · {period}", fontsize=9.4, color="#e5e7eb", va="top", ha="left")
+    ax.text(0.78, 0.972, created, fontsize=8.8, color="#e5e7eb", va="top", ha="left")
 
     # 2×2-сетка метрик: большие числа больше не накладываются.
     if len(comparison) >= 2:
@@ -1145,7 +1205,7 @@ def generate_summary_infographic_png(payload: dict[str, Any]) -> bytes:
     xs = [0.06, 0.52]
     ys = [0.775, 0.67]
     for idx, (title, value, subtitle) in enumerate(metric_cards):
-        _draw_export_card(ax, xs[idx % 2], ys[idx // 2], 0.40, 0.08, title, format_int(value), f"к пред. периоду: {subtitle}" if subtitle else "")
+        _draw_export_card(ax, xs[idx % 2], ys[idx // 2], 0.40, 0.08, title, format_int(value), f"к пред. периоду: {subtitle}" if subtitle else "", accent_color=accent)
 
     total = max(1, int(payload.get("total", 0) or 0))
     pos = int(payload.get("positive", 0) or 0)
@@ -1219,7 +1279,8 @@ def generate_summary_infographic_png(payload: dict[str, Any]) -> bytes:
         if line_count >= 8:
             break
 
-    ax.text(0.06, 0.045, "Инфографика сформирована автоматически на основе выбранного периода и текущего саммари.", fontsize=8.4, color="#6b7280", va="bottom", ha="left")
+    footer_text = str(payload.get("footer_text") or "Инфографика сформирована автоматически на основе выбранного периода и текущего саммари.")
+    ax.text(0.06, 0.045, footer_text, fontsize=8.4, color="#6b7280", va="bottom", ha="left")
 
     out = BytesIO()
     fig.savefig(out, format="png", bbox_inches="tight", facecolor="white")
@@ -1240,9 +1301,14 @@ def generate_summary_docx(payload: dict[str, Any]) -> bytes:
     styles["Normal"].font.size = Pt(10.5)
 
     p = doc.add_paragraph()
-    r = p.add_run(str(payload.get("project_name") or "Проект"))
+    r = p.add_run(str(payload.get("report_title") or "Дайджест упоминаний"))
     r.bold = True
     r.font.size = Pt(16)
+    p2 = doc.add_paragraph()
+    r2 = p2.add_run(str(payload.get("client_name") or payload.get("project_name") or "Проект"))
+    r2.bold = True
+    r2.font.size = Pt(13)
+    doc.add_paragraph(f"Шаблон: {payload.get('report_template_label') or ''}")
     doc.add_paragraph(f"Период: {payload.get('period_label') or 'выбранный период'}")
     doc.add_paragraph(f"Дата выгрузки: {payload.get('created_at') or ''}")
 
@@ -1267,6 +1333,16 @@ def generate_summary_docx(payload: dict[str, Any]) -> bytes:
         doc.add_picture(BytesIO(infographic_png), width=Inches(6.2))
     except Exception:
         pass
+
+    if payload.get("report_template") in {"client_overview", "comparison", "full"}:
+        p = doc.add_paragraph()
+        p.add_run("Что включить в отчет").bold = True
+        top_tags = payload.get("top_tags") or []
+        top_events = payload.get("top_events") or []
+        if top_tags:
+            doc.add_paragraph("Топ тегов: " + "; ".join(str(x.get("name") or "") for x in top_tags[:5] if x.get("name")))
+        if top_events:
+            doc.add_paragraph("Топ инфоповодов: " + "; ".join(str(x.get("name") or "") for x in top_events[:5] if x.get("name")))
 
     p = doc.add_paragraph()
     p.add_run("Саммари периода").bold = True
@@ -1393,7 +1469,9 @@ def generate_summary_pdf(payload: dict[str, Any]) -> bytes:
     total = max(1, int(payload.get("total", 0) or 0))
     if not infographic_added:
         story.extend([
-            Paragraph(f"<b>{xml_escape(str(payload.get('project_name') or 'Проект'))}</b>", title),
+            Paragraph(f"<b>{xml_escape(str(payload.get('report_title') or 'Дайджест упоминаний'))}</b>", title),
+            Paragraph(xml_escape(str(payload.get('client_name') or payload.get('project_name') or 'Проект')), heading),
+            Paragraph(xml_escape(f"Шаблон: {payload.get('report_template_label') or ''}"), normal),
             Paragraph(xml_escape(f"Период: {payload.get('period_label') or 'выбранный период'}"), normal),
             Paragraph(xml_escape(f"Дата выгрузки: {payload.get('created_at') or ''}"), normal),
             Spacer(1, 8),
@@ -1430,8 +1508,27 @@ def render_summary_export_buttons(
     key_prefix: str,
     messages: pd.DataFrame | None = None,
     events_agg: pd.DataFrame | None = None,
+    branding: dict[str, Any] | None = None,
 ) -> None:
-    payload = summary_export_payload(project_name, period_label, summary_text, metrics, messages=messages, events_agg=events_agg)
+    report_template = st.selectbox(
+        "Шаблон отчета",
+        list(REPORT_TEMPLATE_OPTIONS.keys()),
+        index=0,
+        format_func=lambda x: REPORT_TEMPLATE_OPTIONS.get(x, x),
+        key=f"{key_prefix}_template",
+        help="Шаблон меняет структуру выгрузки и набор аналитических блоков в Word/PDF/PNG.",
+    )
+    payload = summary_export_payload(
+        project_name,
+        period_label,
+        summary_text,
+        metrics,
+        messages=messages,
+        events_agg=events_agg,
+        report_template=report_template,
+        branding=branding,
+    )
+    st.caption(f"Брендирование: {payload.get('client_name') or project_name}; акцентный цвет {payload.get('accent_color')}.")
     c1, c2, c3 = st.columns(3)
     with c1:
         try:
@@ -1946,6 +2043,47 @@ def render_project_manager(projects: pd.DataFrame) -> None:
                     key=f"chart_label_show_donut_legend_{project_id}",
                 )
                 st.caption("Настройка применяется к подписям на линейных, столбчатых и круговых графиках сравнения периодов.")
+
+            current_branding = report_branding_from_project_settings(current_settings, project_name=str(row.get("project_name") or ""))
+            with st.expander("Брендирование отчетов", expanded=False):
+                report_client_name = st.text_input(
+                    "Название клиента в отчете",
+                    value=str(current_branding.get("client_name") or ""),
+                    key=f"report_client_name_{project_id}",
+                    help="Это название будет отображаться на титульной инфографике и в Word/PDF.",
+                )
+                report_title = st.text_input(
+                    "Заголовок отчета",
+                    value=str(current_branding.get("report_title") or "Дайджест упоминаний"),
+                    key=f"report_title_{project_id}",
+                )
+                b1, b2 = st.columns(2)
+                with b1:
+                    report_accent_color = st.color_picker(
+                        "Акцентный цвет",
+                        value=_valid_hex_color(current_branding.get("accent_color"), "#2563eb"),
+                        key=f"report_accent_color_{project_id}",
+                    )
+                with b2:
+                    report_background_color = st.color_picker(
+                        "Фон инфографики",
+                        value=_valid_hex_color(current_branding.get("background_color"), "#ffffff"),
+                        key=f"report_background_color_{project_id}",
+                    )
+                report_footer_text = st.text_input(
+                    "Подпись в футере",
+                    value=str(current_branding.get("footer_text") or ""),
+                    key=f"report_footer_text_{project_id}",
+                    help="Например: подготовлено агентством / внутренний аналитический отчет.",
+                )
+                report_logo_url = st.text_input(
+                    "URL логотипа (резерв под следующий этап)",
+                    value=str(current_branding.get("logo_url") or ""),
+                    key=f"report_logo_url_{project_id}",
+                    help="Поле сохраняется в настройках проекта. Визуальная вставка логотипа будет подключена отдельным этапом.",
+                )
+                st.caption("Брендирование применяется к Word/PDF/PNG-выгрузкам саммари и клиентских отчетов.")
+
             st.caption("Коды доступа заполняйте только если хотите заменить текущие.")
             new_viewer_code = st.text_input("Новый код просмотра", type="password", key=f"edit_viewer_code_{project_id}")
             new_editor_code = st.text_input("Новый код редактора", type="password", key=f"edit_editor_code_{project_id}")
@@ -1957,6 +2095,14 @@ def render_project_manager(projects: pd.DataFrame) -> None:
                     "font_size": int(chart_font_size),
                     "position": chart_position,
                     "show_donut_legend": bool(show_donut_legend),
+                }
+                updated_settings["report_branding"] = {
+                    "client_name": report_client_name,
+                    "report_title": report_title,
+                    "accent_color": report_accent_color,
+                    "background_color": report_background_color,
+                    "footer_text": report_footer_text,
+                    "logo_url": report_logo_url,
                 }
                 update_project(
                     project_id,
@@ -2645,6 +2791,7 @@ def render_period_summary(
     *,
     profile: str = "",
     metrics: dict[str, Any] | None = None,
+    branding: dict[str, Any] | None = None,
 ) -> None:
     """Unified editable/exportable period summary for all project profiles."""
     st.subheader("Саммари периода")
@@ -2661,7 +2808,7 @@ def render_period_summary(
 
     with st.expander("Выгрузить саммари", expanded=False):
         st.caption("Можно скачать Word, PDF или отдельную PNG-инфографику. В инфографику попадут метрики, тональность, топ-теги, топ-инфоповоды и ключевые тезисы саммари.")
-        render_summary_export_buttons(project_name, period_label, summary_text, metrics, key_prefix=f"summary_export_{abs(hash(key))}", messages=messages, events_agg=events_agg)
+        render_summary_export_buttons(project_name, period_label, summary_text, metrics, key_prefix=f"summary_export_{abs(hash(key))}", messages=messages, events_agg=events_agg, branding=branding)
 
     if role_rank(role) >= role_rank("editor"):
         with st.expander("Редактировать саммари", expanded=False):
@@ -3231,6 +3378,7 @@ def render_taxi_dashboard(
     messages: pd.DataFrame,
     manual_state: dict[str, Any],
     chart_label_settings: dict[str, Any] | None = None,
+    report_branding: dict[str, Any] | None = None,
 ) -> None:
     """Dedicated UI for driver-chat digest projects inside the platform namespace."""
     level = st.sidebar.selectbox(
@@ -3265,6 +3413,7 @@ def render_taxi_dashboard(
         role,
         profile="driver_chats",
         metrics=metrics,
+        branding=report_branding,
     )
     section_options = ["Клиентский обзор", "Инфоповоды", "Ключевые сообщения"]
     if len(selected_period_ids) >= 2:
@@ -3366,6 +3515,7 @@ def main() -> None:
             enriched_messages,
             manual_state,
             chart_label_settings=chart_label_settings,
+            report_branding=report_branding,
         )
         return
 
@@ -3397,6 +3547,7 @@ def main() -> None:
         role,
         profile=project_profile,
         metrics=metrics,
+        branding=report_branding,
     )
     section_options = ["Клиентский обзор", "Теги", "Инфоповоды", "Ключевые сообщения"]
     if len(selected_period_ids) >= 2:
