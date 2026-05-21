@@ -57,7 +57,7 @@ from services.message_compute import message_text_column, message_link_column
 from services.perf import perf_block, render_perf_sidebar, reset_perf_events
 
 APP_TITLE = "Платформа дайджестов"
-APP_VERSION = "4.3.5: cached store and performance diagnostics"
+APP_VERSION = "4.3.6: lazy dashboard sections and message pagination"
 
 ALGORITHM_PROFILE_OPTIONS = {
     "universal": "Универсальный",
@@ -2642,10 +2642,19 @@ def render_messages_block(messages: pd.DataFrame) -> None:
         view = work.copy()
         if search.strip() and text_col:
             view = view[view[text_col].fillna("").astype(str).str.contains(search.strip(), case=False, regex=False)]
-        feed_limit = int(st.number_input("Сколько сообщений показать", min_value=25, max_value=1000, value=100, step=25, key="full_feed_limit"))
         view = view.sort_values("datetime", ascending=False) if "datetime" in view.columns else view
-        st.caption(f"Найдено сообщений: {format_int(len(view))}. Показано: {format_int(min(len(view), feed_limit))}.")
-        view = view.head(feed_limit).copy()
+
+        total_found = int(len(view))
+        page_size = int(st.selectbox("Сообщений на странице", [25, 50, 100, 200], index=1, key="full_feed_page_size"))
+        total_pages = max(1, (total_found + page_size - 1) // page_size)
+        page = int(st.number_input("Страница", min_value=1, max_value=total_pages, value=min(int(st.session_state.get("full_feed_page", 1)), total_pages), step=1, key="full_feed_page"))
+        start = (page - 1) * page_size
+        end = start + page_size
+        st.caption(
+            f"Найдено сообщений: {format_int(total_found)}. "
+            f"Показано: {format_int(start + 1 if total_found else 0)}–{format_int(min(end, total_found))} из {format_int(total_found)}."
+        )
+        view = view.iloc[start:end].copy()
 
     _render_message_list(view, text_col=text_col, link_col=link_col)
 
@@ -2867,14 +2876,18 @@ def render_taxi_dashboard(
         profile="driver_chats",
         metrics=metrics,
     )
-    render_small_events_notice(hidden_events, hidden_messages, min_event_messages)
-    st.markdown("---")
-    render_events(project_id, role, events_agg, messages, manual_state)
-    st.markdown("---")
-    render_messages_block(messages)
+    section_options = ["Инфоповоды", "Ключевые сообщения"]
     if len(selected_period_ids) >= 2:
-        with st.expander("Динамика по периодам", expanded=False):
-            render_period_dynamics(messages, periods, selected_period_ids)
+        section_options.append("Динамика")
+    section = st.radio("Раздел аналитики", section_options, horizontal=True, key="taxi_dashboard_section")
+
+    if section == "Инфоповоды":
+        render_small_events_notice(hidden_events, hidden_messages, min_event_messages)
+        render_events(project_id, role, events_agg, messages, manual_state)
+    elif section == "Ключевые сообщения":
+        render_messages_block(messages)
+    elif section == "Динамика":
+        render_period_dynamics(messages, periods, selected_period_ids)
 
 
 def main() -> None:
@@ -2993,14 +3006,20 @@ def main() -> None:
         profile=project_profile,
         metrics=metrics,
     )
-    render_tag_statistics(enriched_messages)
-    render_small_events_notice(hidden_events, hidden_messages, min_event_messages)
-    render_events(project_id, role, events_agg, enriched_messages, manual_state)
-    render_messages_block(enriched_messages)
-
+    section_options = ["Теги", "Инфоповоды", "Ключевые сообщения"]
     if len(selected_period_ids) >= 2:
-        with st.expander("Динамика по периодам", expanded=False):
-            render_period_dynamics(enriched_messages, periods, selected_period_ids)
+        section_options.append("Динамика")
+    section = st.radio("Раздел аналитики", section_options, horizontal=True, key="main_dashboard_section")
+
+    if section == "Теги":
+        render_tag_statistics(enriched_messages)
+    elif section == "Инфоповоды":
+        render_small_events_notice(hidden_events, hidden_messages, min_event_messages)
+        render_events(project_id, role, events_agg, enriched_messages, manual_state)
+    elif section == "Ключевые сообщения":
+        render_messages_block(enriched_messages)
+    elif section == "Динамика":
+        render_period_dynamics(enriched_messages, periods, selected_period_ids)
 
 
 if __name__ == "__main__":
