@@ -57,7 +57,7 @@ from services.message_compute import message_text_column, message_link_column
 from services.perf import perf_block, render_perf_sidebar, reset_perf_events
 
 APP_TITLE = "Платформа дайджестов"
-APP_VERSION = "4.4.5: unified selected event view"
+APP_VERSION = "4.4.5.1: branding fallback hotfix"
 
 ALGORITHM_PROFILE_OPTIONS = {
     "universal": "Универсальный",
@@ -3617,6 +3617,7 @@ def main() -> None:
     project_profile = project_topic_profile(current_project_row)
     current_project_settings = project_settings_from_row(current_project_row) if current_project_row is not None else {}
     chart_label_settings = chart_label_settings_from_project_settings(current_project_settings)
+    report_branding = report_branding_from_project_settings(current_project_settings, project_name=project_name)
     st.sidebar.markdown(f"**Текущий проект:**  \n{project_name}")
     st.sidebar.caption(f"Профиль: {ALGORITHM_PROFILE_OPTIONS.get(project_profile, project_profile)}")
     if role == "admin":
