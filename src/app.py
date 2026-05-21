@@ -798,20 +798,31 @@ def render_period_comparison_charts(comparison: list[dict[str, Any]], *, label_s
 
     if len(comparison) >= 2:
         st.markdown("**Круговые диаграммы тональности**")
-        p1, p2 = st.columns(2)
-        previous, current = comparison[-2], comparison[-1]
-        with p1:
-            _render_sentiment_donut(str(previous.get("label", "Предыдущий период")), previous.get("sentiment", {}), key="prev", label_settings=label_settings)
-        with p2:
-            _render_sentiment_donut(str(current.get("label", "Последний период")), current.get("sentiment", {}), key="curr", label_settings=label_settings)
+        # Раньше здесь выводились пары previous/current и first/last.
+        # При 3+ периодах последний период дублировался. Теперь показываем
+        # каждый выбранный период только один раз, в хронологическом порядке.
+        unique_periods: list[dict[str, Any]] = []
+        seen_periods: set[str] = set()
+        for item in comparison:
+            key = str(item.get("period_id") or item.get("label") or "").strip()
+            if not key:
+                key = str(len(unique_periods))
+            if key in seen_periods:
+                continue
+            seen_periods.add(key)
+            unique_periods.append(item)
 
-        if len(comparison) > 2:
-            p3, p4 = st.columns(2)
-            first, last = comparison[0], comparison[-1]
-            with p3:
-                _render_sentiment_donut(str(first.get("label", "Первый период")), first.get("sentiment", {}), key="first", label_settings=label_settings)
-            with p4:
-                _render_sentiment_donut(str(last.get("label", "Последний период")), last.get("sentiment", {}), key="last", label_settings=label_settings)
+        for row_start in range(0, len(unique_periods), 2):
+            cols = st.columns(2)
+            for offset, item in enumerate(unique_periods[row_start:row_start + 2]):
+                with cols[offset]:
+                    donut_key = str(item.get("period_id") or item.get("label") or f"period_{row_start + offset}")
+                    _render_sentiment_donut(
+                        str(item.get("label", "Период")),
+                        item.get("sentiment", {}),
+                        key=f"sentiment_donut_{abs(hash(donut_key))}",
+                        label_settings=label_settings,
+                    )
 
 
 def render_period_comparison_metrics(messages: pd.DataFrame, periods: pd.DataFrame, period_ids: list[str], *, chart_label_settings: dict[str, Any] | None = None) -> dict[str, Any] | None:
