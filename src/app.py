@@ -57,7 +57,7 @@ from services.message_compute import message_text_column, message_link_column
 from services.perf import perf_block, render_perf_sidebar, reset_perf_events
 
 APP_TITLE = "Платформа дайджестов"
-APP_VERSION = "4.4.2: client insights and risk signals"
+APP_VERSION = "4.4.3: client insights in auto summary"
 
 ALGORITHM_PROFILE_OPTIONS = {
     "universal": "Универсальный",
@@ -1659,6 +1659,75 @@ def build_tag_change_table(messages: pd.DataFrame, periods: pd.DataFrame, select
     return out
 
 
+
+def build_client_insights_summary(messages: pd.DataFrame, events_agg: pd.DataFrame, periods: pd.DataFrame, selected_period_ids: list[str], *, profile: str = "") -> str:
+    """Return a text version of the client-insights block for automatic summaries."""
+    metrics = overview_metrics(messages)
+    sent = metrics.get("sentiment", {}) or {}
+    total = int(sent.get("total", 0) or 0)
+    negative = int(sent.get("negative", 0) or 0)
+    negative_share = negative / total if total else 0.0
+    engagement = int(metrics.get("engagement", 0) or 0)
+    risk_level = "низкий" if negative_share < 0.01 else "средний" if negative_share < 0.05 else "высокий"
+
+    lines: list[str] = []
+    lines.append("Клиентский обзор")
+    lines.append(f"Риск негатива: {risk_level}; негативных сообщений — {format_int(negative)} ({negative_share * 100:.1f}%).")
+    lines.append(f"Суммарная вовлеченность: {format_int(engagement)}.")
+
+    if len(selected_period_ids or []) >= 2:
+        change_lines = build_period_change_insights(messages, periods, selected_period_ids)
+        if change_lines:
+            lines.append("Что изменилось к предыдущему периоду:")
+            for item in change_lines[:5]:
+                lines.append(f"• {item}")
+
+        tag_changes = build_tag_change_table(messages, periods, selected_period_ids, limit=5)
+        if tag_changes is not None and not tag_changes.empty:
+            lines.append("Теги с заметными изменениями:")
+            for _, row in tag_changes.head(5).iterrows():
+                parts = [str(row.get("Тег") or "")]
+                try:
+                    delta_messages = int(row.get("Δ сообщений", 0) or 0)
+                except Exception:
+                    delta_messages = 0
+                try:
+                    delta_reach = int(row.get("Δ охвата", 0) or 0)
+                except Exception:
+                    delta_reach = 0
+                try:
+                    delta_eng = int(row.get("Δ вовлеченности", 0) or 0)
+                except Exception:
+                    delta_eng = 0
+                details = []
+                if delta_messages:
+                    details.append(f"сообщения {format_int(delta_messages)}")
+                if delta_reach:
+                    details.append(f"охват {format_int(delta_reach)}")
+                if delta_eng:
+                    details.append(f"вовлеченность {format_int(delta_eng)}")
+                if details:
+                    parts.append("; ".join(details))
+                lines.append("• " + " — ".join([p for p in parts if p]))
+
+    tags = top_client_tags(messages, limit=5)
+    if tags is not None and not tags.empty:
+        lines.append("Топ тегов для отчета:")
+        for _, row in tags.iterrows():
+            lines.append(
+                f"• {row.get('Тег', '')} — {format_int(row.get('Сообщений', 0))} сообщ.; "
+                f"охват {format_int(row.get('Охват', 0))}; вовлеченность {format_int(row.get('Вовлеченность', 0))}."
+            )
+
+    top_events = top_client_events(events_agg, limit=5)
+    if top_events is not None and not top_events.empty:
+        title_col = _event_title_col(top_events) or "title"
+        lines.append("Топ инфоповодов для отчета:")
+        for _, row in top_events.iterrows():
+            lines.append(f"• {row.get(title_col, '')} — {format_int(row.get('message_count', 0))} сообщ.")
+
+    return "\n".join(line for line in lines if str(line).strip())
+
 def render_client_insights(messages: pd.DataFrame, events_agg: pd.DataFrame, periods: pd.DataFrame, selected_period_ids: list[str], *, profile: str = "") -> None:
     st.subheader("Клиентский обзор")
     st.caption("Сводный слой для презентации заказчику: риски, ключевые сигналы и изменения между периодами.")
@@ -2551,6 +2620,10 @@ def build_auto_summary(messages: pd.DataFrame, events_agg: pd.DataFrame, periods
         lines.append("Основные инфоповоды: " + "; ".join(top_events) + ".")
     if top_chats:
         lines.append("Наиболее активные чаты: " + "; ".join(top_chats) + ".")
+
+    client_overview = build_client_insights_summary(messages, events_agg, periods, selected_period_ids)
+    if client_overview:
+        lines.append(client_overview)
     return "\n\n".join(lines)
 
 
@@ -3125,7 +3198,11 @@ def build_taxi_auto_summary(messages: pd.DataFrame, events_agg: pd.DataFrame, pe
         f"Основные обсуждения: {top_events}.",
         f"Наиболее активные чаты: {top_chats}.",
     ]
-    return "\n".join("• " + line for line in lines)
+    summary_text = "\n".join("• " + line for line in lines)
+    client_overview = build_client_insights_summary(messages, events_agg, periods, selected_period_ids, profile="driver_chats")
+    if client_overview:
+        summary_text += "\n\n" + client_overview
+    return summary_text
 
 
 def render_taxi_summary(project_id: str, period_ids: list[str], messages: pd.DataFrame, events_agg: pd.DataFrame, periods: pd.DataFrame, role: str) -> None:
