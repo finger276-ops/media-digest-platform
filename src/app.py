@@ -57,7 +57,7 @@ from services.message_compute import message_text_column, message_link_column
 from services.perf import perf_block, render_perf_sidebar, reset_perf_events
 
 APP_TITLE = "Платформа дайджестов"
-APP_VERSION = "4.3.6: lazy dashboard sections and message pagination"
+APP_VERSION = "4.3.8: selected event messages filter"
 
 ALGORITHM_PROFILE_OPTIONS = {
     "universal": "Универсальный",
@@ -2435,6 +2435,54 @@ def render_period_dynamics(messages: pd.DataFrame, periods: pd.DataFrame, period
 
 
 
+def selected_event_filter_key(project_id: str | None) -> str:
+    return f"selected_event_filter::{project_id or 'global'}"
+
+
+def set_selected_event_filter(project_id: str | None, selected: pd.Series) -> None:
+    event_ids = [str(x) for x in (selected.get("event_ids", []) or []) if str(x).strip()]
+    if not event_ids and "event_id" in selected.index:
+        event_ids = [str(selected.get("event_id"))]
+    st.session_state[selected_event_filter_key(project_id)] = {
+        "title": str(selected.get("title") or selected.get("event_title") or "Выбранный инфоповод"),
+        "event_ids": event_ids,
+        "group_key": str(selected.get("group_key") or ""),
+    }
+
+
+def get_selected_event_filter(project_id: str | None) -> dict[str, Any] | None:
+    value = st.session_state.get(selected_event_filter_key(project_id))
+    return value if isinstance(value, dict) and value.get("event_ids") else None
+
+
+def clear_selected_event_filter(project_id: str | None) -> None:
+    st.session_state.pop(selected_event_filter_key(project_id), None)
+
+
+def filter_messages_by_selected_event(messages: pd.DataFrame, event_filter: dict[str, Any] | None) -> pd.DataFrame:
+    if messages is None or messages.empty or not event_filter:
+        return messages
+    event_ids = {str(x) for x in event_filter.get("event_ids", []) if str(x).strip()}
+    if not event_ids:
+        return messages
+    mask = pd.Series(False, index=messages.index)
+    for col in ["event_id", "source_event_id", "final_event_id", "source_final_event_id"]:
+        if col in messages.columns:
+            mask = mask | messages[col].fillna("").astype(str).isin(event_ids)
+    if mask.any():
+        return messages[mask].copy()
+
+    # Fallback for imported sources where event links may be reconstructed by title.
+    title = str(event_filter.get("title") or "").strip().lower()
+    if title:
+        for col in ["event_title", "source_main_topic", "Сюжет"]:
+            if col in messages.columns:
+                fallback_mask = messages[col].fillna("").astype(str).str.strip().str.lower().eq(title)
+                if fallback_mask.any():
+                    return messages[fallback_mask].copy()
+    return messages.iloc[0:0].copy()
+
+
 def render_events(
     project_id: str,
     role: str,
@@ -2515,6 +2563,7 @@ def render_events(
         return
 
     selected = filtered_events.iloc[rows[0]]
+    set_selected_event_filter(project_id, selected)
     selected_ids = set(map(str, selected.get("event_ids", [])))
     st.markdown(f"### {selected['title']}")
     st.write(selected.get("description", ""))
@@ -2564,7 +2613,7 @@ def render_events(
                         st.success("Инфоповоды объединены.")
                         st.rerun()
 
-    st.caption("Сообщения доступны ниже в блоке «Ключевые сообщения / Вся лента».")
+    st.caption("Выбранный инфоповод применен как фильтр для блока «Ключевые сообщения / Вся лента». Перейдите в этот раздел, чтобы увидеть только его сообщения.")
 
 
 
@@ -2613,12 +2662,27 @@ def _render_message_list(view: pd.DataFrame, *, text_col: str | None, link_col: 
             st.markdown(f"[Открыть сообщение]({link})")
 
 
-def render_messages_block(messages: pd.DataFrame) -> None:
-    """Render global key messages and full feed as a readable list."""
+def render_messages_block(messages: pd.DataFrame, *, project_id: str | None = None) -> None:
+    """Render key messages and full feed as a readable list.
+
+    If an event was selected in the «Инфоповоды» section, both modes are
+    filtered by that event: top messages and the full feed show only messages
+    from the selected infopoint.
+    """
     st.subheader("Ключевые сообщения")
     if messages is None or messages.empty:
         st.info("Сообщения не найдены.")
         return
+
+    event_filter = get_selected_event_filter(project_id)
+    if event_filter:
+        c1, c2 = st.columns([4, 1])
+        with c1:
+            st.info(f"Выбран инфоповод: {event_filter.get('title')}. В топе и общей ленте показаны только сообщения этого инфоповода.")
+        with c2:
+            if st.button("Сбросить фильтр", key=f"clear_event_message_filter_{project_id or 'global'}", use_container_width=True):
+                clear_selected_event_filter(project_id)
+                st.rerun()
 
     mode = st.radio(
         "Режим просмотра сообщений",
@@ -2628,6 +2692,11 @@ def render_messages_block(messages: pd.DataFrame) -> None:
     )
 
     work = messages.copy()
+    if event_filter:
+        work = filter_messages_by_selected_event(work, event_filter)
+        if work.empty:
+            st.warning("По выбранному инфоповоду сообщения не найдены. Возможно, данные были пересобраны или связи инфоповодов изменились.")
+            return
     text_col = message_text_column(work)
     link_col = message_link_column(work)
     work["_audience"] = numeric_series(work, ["audience", "Аудитория"]).astype(int)
@@ -2635,7 +2704,8 @@ def render_messages_block(messages: pd.DataFrame) -> None:
     work["_engagement"] = numeric_series(work, ["engagement", "Вовлечённость", "Вовлеченность", "engagement_count"]).astype(int)
 
     if mode == "Ключевые сообщения":
-        st.caption("Показаны 15 сообщений с максимальной вовлеченностью. Если вовлеченность равна 0, дополнительными критериями выступают охват и аудитория.")
+        scope = "выбранного инфоповода" if event_filter else "всей выборки"
+        st.caption(f"Показаны 15 сообщений с максимальной вовлеченностью для {scope}. Если вовлеченность равна 0, дополнительными критериями выступают охват и аудитория.")
         view = work.sort_values(["_engagement", "_reach", "_audience"], ascending=False).head(15).copy()
     else:
         search = st.text_input("Поиск по всей ленте", placeholder="Введите слово или фразу", key="full_feed_search")
@@ -2885,7 +2955,7 @@ def render_taxi_dashboard(
         render_small_events_notice(hidden_events, hidden_messages, min_event_messages)
         render_events(project_id, role, events_agg, messages, manual_state)
     elif section == "Ключевые сообщения":
-        render_messages_block(messages)
+        render_messages_block(messages, project_id=project_id)
     elif section == "Динамика":
         render_period_dynamics(messages, periods, selected_period_ids)
 
@@ -3017,7 +3087,7 @@ def main() -> None:
         render_small_events_notice(hidden_events, hidden_messages, min_event_messages)
         render_events(project_id, role, events_agg, enriched_messages, manual_state)
     elif section == "Ключевые сообщения":
-        render_messages_block(enriched_messages)
+        render_messages_block(enriched_messages, project_id=project_id)
     elif section == "Динамика":
         render_period_dynamics(enriched_messages, periods, selected_period_ids)
 
