@@ -57,7 +57,7 @@ from services.message_compute import message_text_column, message_link_column
 from services.perf import perf_block, render_perf_sidebar, reset_perf_events
 
 APP_TITLE = "Платформа дайджестов"
-APP_VERSION = "4.3.8: selected event messages filter"
+APP_VERSION = "4.4.0: controlled comparison visualizations"
 
 ALGORITHM_PROFILE_OPTIONS = {
     "universal": "Универсальный",
@@ -626,10 +626,30 @@ def render_period_comparison_charts(comparison: list[dict[str, Any]], *, label_s
         return
 
     st.subheader("Визуализация сравнений")
-    c1, c2 = st.columns(2)
-    with c1:
+    st.caption("Выберите, какие графики показать на стартовой странице. Скрытые графики не рендерятся и не перегружают страницу.")
+
+    chart_blocks = [
+        "Динамика основных метрик",
+        "Динамика тональности",
+        "Сравнение выбранной метрики",
+        "Круговые диаграммы тональности",
+    ]
+    selected_blocks = st.multiselect(
+        "Показывать графики",
+        chart_blocks,
+        default=["Динамика основных метрик", "Динамика тональности"],
+        key=f"comparison_visible_charts_{abs(hash(tuple(chart_df['Период'].astype(str).tolist())))}",
+        help="Можно оставить только нужные визуализации. Это ускоряет отображение страницы при большом числе периодов.",
+    )
+
+    if not selected_blocks:
+        st.info("Все графики скрыты. Выберите хотя бы один график в списке выше.")
+        return
+
+    metrics_cols = ["Сообщения", "Аудитория", "Охват", "Вовлеченность"]
+
+    if "Динамика основных метрик" in selected_blocks:
         st.markdown("**Динамика основных метрик**")
-        metrics_cols = ["Сообщения", "Аудитория", "Охват", "Вовлеченность"]
         metrics_long = chart_df[["Период"] + metrics_cols].melt(
             id_vars="Период",
             var_name="Метрика",
@@ -688,7 +708,8 @@ def render_period_comparison_charts(comparison: list[dict[str, Any]], *, label_s
             metrics_line = base_metrics.mark_line(point=True)
             metrics_labels = base_metrics.mark_text(**chart_label_text_kwargs(label_settings, chart_type="line")).encode(text="Подпись:N")
             st.altair_chart((metrics_line + metrics_labels).properties(height=320), use_container_width=True)
-    with c2:
+
+    if "Динамика тональности" in selected_blocks:
         st.markdown("**Динамика долей тональности, %**")
         sentiment_long = chart_df[["Период", "Позитив, %", "Нейтрал, %", "Негатив, %"]].melt(
             id_vars="Период",
@@ -741,66 +762,64 @@ def render_period_comparison_charts(comparison: list[dict[str, Any]], *, label_s
             sentiment_labels = base_sentiment.mark_text(**chart_label_text_kwargs(label_settings, chart_type="line")).encode(text="Подпись:N")
             st.altair_chart((sentiment_line + sentiment_labels).properties(height=320), use_container_width=True)
 
-    st.markdown("**Столбчатое сравнение по периодам**")
-    metric_map = {
-        "Сообщения": "Сообщения",
-        "Аудитория": "Аудитория",
-        "Охват": "Охват",
-        "Вовлеченность": "Вовлеченность",
-    }
-    selected_metric = st.selectbox(
-        "Метрика для столбчатого графика",
-        list(metric_map.keys()),
-        index=0,
-        key=f"comparison_metric_{abs(hash(tuple(chart_df['Период'].tolist())))}",
-    )
-    metric_col = metric_map[selected_metric]
-    bar_df = chart_df[["Период", metric_col]].rename(columns={metric_col: "Значение"})
-    bar_df["Подпись"] = bar_df["Значение"].apply(_chart_number_label)
-    comparison_chart_type = st.selectbox(
-        "Тип визуализации выбранной метрики",
-        ["Столбчатая", "График", "Круговая диаграмма"],
-        index=0,
-        key=f"single_metric_chart_type_{abs(hash(tuple(chart_df['Период'].tolist())))}",
-    )
-    if comparison_chart_type == "Круговая диаграмма":
-        _render_value_distribution_donut(bar_df, "Период", "Значение", selected_metric)
-    else:
-        label_cfg = chart_label_settings_from_project_settings({"chart_label_settings": label_settings or {}})
-        if label_cfg.get("position") == "center":
-            bar_df["_label_y"] = pd.to_numeric(bar_df["Значение"], errors="coerce").fillna(0) / 2
-        elif label_cfg.get("position") == "bottom":
-            max_value = float(pd.to_numeric(bar_df["Значение"], errors="coerce").fillna(0).max() or 0)
-            bar_df["_label_y"] = max_value * 0.03
-        else:
-            bar_df["_label_y"] = pd.to_numeric(bar_df["Значение"], errors="coerce").fillna(0)
-        bar_base = alt.Chart(bar_df).encode(
-            x=alt.X("Период:N", sort=None, title="Период", axis=alt.Axis(labelAngle=-90)),
-            y=alt.Y("Значение:Q", title=selected_metric),
-            tooltip=["Период", alt.Tooltip("Значение:Q", format=",")],
+    if "Сравнение выбранной метрики" in selected_blocks:
+        st.markdown("**Сравнение выбранной метрики по периодам**")
+        metric_map = {
+            "Сообщения": "Сообщения",
+            "Аудитория": "Аудитория",
+            "Охват": "Охват",
+            "Вовлеченность": "Вовлеченность",
+        }
+        selected_metric = st.selectbox(
+            "Метрика для сравнения",
+            list(metric_map.keys()),
+            index=0,
+            key=f"comparison_metric_{abs(hash(tuple(chart_df['Период'].tolist())))}",
         )
-        if comparison_chart_type == "График":
-            line = bar_base.mark_line(point=True)
-            line_labels = bar_base.mark_text(**chart_label_text_kwargs(label_settings, chart_type="line")).encode(text="Подпись:N")
-            st.altair_chart((line + line_labels).properties(height=320), use_container_width=True)
+        metric_col = metric_map[selected_metric]
+        bar_df = chart_df[["Период", metric_col]].rename(columns={metric_col: "Значение"})
+        bar_df["Подпись"] = bar_df["Значение"].apply(_chart_number_label)
+        comparison_chart_type = st.selectbox(
+            "Тип визуализации выбранной метрики",
+            ["Столбчатая", "График", "Круговая диаграмма"],
+            index=0,
+            key=f"single_metric_chart_type_{abs(hash(tuple(chart_df['Период'].tolist())))}",
+        )
+        if comparison_chart_type == "Круговая диаграмма":
+            _render_value_distribution_donut(bar_df, "Период", "Значение", selected_metric)
         else:
-            bar = bar_base.mark_bar(size=70)
-            bar_label_kwargs = chart_label_text_kwargs(label_settings, chart_type="bar")
-            if label_cfg.get("position") in {"center", "bottom"}:
-                bar_label_kwargs["dy"] = 0
-                bar_label_kwargs["baseline"] = "middle" if label_cfg.get("position") == "center" else "bottom"
-            bar_labels = alt.Chart(bar_df).mark_text(**bar_label_kwargs).encode(
-                x=alt.X("Период:N", sort=None),
-                y=alt.Y("_label_y:Q"),
-                text="Подпись:N",
+            label_cfg = chart_label_settings_from_project_settings({"chart_label_settings": label_settings or {}})
+            if label_cfg.get("position") == "center":
+                bar_df["_label_y"] = pd.to_numeric(bar_df["Значение"], errors="coerce").fillna(0) / 2
+            elif label_cfg.get("position") == "bottom":
+                max_value = float(pd.to_numeric(bar_df["Значение"], errors="coerce").fillna(0).max() or 0)
+                bar_df["_label_y"] = max_value * 0.03
+            else:
+                bar_df["_label_y"] = pd.to_numeric(bar_df["Значение"], errors="coerce").fillna(0)
+            bar_base = alt.Chart(bar_df).encode(
+                x=alt.X("Период:N", sort=None, title="Период", axis=alt.Axis(labelAngle=-90)),
+                y=alt.Y("Значение:Q", title=selected_metric),
+                tooltip=["Период", alt.Tooltip("Значение:Q", format=",")],
             )
-            st.altair_chart((bar + bar_labels).properties(height=320), use_container_width=True)
+            if comparison_chart_type == "График":
+                line = bar_base.mark_line(point=True)
+                line_labels = bar_base.mark_text(**chart_label_text_kwargs(label_settings, chart_type="line")).encode(text="Подпись:N")
+                st.altair_chart((line + line_labels).properties(height=320), use_container_width=True)
+            else:
+                bar = bar_base.mark_bar(size=70)
+                bar_label_kwargs = chart_label_text_kwargs(label_settings, chart_type="bar")
+                if label_cfg.get("position") in {"center", "bottom"}:
+                    bar_label_kwargs["dy"] = 0
+                    bar_label_kwargs["baseline"] = "middle" if label_cfg.get("position") == "center" else "bottom"
+                bar_labels = alt.Chart(bar_df).mark_text(**bar_label_kwargs).encode(
+                    x=alt.X("Период:N", sort=None),
+                    y=alt.Y("_label_y:Q"),
+                    text="Подпись:N",
+                )
+                st.altair_chart((bar + bar_labels).properties(height=320), use_container_width=True)
 
-    if len(comparison) >= 2:
+    if "Круговые диаграммы тональности" in selected_blocks and len(comparison) >= 2:
         st.markdown("**Круговые диаграммы тональности**")
-        # Раньше здесь выводились пары previous/current и first/last.
-        # При 3+ периодах последний период дублировался. Теперь показываем
-        # каждый выбранный период только один раз, в хронологическом порядке.
         unique_periods: list[dict[str, Any]] = []
         seen_periods: set[str] = set()
         for item in comparison:
@@ -823,6 +842,7 @@ def render_period_comparison_charts(comparison: list[dict[str, Any]], *, label_s
                         key=f"sentiment_donut_{abs(hash(donut_key))}",
                         label_settings=label_settings,
                     )
+
 
 
 def render_period_comparison_metrics(messages: pd.DataFrame, periods: pd.DataFrame, period_ids: list[str], *, chart_label_settings: dict[str, Any] | None = None) -> dict[str, Any] | None:
