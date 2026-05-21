@@ -57,7 +57,7 @@ from services.message_compute import message_text_column, message_link_column
 from services.perf import perf_block, render_perf_sidebar, reset_perf_events
 
 APP_TITLE = "Платформа дайджестов"
-APP_VERSION = "4.4.6: unified selected tag view"
+APP_VERSION = "4.4.8: improved comparison chart labels"
 
 ALGORITHM_PROFILE_OPTIONS = {
     "universal": "Универсальный",
@@ -534,13 +534,46 @@ def _comparison_row(metric: dict[str, Any], previous: dict[str, Any] | None = No
     return row
 
 
+
+def _short_period_chart_label(label: Any) -> str:
+    """Compact period label for chart axes: only the period name, without repeated dates."""
+    raw = str(label or "").strip()
+    if not raw:
+        return "Период"
+    for sep in [" · ", " — ", " - "]:
+        if sep in raw:
+            raw = raw.split(sep, 1)[0].strip()
+            break
+    if len(raw) > 28:
+        raw = raw[:25].rstrip() + "…"
+    return raw or "Период"
+
+
+def _dedupe_chart_labels(labels: list[str]) -> list[str]:
+    seen: dict[str, int] = {}
+    result: list[str] = []
+    for label in labels:
+        base = str(label or "Период").strip() or "Период"
+        seen[base] = seen.get(base, 0) + 1
+        result.append(base if seen[base] == 1 else f"{base} #{seen[base]}")
+    return result
+
+
 def _comparison_visual_rows(comparison: list[dict[str, Any]]) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
+    raw_labels: list[str] = []
     for item in comparison:
+        full_label = str(item.get("label", item.get("period_id", "")) or "")
+        raw_labels.append(_short_period_chart_label(full_label))
+    short_labels = _dedupe_chart_labels(raw_labels)
+
+    for item, short_label in zip(comparison, short_labels):
         sent = item.get("sentiment", {}) or {}
         total = max(1, int(sent.get("total", 0) or 0))
+        full_label = str(item.get("label", item.get("period_id", "")) or "")
         rows.append({
-            "Период": item.get("label", item.get("period_id", "")),
+            "Период": short_label,
+            "Полный период": full_label,
             "Сообщения": int(item.get("messages", 0) or 0),
             "Аудитория": int(item.get("audience", 0) or 0),
             "Охват": int(item.get("reach", 0) or 0),
@@ -703,18 +736,18 @@ def render_period_comparison_charts(comparison: list[dict[str, Any]], *, label_s
             key=f"main_metrics_chart_type_{abs(hash(tuple(chart_df['Период'].tolist())))}",
         )
         base_metrics = alt.Chart(metrics_long).encode(
-            x=alt.X("Период:N", sort=None, title="Период"),
+            x=alt.X("Период:N", sort=None, title="Период", axis=alt.Axis(labelAngle=0, labelLimit=120)),
             y=alt.Y("Значение:Q", title="Значение"),
             color=alt.Color("Метрика:N", legend=alt.Legend(title="Метрика")),
-            tooltip=["Период", "Метрика", alt.Tooltip("Значение:Q", format=",")],
+            tooltip=[alt.Tooltip("Полный период:N", title="Период"), "Метрика", alt.Tooltip("Значение:Q", format=",")],
         )
         if chart_type == "Столбчатая":
             bars = alt.Chart(metrics_long).mark_bar(size=18).encode(
-                x=alt.X("Период:N", sort=None, title="Период", axis=alt.Axis(labelAngle=-90)),
+                x=alt.X("Период:N", sort=None, title="Период", axis=alt.Axis(labelAngle=0, labelLimit=120)),
                 xOffset=alt.XOffset("Метрика:N"),
                 y=alt.Y("Значение:Q", title="Значение"),
                 color=alt.Color("Метрика:N", legend=alt.Legend(title="Метрика")),
-                tooltip=["Период", "Метрика", alt.Tooltip("Значение:Q", format=",")],
+                tooltip=[alt.Tooltip("Полный период:N", title="Период"), "Метрика", alt.Tooltip("Значение:Q", format=",")],
             )
             st.altair_chart(bars.properties(height=320), use_container_width=True)
         elif chart_type == "Круговая диаграмма":
@@ -724,7 +757,7 @@ def render_period_comparison_charts(comparison: list[dict[str, Any]], *, label_s
                 index=0,
                 key=f"main_metrics_pie_metric_{abs(hash(tuple(chart_df['Период'].tolist())))}",
             )
-            pie_df = chart_df[["Период", pie_metric]].rename(columns={pie_metric: "Значение"}).copy()
+            pie_df = chart_df[["Период", "Полный период", pie_metric]].rename(columns={pie_metric: "Значение"}).copy()
             pie_df["Значение"] = pd.to_numeric(pie_df["Значение"], errors="coerce").fillna(0)
             total_value = float(pie_df["Значение"].sum() or 0)
             if total_value <= 0:
@@ -735,7 +768,7 @@ def render_period_comparison_charts(comparison: list[dict[str, Any]], *, label_s
                 donut = alt.Chart(pie_df).mark_arc(innerRadius=50).encode(
                     theta=alt.Theta(field="Значение", type="quantitative"),
                     color=alt.Color("Период:N", legend=None),
-                    tooltip=["Период", alt.Tooltip("Значение:Q", format=","), alt.Tooltip("Доля:Q", format=".1f", title="Доля, %")],
+                    tooltip=[alt.Tooltip("Полный период:N", title="Период"), alt.Tooltip("Значение:Q", format=","), alt.Tooltip("Доля:Q", format=".1f", title="Доля, %")],
                 )
                 left_pie, right_pie = st.columns([3, 2])
                 with left_pie:
@@ -746,8 +779,8 @@ def render_period_comparison_charts(comparison: list[dict[str, Any]], *, label_s
                         st.markdown(f"**{row['Период']}**  \n{_chart_number_label(row['Значение'])} · {_chart_number_label(row['Доля'], percent=True)}")
         else:
             metrics_line = base_metrics.mark_line(point=True)
-            metrics_labels = base_metrics.mark_text(**chart_label_text_kwargs(label_settings, chart_type="line")).encode(text="Подпись:N")
-            st.altair_chart((metrics_line + metrics_labels).properties(height=320), use_container_width=True)
+            st.caption("Подписи значений скрыты, чтобы линии не накладывались. Значения доступны при наведении на точки.")
+            st.altair_chart(metrics_line.properties(height=320), use_container_width=True)
 
     if "Динамика тональности" in selected_blocks:
         st.markdown("**Динамика долей тональности, %**")
@@ -765,18 +798,18 @@ def render_period_comparison_charts(comparison: list[dict[str, Any]], *, label_s
             key=f"sentiment_chart_type_{abs(hash(tuple(chart_df['Период'].tolist())))}",
         )
         base_sentiment = alt.Chart(sentiment_long).encode(
-            x=alt.X("Период:N", sort=None, title="Период"),
+            x=alt.X("Период:N", sort=None, title="Период", axis=alt.Axis(labelAngle=0, labelLimit=120)),
             y=alt.Y("Доля, %:Q", title="Доля, %"),
             color=alt.Color(
                 "Тональность:N",
                 scale=alt.Scale(domain=SENTIMENT_COLOR_DOMAIN, range=SENTIMENT_COLOR_RANGE),
                 legend=alt.Legend(title="Тональность"),
             ),
-            tooltip=["Период", "Тональность", alt.Tooltip("Доля, %:Q", format=".1f")],
+            tooltip=[alt.Tooltip("Полный период:N", title="Период"), "Тональность", alt.Tooltip("Доля, %:Q", format=".1f")],
         )
         if sentiment_chart_type == "Столбчатая":
             sentiment_bars = alt.Chart(sentiment_long).mark_bar(size=18).encode(
-                x=alt.X("Период:N", sort=None, title="Период", axis=alt.Axis(labelAngle=-90)),
+                x=alt.X("Период:N", sort=None, title="Период", axis=alt.Axis(labelAngle=0, labelLimit=120)),
                 xOffset=alt.XOffset("Тональность:N"),
                 y=alt.Y("Доля, %:Q", title="Доля, %"),
                 color=alt.Color(
@@ -784,7 +817,7 @@ def render_period_comparison_charts(comparison: list[dict[str, Any]], *, label_s
                     scale=alt.Scale(domain=SENTIMENT_COLOR_DOMAIN, range=SENTIMENT_COLOR_RANGE),
                     legend=alt.Legend(title="Тональность"),
                 ),
-                tooltip=["Период", "Тональность", alt.Tooltip("Доля, %:Q", format=".1f")],
+                tooltip=[alt.Tooltip("Полный период:N", title="Период"), "Тональность", alt.Tooltip("Доля, %:Q", format=".1f")],
             )
             st.altair_chart(sentiment_bars.properties(height=320), use_container_width=True)
         elif sentiment_chart_type == "Круговая диаграмма":
@@ -795,12 +828,12 @@ def render_period_comparison_charts(comparison: list[dict[str, Any]], *, label_s
                 index=len(period_options) - 1 if period_options else 0,
                 key=f"sentiment_pie_period_{abs(hash(tuple(period_options)))}",
             )
-            sentiment_by_label = {str(item.get("label", item.get("period_id", ""))): item.get("sentiment", {}) for item in comparison}
+            sentiment_by_label = {str(row["Период"]): item.get("sentiment", {}) for (_, row), item in zip(chart_df.iterrows(), comparison)}
             _render_sentiment_donut(selected_period_for_sentiment, sentiment_by_label.get(selected_period_for_sentiment, {}), key="sentiment_selector", label_settings=label_settings)
         else:
             sentiment_line = base_sentiment.mark_line(point=True)
-            sentiment_labels = base_sentiment.mark_text(**chart_label_text_kwargs(label_settings, chart_type="line")).encode(text="Подпись:N")
-            st.altair_chart((sentiment_line + sentiment_labels).properties(height=320), use_container_width=True)
+            st.caption("Подписи процентов скрыты, чтобы линии не накладывались. Значения доступны при наведении на точки.")
+            st.altair_chart(sentiment_line.properties(height=320), use_container_width=True)
 
     if "Сравнение выбранной метрики" in selected_blocks:
         st.markdown("**Сравнение выбранной метрики по периодам**")
@@ -817,7 +850,7 @@ def render_period_comparison_charts(comparison: list[dict[str, Any]], *, label_s
             key=f"comparison_metric_{abs(hash(tuple(chart_df['Период'].tolist())))}",
         )
         metric_col = metric_map[selected_metric]
-        bar_df = chart_df[["Период", metric_col]].rename(columns={metric_col: "Значение"})
+        bar_df = chart_df[["Период", "Полный период", metric_col]].rename(columns={metric_col: "Значение"})
         bar_df["Подпись"] = bar_df["Значение"].apply(_chart_number_label)
         comparison_chart_type = st.selectbox(
             "Тип визуализации выбранной метрики",
@@ -837,9 +870,9 @@ def render_period_comparison_charts(comparison: list[dict[str, Any]], *, label_s
             else:
                 bar_df["_label_y"] = pd.to_numeric(bar_df["Значение"], errors="coerce").fillna(0)
             bar_base = alt.Chart(bar_df).encode(
-                x=alt.X("Период:N", sort=None, title="Период", axis=alt.Axis(labelAngle=-90)),
+                x=alt.X("Период:N", sort=None, title="Период", axis=alt.Axis(labelAngle=0, labelLimit=120)),
                 y=alt.Y("Значение:Q", title=selected_metric),
-                tooltip=["Период", alt.Tooltip("Значение:Q", format=",")],
+                tooltip=[alt.Tooltip("Полный период:N", title="Период"), alt.Tooltip("Значение:Q", format=",")],
             )
             if comparison_chart_type == "График":
                 line = bar_base.mark_line(point=True)
