@@ -57,7 +57,7 @@ from services.message_compute import message_text_column, message_link_column
 from services.perf import perf_block, render_perf_sidebar, reset_perf_events
 
 APP_TITLE = "Платформа дайджестов"
-APP_VERSION = "4.4.0: controlled comparison visualizations"
+APP_VERSION = "4.4.1: aggregate overview for multi-period selection"
 
 ALGORITHM_PROFILE_OPTIONS = {
     "universal": "Универсальный",
@@ -914,24 +914,27 @@ def render_period_comparison_metrics(messages: pd.DataFrame, periods: pd.DataFra
 
 
 def render_project_intro(project_name: str, messages: pd.DataFrame, periods: pd.DataFrame, period_ids: list[str], *, profile_label: str = "", chart_label_settings: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Unified top block for all project profiles."""
+    """Unified top block for all project profiles.
+
+    If several periods are selected, the top cards show aggregate values for
+    the whole selected range. Sequential comparison is rendered below as a
+    separate analytical block and does not replace the aggregate overview.
+    """
     st.header(project_name)
     if profile_label:
         st.caption(f"Профиль проекта: {profile_label}")
     period_label = selected_period_label(periods, period_ids)
+    selected_ids = [x for x in (period_ids or []) if str(x).strip()]
 
     st.subheader("Период и основные метрики")
-    if len([x for x in (period_ids or []) if str(x).strip()]) >= 2 and isinstance(messages, pd.DataFrame) and "period_id" in messages.columns:
-        metrics = render_period_comparison_metrics(messages, periods, period_ids, chart_label_settings=chart_label_settings)
-        if metrics is not None:
-            metrics["project_name"] = project_name
-            return metrics
-
     metrics = overview_metrics(messages)
     sent = metrics["sentiment"]
     total = int(sent.get("total", 0))
 
-    st.caption(f"Период: {period_label}")
+    if len(selected_ids) >= 2:
+        st.caption(f"Выбрано периодов: {len(selected_ids)} · общие данные по выбранным периодам: {period_label}")
+    else:
+        st.caption(f"Период: {period_label}")
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Сообщений", format_int(metrics["messages"]))
@@ -946,6 +949,14 @@ def render_project_intro(project_name: str, messages: pd.DataFrame, periods: pd.
 
     metrics["period_label"] = period_label
     metrics["project_name"] = project_name
+
+    if len(selected_ids) >= 2 and isinstance(messages, pd.DataFrame) and "period_id" in messages.columns:
+        st.divider()
+        comparison_metrics = render_period_comparison_metrics(messages, periods, period_ids, chart_label_settings=chart_label_settings)
+        if comparison_metrics is not None:
+            metrics["comparison_sequence"] = comparison_metrics.get("comparison_sequence")
+            metrics["comparison"] = comparison_metrics.get("comparison")
+
     return metrics
 
 
