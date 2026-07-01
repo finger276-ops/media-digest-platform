@@ -11,7 +11,6 @@ from pathlib import Path
 import sqlite3
 from datetime import datetime, timezone
 import uuid
-import json
 import pandas as pd
 
 from persistent_store import supabase_configured, get_supabase_client, _fetch_all
@@ -45,7 +44,9 @@ def now() -> str:
 
 
 def _payload_df(conn: SupabaseManualStore, table_name: str) -> pd.DataFrame:
-    rows = _fetch_all(conn.client, "dashboard_manual_rows", filters={"table_name": table_name})
+    rows = _fetch_all(
+        conn.client, "dashboard_manual_rows", filters={"table_name": table_name}
+    )
     payloads = []
     for row in rows:
         payload = row.get("payload") or {}
@@ -95,7 +96,13 @@ def load_all_manual_tables(conn) -> dict[str, pd.DataFrame]:
 
 
 def _get_payload(conn: SupabaseManualStore, table_name: str, row_key: str) -> dict:
-    response = conn.client.table("dashboard_manual_rows").select("payload").eq("row_key", row_key).limit(1).execute()
+    response = (
+        conn.client.table("dashboard_manual_rows")
+        .select("payload")
+        .eq("row_key", row_key)
+        .limit(1)
+        .execute()
+    )
     data = response.data or []
     if not data:
         return {}
@@ -103,14 +110,19 @@ def _get_payload(conn: SupabaseManualStore, table_name: str, row_key: str) -> di
     return payload if isinstance(payload, dict) else {}
 
 
-def _upsert_payload(conn: SupabaseManualStore, table_name: str, row_key: str, payload: dict) -> None:
+def _upsert_payload(
+    conn: SupabaseManualStore, table_name: str, row_key: str, payload: dict
+) -> None:
     payload = {k: (None if pd.isna(v) else v) for k, v in payload.items()}
-    conn.client.table("dashboard_manual_rows").upsert({
-        "row_key": row_key,
-        "table_name": table_name,
-        "payload": payload,
-        "updated_at": now(),
-    }, on_conflict="row_key").execute()
+    conn.client.table("dashboard_manual_rows").upsert(
+        {
+            "row_key": row_key,
+            "table_name": table_name,
+            "payload": payload,
+            "updated_at": now(),
+        },
+        on_conflict="row_key",
+    ).execute()
 
 
 def _delete_payload(conn: SupabaseManualStore, row_key: str) -> None:
@@ -118,8 +130,7 @@ def _delete_payload(conn: SupabaseManualStore, row_key: str) -> None:
 
 
 def init_db(conn: sqlite3.Connection) -> None:
-    conn.executescript(
-        """
+    conn.executescript("""
         CREATE TABLE IF NOT EXISTS event_overrides (
             event_id TEXT PRIMARY KEY,
             title TEXT,
@@ -198,21 +209,25 @@ def init_db(conn: sqlite3.Connection) -> None:
             payload TEXT,
             created_at TEXT NOT NULL
         );
-        """
-    )
+        """)
     conn.commit()
 
 
 def log(conn, action: str, entity_type: str, entity_id: str, payload: str = "") -> None:
     if is_supabase_conn(conn):
         row_key = f"audit_log:{now()}:{uuid.uuid4().hex[:8]}"
-        _upsert_payload(conn, "audit_log", row_key, {
-            "action": action,
-            "entity_type": entity_type,
-            "entity_id": entity_id,
-            "payload": payload,
-            "created_at": now(),
-        })
+        _upsert_payload(
+            conn,
+            "audit_log",
+            row_key,
+            {
+                "action": action,
+                "entity_type": entity_type,
+                "entity_id": entity_id,
+                "payload": payload,
+                "created_at": now(),
+            },
+        )
         return
     conn.execute(
         "INSERT INTO audit_log(action, entity_type, entity_id, payload, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -273,13 +288,21 @@ def get_dashboard_summary(conn, summary_key: str) -> dict:
     if is_supabase_conn(conn):
         return _get_payload(conn, "period_summaries", f"period_summaries:{summary_key}")
     init_db(conn)
-    row = conn.execute("SELECT * FROM period_summaries WHERE summary_key = ?", (summary_key,)).fetchone()
+    row = conn.execute(
+        "SELECT * FROM period_summaries WHERE summary_key = ?", (summary_key,)
+    ).fetchone()
     if not row:
         return {}
     return dict(row)
 
 
-def save_dashboard_summary(conn, summary_key: str, summary: str, note: str = "", period_ids: list[str] | None = None) -> None:
+def save_dashboard_summary(
+    conn,
+    summary_key: str,
+    summary: str,
+    note: str = "",
+    period_ids: list[str] | None = None,
+) -> None:
     """Save editable dashboard/period summary. Empty summary means fallback to auto summary."""
     summary_key = str(summary_key or "local:current").strip() or "local:current"
     payload = {
@@ -290,7 +313,9 @@ def save_dashboard_summary(conn, summary_key: str, summary: str, note: str = "",
         "updated_at": now(),
     }
     if is_supabase_conn(conn):
-        _upsert_payload(conn, "period_summaries", f"period_summaries:{summary_key}", payload)
+        _upsert_payload(
+            conn, "period_summaries", f"period_summaries:{summary_key}", payload
+        )
         log(conn, "save_dashboard_summary", "period_summary", summary_key)
         return
     init_db(conn)
@@ -304,7 +329,13 @@ def save_dashboard_summary(conn, summary_key: str, summary: str, note: str = "",
             period_ids=excluded.period_ids,
             updated_at=excluded.updated_at
         """,
-        (payload["summary_key"], payload["summary"], payload["note"], payload["period_ids"], payload["updated_at"]),
+        (
+            payload["summary_key"],
+            payload["summary"],
+            payload["note"],
+            payload["period_ids"],
+            payload["updated_at"],
+        ),
     )
     conn.commit()
     log(conn, "save_dashboard_summary", "period_summary", summary_key)
@@ -322,7 +353,9 @@ def create_manual_event(
     title = str(title or "").strip()
     if not title:
         raise ValueError("Укажите название инфоповода.")
-    event_id = f"manual_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
+    event_id = (
+        f"manual_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"
+    )
     created = now()
     payload = {
         "event_id": event_id,
@@ -337,14 +370,30 @@ def create_manual_event(
     }
     if is_supabase_conn(conn):
         _upsert_payload(conn, "manual_events", f"manual_events:{event_id}", payload)
-        log(conn, "create_manual_event", "event", event_id, f"title={title}; note={note}")
+        log(
+            conn,
+            "create_manual_event",
+            "event",
+            event_id,
+            f"title={title}; note={note}",
+        )
         return event_id
     conn.execute(
         """
         INSERT INTO manual_events(event_id, title, summary, status, main_tags, hidden, note, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (event_id, title, summary, status, main_tags, int(hidden), note, created, created),
+        (
+            event_id,
+            title,
+            summary,
+            status,
+            main_tags,
+            int(hidden),
+            note,
+            created,
+            created,
+        ),
     )
     conn.commit()
     log(conn, "create_manual_event", "event", event_id, f"title={title}; note={note}")
@@ -370,7 +419,11 @@ def save_event_override(
             "summary": summary if summary is not None else existing.get("summary"),
             "status": status if status is not None else existing.get("status"),
             "priority": priority if priority is not None else existing.get("priority"),
-            "hidden": int(hidden) if hidden is not None else int(existing.get("hidden", 0) or 0),
+            "hidden": (
+                int(hidden)
+                if hidden is not None
+                else int(existing.get("hidden", 0) or 0)
+            ),
             "note": note if note is not None else existing.get("note"),
             "updated_at": now(),
         }
@@ -378,13 +431,31 @@ def save_event_override(
         log(conn, "save_event_override", "event", event_id)
         return
 
-    existing = conn.execute("SELECT * FROM event_overrides WHERE event_id = ?", (event_id,)).fetchone()
+    existing = conn.execute(
+        "SELECT * FROM event_overrides WHERE event_id = ?", (event_id,)
+    ).fetchone()
     values = {
-        "title": title if title is not None else (existing["title"] if existing else None),
-        "summary": summary if summary is not None else (existing["summary"] if existing else None),
-        "status": status if status is not None else (existing["status"] if existing else None),
-        "priority": priority if priority is not None else (existing["priority"] if existing else None),
-        "hidden": int(hidden) if hidden is not None else (existing["hidden"] if existing else 0),
+        "title": (
+            title if title is not None else (existing["title"] if existing else None)
+        ),
+        "summary": (
+            summary
+            if summary is not None
+            else (existing["summary"] if existing else None)
+        ),
+        "status": (
+            status if status is not None else (existing["status"] if existing else None)
+        ),
+        "priority": (
+            priority
+            if priority is not None
+            else (existing["priority"] if existing else None)
+        ),
+        "hidden": (
+            int(hidden)
+            if hidden is not None
+            else (existing["hidden"] if existing else 0)
+        ),
         "note": note if note is not None else (existing["note"] if existing else None),
     }
     conn.execute(
@@ -400,13 +471,24 @@ def save_event_override(
             note=excluded.note,
             updated_at=excluded.updated_at
         """,
-        (event_id, values["title"], values["summary"], values["status"], values["priority"], values["hidden"], values["note"], now()),
+        (
+            event_id,
+            values["title"],
+            values["summary"],
+            values["status"],
+            values["priority"],
+            values["hidden"],
+            values["note"],
+            now(),
+        ),
     )
     conn.commit()
     log(conn, "save_event_override", "event", event_id)
 
 
-def merge_events(conn, source_event_id: str, target_event_id: str, reason: str = "") -> None:
+def merge_events(
+    conn, source_event_id: str, target_event_id: str, reason: str = ""
+) -> None:
     if source_event_id == target_event_id:
         raise ValueError("Нельзя объединить инфоповод сам с собой.")
     payload = {
@@ -416,8 +498,16 @@ def merge_events(conn, source_event_id: str, target_event_id: str, reason: str =
         "updated_at": now(),
     }
     if is_supabase_conn(conn):
-        _upsert_payload(conn, "event_merges", f"event_merges:{source_event_id}", payload)
-        log(conn, "merge_events", "event", source_event_id, f"target={target_event_id}; reason={reason}")
+        _upsert_payload(
+            conn, "event_merges", f"event_merges:{source_event_id}", payload
+        )
+        log(
+            conn,
+            "merge_events",
+            "event",
+            source_event_id,
+            f"target={target_event_id}; reason={reason}",
+        )
         return
     conn.execute(
         """
@@ -431,7 +521,13 @@ def merge_events(conn, source_event_id: str, target_event_id: str, reason: str =
         (source_event_id, target_event_id, reason, now()),
     )
     conn.commit()
-    log(conn, "merge_events", "event", source_event_id, f"target={target_event_id}; reason={reason}")
+    log(
+        conn,
+        "merge_events",
+        "event",
+        source_event_id,
+        f"target={target_event_id}; reason={reason}",
+    )
 
 
 def move_message(conn, message_id: str, target_event_id: str, note: str = "") -> None:
@@ -446,7 +542,13 @@ def move_message(conn, message_id: str, target_event_id: str, note: str = "") ->
             "updated_at": now(),
         }
         _upsert_payload(conn, "message_overrides", key, payload)
-        log(conn, "move_message", "message", message_id, f"target={target_event_id}; note={note}")
+        log(
+            conn,
+            "move_message",
+            "message",
+            message_id,
+            f"target={target_event_id}; note={note}",
+        )
         return
     conn.execute(
         """
@@ -461,7 +563,13 @@ def move_message(conn, message_id: str, target_event_id: str, note: str = "") ->
         (message_id, target_event_id, note, now()),
     )
     conn.commit()
-    log(conn, "move_message", "message", message_id, f"target={target_event_id}; note={note}")
+    log(
+        conn,
+        "move_message",
+        "message",
+        message_id,
+        f"target={target_event_id}; note={note}",
+    )
 
 
 def hide_message(conn, message_id: str, hidden: bool = True, note: str = "") -> None:
@@ -476,9 +584,17 @@ def hide_message(conn, message_id: str, hidden: bool = True, note: str = "") -> 
             "updated_at": now(),
         }
         _upsert_payload(conn, "message_overrides", key, payload)
-        log(conn, "hide_message" if hidden else "unhide_message", "message", message_id, note)
+        log(
+            conn,
+            "hide_message" if hidden else "unhide_message",
+            "message",
+            message_id,
+            note,
+        )
         return
-    existing = conn.execute("SELECT * FROM message_overrides WHERE message_id = ?", (message_id,)).fetchone()
+    existing = conn.execute(
+        "SELECT * FROM message_overrides WHERE message_id = ?", (message_id,)
+    ).fetchone()
     target_event_id = existing["target_event_id"] if existing else None
     conn.execute(
         """
@@ -492,10 +608,18 @@ def hide_message(conn, message_id: str, hidden: bool = True, note: str = "") -> 
         (message_id, target_event_id, int(hidden), note, now()),
     )
     conn.commit()
-    log(conn, "hide_message" if hidden else "unhide_message", "message", message_id, note)
+    log(
+        conn,
+        "hide_message" if hidden else "unhide_message",
+        "message",
+        message_id,
+        note,
+    )
 
 
-def mark_message_irrelevant(conn, event_id: str, message_id: str, reason: str = "") -> None:
+def mark_message_irrelevant(
+    conn, event_id: str, message_id: str, reason: str = ""
+) -> None:
     payload = {
         "event_id": event_id,
         "message_id": message_id,
@@ -503,8 +627,19 @@ def mark_message_irrelevant(conn, event_id: str, message_id: str, reason: str = 
         "updated_at": now(),
     }
     if is_supabase_conn(conn):
-        _upsert_payload(conn, "event_message_exclusions", f"event_message_exclusions:{event_id}:{message_id}", payload)
-        log(conn, "mark_message_irrelevant", "message", message_id, f"event={event_id}; reason={reason}")
+        _upsert_payload(
+            conn,
+            "event_message_exclusions",
+            f"event_message_exclusions:{event_id}:{message_id}",
+            payload,
+        )
+        log(
+            conn,
+            "mark_message_irrelevant",
+            "message",
+            message_id,
+            f"event={event_id}; reason={reason}",
+        )
         return
     conn.execute(
         """
@@ -517,15 +652,30 @@ def mark_message_irrelevant(conn, event_id: str, message_id: str, reason: str = 
         (event_id, message_id, reason, now()),
     )
     conn.commit()
-    log(conn, "mark_message_irrelevant", "message", message_id, f"event={event_id}; reason={reason}")
+    log(
+        conn,
+        "mark_message_irrelevant",
+        "message",
+        message_id,
+        f"event={event_id}; reason={reason}",
+    )
 
 
 def restore_message_relevance(conn, event_id: str, message_id: str) -> None:
     if is_supabase_conn(conn):
         _delete_payload(conn, f"event_message_exclusions:{event_id}:{message_id}")
-        log(conn, "restore_message_relevance", "message", message_id, f"event={event_id}")
+        log(
+            conn,
+            "restore_message_relevance",
+            "message",
+            message_id,
+            f"event={event_id}",
+        )
         return
-    conn.execute("DELETE FROM event_message_exclusions WHERE event_id = ? AND message_id = ?", (event_id, message_id))
+    conn.execute(
+        "DELETE FROM event_message_exclusions WHERE event_id = ? AND message_id = ?",
+        (event_id, message_id),
+    )
     conn.commit()
     log(conn, "restore_message_relevance", "message", message_id, f"event={event_id}")
 
@@ -551,8 +701,19 @@ def save_message_topic_override(
         "updated_at": now(),
     }
     if is_supabase_conn(conn):
-        _upsert_payload(conn, "message_topic_overrides", f"message_topic_overrides:{message_id}", payload)
-        log(conn, "save_message_topic_override", "message", message_id, f"topic={main_topic}; note={note}")
+        _upsert_payload(
+            conn,
+            "message_topic_overrides",
+            f"message_topic_overrides:{message_id}",
+            payload,
+        )
+        log(
+            conn,
+            "save_message_topic_override",
+            "message",
+            message_id,
+            f"topic={main_topic}; note={note}",
+        )
         return
     init_db(conn)
     conn.execute(
@@ -568,7 +729,13 @@ def save_message_topic_override(
         (message_id, main_topic, topics, str(note or ""), now()),
     )
     conn.commit()
-    log(conn, "save_message_topic_override", "message", message_id, f"topic={main_topic}; note={note}")
+    log(
+        conn,
+        "save_message_topic_override",
+        "message",
+        message_id,
+        f"topic={main_topic}; note={note}",
+    )
 
 
 def pin_key_message(conn, event_id: str, message_id: str, note: str = "") -> None:
@@ -584,8 +751,19 @@ def pin_key_message(conn, event_id: str, message_id: str, note: str = "") -> Non
         "updated_at": now(),
     }
     if is_supabase_conn(conn):
-        _upsert_payload(conn, "event_key_messages", f"event_key_messages:{event_id}:{message_id}", payload)
-        log(conn, "pin_key_message", "message", message_id, f"event={event_id}; note={note}")
+        _upsert_payload(
+            conn,
+            "event_key_messages",
+            f"event_key_messages:{event_id}:{message_id}",
+            payload,
+        )
+        log(
+            conn,
+            "pin_key_message",
+            "message",
+            message_id,
+            f"event={event_id}; note={note}",
+        )
         return
     init_db(conn)
     conn.execute(
@@ -599,7 +777,9 @@ def pin_key_message(conn, event_id: str, message_id: str, note: str = "") -> Non
         (event_id, message_id, str(note or ""), now()),
     )
     conn.commit()
-    log(conn, "pin_key_message", "message", message_id, f"event={event_id}; note={note}")
+    log(
+        conn, "pin_key_message", "message", message_id, f"event={event_id}; note={note}"
+    )
 
 
 def unpin_key_message(conn, event_id: str, message_id: str) -> None:
@@ -611,6 +791,9 @@ def unpin_key_message(conn, event_id: str, message_id: str) -> None:
         log(conn, "unpin_key_message", "message", message_id, f"event={event_id}")
         return
     init_db(conn)
-    conn.execute("DELETE FROM event_key_messages WHERE event_id = ? AND message_id = ?", (event_id, message_id))
+    conn.execute(
+        "DELETE FROM event_key_messages WHERE event_id = ? AND message_id = ?",
+        (event_id, message_id),
+    )
     conn.commit()
     log(conn, "unpin_key_message", "message", message_id, f"event={event_id}")

@@ -44,7 +44,9 @@ def normalize_spaces(value: str) -> str:
     return value.strip()
 
 
-def get_text_series(df: pd.DataFrame, column: str, default: str = "", aliases: list[str] | None = None) -> pd.Series:
+def get_text_series(
+    df: pd.DataFrame, column: str, default: str = "", aliases: list[str] | None = None
+) -> pd.Series:
     """Return a string Series with the same index as df.
 
     pandas.DataFrame.get(..., "") returns a scalar string when a column is
@@ -74,7 +76,9 @@ def chat_key_from_link(link: str) -> str:
     link = normalize_spaces(link)
     if not link:
         return ""
-    match = re.search(r"(?:https?://)?(?:t\.me|telegram\.me)/([^/\s]+)", link, flags=re.IGNORECASE)
+    match = re.search(
+        r"(?:https?://)?(?:t\.me|telegram\.me)/([^/\s]+)", link, flags=re.IGNORECASE
+    )
     if match:
         return match.group(1)
     return re.sub(r"/\d+(?:[?#].*)?$", "", link)
@@ -107,10 +111,7 @@ def clean_text(message: str, recognized: str) -> tuple[str, str]:
 
 def parse_datetime(series: pd.Series) -> pd.Series:
     prepared = (
-        series.fillna("")
-        .astype(str)
-        .str.replace("\xa0", " ", regex=False)
-        .str.strip()
+        series.fillna("").astype(str).str.replace("\xa0", " ", regex=False).str.strip()
     )
     return pd.to_datetime(prepared, errors="coerce", dayfirst=True)
 
@@ -125,18 +126,71 @@ def detect_tag_columns(df: pd.DataFrame) -> list[str]:
     """
     known = [col for col in TAG_COLUMNS_DEFAULT if col in df.columns]
     service_cols = {
-        "№", "n", "id", "id сообщения", "hash сообщения", "дата", "время", "время публикации",
-        "сообщение", "текст", "текст сообщения", "заголовок", "ссылка", "url", "link",
-        "источник", "площадка", "автор", "кто пишет", "профиль автора", "url автора",
-        "блог", "где пишет", "место публикации", "профиль блога", "url места публикации",
-        "тип", "тип сообщения", "тип источника", "тональность", "токсичность", "wom",
-        "страна", "регион", "город", "просмотры", "вовлечённость", "вовлеченность",
-        "лайки", "комментарии", "репосты", "теги", "категории", "сюжет",
-        "основная тема", "все темы", "все темы (список)", "релевантное",
-        "source_system", "source_file", "source_tag_columns", "обработано", "processed",
+        "№",
+        "n",
+        "id",
+        "id сообщения",
+        "hash сообщения",
+        "дата",
+        "время",
+        "время публикации",
+        "сообщение",
+        "текст",
+        "текст сообщения",
+        "заголовок",
+        "ссылка",
+        "url",
+        "link",
+        "источник",
+        "площадка",
+        "автор",
+        "кто пишет",
+        "профиль автора",
+        "url автора",
+        "блог",
+        "где пишет",
+        "место публикации",
+        "профиль блога",
+        "url места публикации",
+        "тип",
+        "тип сообщения",
+        "тип источника",
+        "тональность",
+        "токсичность",
+        "wom",
+        "страна",
+        "регион",
+        "город",
+        "просмотры",
+        "вовлечённость",
+        "вовлеченность",
+        "лайки",
+        "комментарии",
+        "репосты",
+        "теги",
+        "категории",
+        "сюжет",
+        "основная тема",
+        "все темы",
+        "все темы (список)",
+        "релевантное",
+        "source_system",
+        "source_file",
+        "source_tag_columns",
+        "обработано",
+        "processed",
     }
     positive_values = {"да", "yes", "true", "1", "+", "истина", "верно"}
-    bool_values = positive_values | {"нет", "no", "false", "0", "-", "ложь", "неверно", ""}
+    bool_values = positive_values | {
+        "нет",
+        "no",
+        "false",
+        "0",
+        "-",
+        "ложь",
+        "неверно",
+        "",
+    }
 
     detected = list(known)
 
@@ -160,7 +214,14 @@ def detect_tag_columns(df: pd.DataFrame) -> list[str]:
         key = str(col).strip().lower().replace("ё", "е")
         if not key or key in service_cols:
             continue
-        sample = df[col].fillna("").astype(str).str.strip().str.lower().replace({"nan": "", "none": ""})
+        sample = (
+            df[col]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .replace({"nan": "", "none": ""})
+        )
         if sample.empty:
             continue
         non_empty = sample[sample != ""]
@@ -186,7 +247,6 @@ def split_tag_text(value: str) -> list[str]:
     return tags
 
 
-
 def split_source_topics(value: str) -> list[str]:
     value = normalize_spaces(value)
     if not value or value.lower() in {"nan", "none", "null", "нет", "n/a"}:
@@ -207,7 +267,18 @@ def normalize_relevant(value: object, default: bool = True) -> bool:
         return default
     if s in {"true", "1", "да", "yes", "+", "истина", "верно", "relevant"}:
         return True
-    if s in {"false", "0", "нет", "no", "-", "ложь", "неверно", "irrelevant", "нерелевант", "нерелевантное"}:
+    if s in {
+        "false",
+        "0",
+        "нет",
+        "no",
+        "-",
+        "ложь",
+        "неверно",
+        "irrelevant",
+        "нерелевант",
+        "нерелевантное",
+    }:
         return False
     return default
 
@@ -218,8 +289,21 @@ def source_topic_bucket_value(value: str) -> str:
 
 
 GENERIC_EMPTY_LABELS = {
-    "", "nan", "none", "null", "нет", "n/a", "не указано", "без темы", "без тега",
-    "прочее", "прочие", "other", "unknown", "общие", "общая тема",
+    "",
+    "nan",
+    "none",
+    "null",
+    "нет",
+    "n/a",
+    "не указано",
+    "без темы",
+    "без тега",
+    "прочее",
+    "прочие",
+    "other",
+    "unknown",
+    "общие",
+    "общая тема",
 }
 
 
@@ -257,7 +341,10 @@ def label_microtopic(label: str) -> str:
         return "general"
     return "label_" + stable_hash(clean.lower().replace("ё", "е"), prefix="")[:8]
 
-def row_tags(row: pd.Series, tag_cols: list[str], include_topic_fields: bool = True) -> list[str]:
+
+def row_tags(
+    row: pd.Series, tag_cols: list[str], include_topic_fields: bool = True
+) -> list[str]:
     """Return source-provided tags/topics for one message.
 
     Supports two common tag formats:
@@ -268,7 +355,19 @@ def row_tags(row: pd.Series, tag_cols: list[str], include_topic_fields: bool = T
     tags: list[str] = []
     seen: set[str] = set()
     positive_values = {"да", "yes", "true", "1", "+", "истина", "верно"}
-    negative_values = {"", "нет", "no", "false", "0", "-", "ложь", "неверно", "nan", "none", "null"}
+    negative_values = {
+        "",
+        "нет",
+        "no",
+        "false",
+        "0",
+        "-",
+        "ложь",
+        "неверно",
+        "nan",
+        "none",
+        "null",
+    }
 
     def add_tag(value: object) -> None:
         label = normalize_label(value)
@@ -290,7 +389,14 @@ def row_tags(row: pd.Series, tag_cols: list[str], include_topic_fields: bool = T
             add_tag(raw_value or tag)
 
     if include_topic_fields:
-        for col in ["Основная тема", "Все темы", "Все темы (список)", "Теги", "Категории", "Сюжет"]:
+        for col in [
+            "Основная тема",
+            "Все темы",
+            "Все темы (список)",
+            "Теги",
+            "Категории",
+            "Сюжет",
+        ]:
             for tag in unique_labels([row.get(col, "")], limit=12):
                 add_tag(tag)
 
@@ -367,7 +473,9 @@ def is_brand_analytics_dataframe(df: pd.DataFrame) -> bool:
     return False
 
 
-def normalize_messages(raw: pd.DataFrame, tag_cols: list[str]) -> tuple[pd.DataFrame, pd.DataFrame]:
+def normalize_messages(
+    raw: pd.DataFrame, tag_cols: list[str]
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     df = raw.copy()
     for col in df.columns:
         df[col] = df[col].fillna("").astype(str)
@@ -402,7 +510,9 @@ def normalize_messages(raw: pd.DataFrame, tag_cols: list[str]) -> tuple[pd.DataF
     df["date"] = df["datetime"].dt.strftime("%Y-%m-%d %H:%M:%S").fillna("")
 
     # Robust message id: prefer Id сообщения, then link, then row number.
-    id_series = get_text_series(df, "Id сообщения", aliases=["ID сообщения", "message_id", "id"])
+    id_series = get_text_series(
+        df, "Id сообщения", aliases=["ID сообщения", "message_id", "id"]
+    )
     link_series = get_text_series(
         df,
         "Ссылка",
@@ -417,19 +527,37 @@ def normalize_messages(raw: pd.DataFrame, tag_cols: list[str]) -> tuple[pd.DataF
     blog_profile = get_text_series(
         df,
         "Профиль блога",
-        aliases=["Профиль чата", "Ссылка на блог", "Ссылка на чат", "chat_profile", "blog_profile"],
+        aliases=[
+            "Профиль чата",
+            "Ссылка на блог",
+            "Ссылка на чат",
+            "chat_profile",
+            "blog_profile",
+        ],
     )
     blog_title = get_text_series(
         df,
         "Блог",
-        aliases=["Чат", "Название чата", "Канал", "Группа", "chat_title", "blog", "source_name"],
+        aliases=[
+            "Чат",
+            "Название чата",
+            "Канал",
+            "Группа",
+            "chat_title",
+            "blog",
+            "source_name",
+        ],
     )
     df["chat_id"] = [
         stable_hash(
-            pick_first_non_empty(profile, title, chat_key_from_link(link), fallback=f"unknown_chat_{i}"),
+            pick_first_non_empty(
+                profile, title, chat_key_from_link(link), fallback=f"unknown_chat_{i}"
+            ),
             prefix="c_",
         )
-        for i, (profile, title, link) in enumerate(zip(blog_profile, blog_title, link_series))
+        for i, (profile, title, link) in enumerate(
+            zip(blog_profile, blog_title, link_series)
+        )
     ]
 
     author_profile = get_text_series(
@@ -443,12 +571,18 @@ def normalize_messages(raw: pd.DataFrame, tag_cols: list[str]) -> tuple[pd.DataF
         aliases=["Имя автора", "Пользователь", "author", "user_name", "username"],
     )
     df["author_id"] = [
-        stable_hash(pick_first_non_empty(profile, author, fallback=f"unknown_author_{i}"), prefix="a_")
+        stable_hash(
+            pick_first_non_empty(profile, author, fallback=f"unknown_author_{i}"),
+            prefix="a_",
+        )
         for i, (profile, author) in enumerate(zip(author_profile, author_name))
     ]
 
     is_brand_analytics = is_brand_analytics_dataframe(df)
-    raw_tag_lists = df.apply(lambda r: row_tags(r, tag_cols, include_topic_fields=not is_brand_analytics), axis=1)
+    raw_tag_lists = df.apply(
+        lambda r: row_tags(r, tag_cols, include_topic_fields=not is_brand_analytics),
+        axis=1,
+    )
 
     if is_brand_analytics:
         # Brand Analytics logic: information events are based on the source
@@ -459,27 +593,53 @@ def normalize_messages(raw: pd.DataFrame, tag_cols: list[str]) -> tuple[pd.DataF
             "Сюжет",
             aliases=["source_main_topic", "Тема", "Topic", "Theme", "Основная тема"],
         ).apply(normalize_spaces)
-        source_topics_series = source_main_topic_series.apply(lambda x: "; ".join(split_source_topics(x)))
+        source_topics_series = source_main_topic_series.apply(
+            lambda x: "; ".join(split_source_topics(x))
+        )
     else:
         source_main_topic_series = get_text_series(
             df,
             "Основная тема",
-            aliases=["Главная тема", "Main topic", "Primary topic", "source_main_topic", "Сюжет", "Тема", "Topic"],
+            aliases=[
+                "Главная тема",
+                "Main topic",
+                "Primary topic",
+                "source_main_topic",
+                "Сюжет",
+                "Тема",
+                "Topic",
+            ],
         ).apply(normalize_spaces)
         source_topics_series = get_text_series(
             df,
             "Все темы (список)",
-            aliases=["Все темы", "Темы", "Topics", "source_topics", "Сюжет", "Тема", "Topic"],
+            aliases=[
+                "Все темы",
+                "Темы",
+                "Topics",
+                "source_topics",
+                "Сюжет",
+                "Тема",
+                "Topic",
+            ],
         ).apply(lambda x: "; ".join(split_source_topics(x)))
         # If there is no separate list of topics, keep the main source topic as a one-item list.
-        source_topics_series = source_topics_series.where(source_topics_series.str.strip() != "", source_main_topic_series)
+        source_topics_series = source_topics_series.where(
+            source_topics_series.str.strip() != "", source_main_topic_series
+        )
 
         # For non-Brand Analytics files, source topic/story labels may be useful
         # as display tags because the file may not contain a dedicated tag block.
-        raw_tag_lists = pd.Series([
-            unique_labels(list(tags) + [main_topic, topics], limit=8)
-            for tags, main_topic, topics in zip(raw_tag_lists, source_main_topic_series, source_topics_series)
-        ], index=df.index, dtype="object")
+        raw_tag_lists = pd.Series(
+            [
+                unique_labels(list(tags) + [main_topic, topics], limit=8)
+                for tags, main_topic, topics in zip(
+                    raw_tag_lists, source_main_topic_series, source_topics_series
+                )
+            ],
+            index=df.index,
+            dtype="object",
+        )
     relevant_series = get_text_series(
         df,
         "Релевантное",
@@ -499,17 +659,27 @@ def normalize_messages(raw: pd.DataFrame, tag_cols: list[str]) -> tuple[pd.DataF
     ).str.slice(0, 300)
     df["microtopic"] = [
         classify_microtopic((text if len(str(text)) > 45 else f"{text} {parent}"), tags)
-        for text, parent, tags in zip(df["text_clean"].astype(str), parent_context, ["|".join(tags) for tags in raw_tag_lists])
+        for text, parent, tags in zip(
+            df["text_clean"].astype(str),
+            parent_context,
+            ["|".join(tags) for tags in raw_tag_lists],
+        )
     ]
 
     if is_brand_analytics:
         # Tags are exactly Brand Analytics system/user tags from columns after
         # `Обработано`. Do not append auto-generated semantic tags here.
-        tag_lists = [list(tags) if list(tags) else ["Без тега"] for tags in raw_tag_lists]
+        tag_lists = [
+            list(tags) if list(tags) else ["Без тега"] for tags in raw_tag_lists
+        ]
     else:
         tag_lists = [
             infer_display_tags(text, microtopic, tags)
-            for text, microtopic, tags in zip(df["text_clean"].astype(str), df["microtopic"].astype(str), raw_tag_lists)
+            for text, microtopic, tags in zip(
+                df["text_clean"].astype(str),
+                df["microtopic"].astype(str),
+                raw_tag_lists,
+            )
         ]
     df["tags"] = ["|".join(tags) for tags in tag_lists]
     df["tag_count"] = [len(tags) for tags in tag_lists]
@@ -546,10 +716,16 @@ def normalize_messages(raw: pd.DataFrame, tag_cols: list[str]) -> tuple[pd.DataF
 
     df["duplicate_count"] = as_int("Количество дублей", "Дублей", "Duplicates")
     df["audience"] = as_int("Аудитория", "Audience", "audience")
-    df["views"] = as_int("Просмотры", "Просмотров", "Охват", "Views", "views", "Reach", "reach")
-    df["engagement"] = as_int("Вовлечённость", "Вовлеченность", "Engagement", "engagement")
+    df["views"] = as_int(
+        "Просмотры", "Просмотров", "Охват", "Views", "views", "Reach", "reach"
+    )
+    df["engagement"] = as_int(
+        "Вовлечённость", "Вовлеченность", "Engagement", "engagement"
+    )
 
-    sentiment_series = get_text_series(df, "Тональность", aliases=["sentiment", "Окраска", "Тон"])
+    sentiment_series = get_text_series(
+        df, "Тональность", aliases=["sentiment", "Окраска", "Тон"]
+    )
     toxicity_series = get_text_series(df, "Токсичность", aliases=["toxicity", "toxic"])
     df["is_negative"] = sentiment_series.str.lower().str.contains("негатив", na=False)
     df["is_toxic"] = toxicity_series.str.strip().ne("")
@@ -646,58 +822,319 @@ def classify_microtopic(text: str, tags: str | Iterable[str] = "") -> str:
         tag_values = {str(x).strip() for x in tags if str(x).strip()}
     tag_values_clean = {normalize_label(x) for x in tag_values}
     tag_values_clean = {x for x in tag_values_clean if x}
-    taxi_context = regex_any(t, [r"\bтакси\b", r"водител\w*", r"таксопарк\w*", r"яндекс\s+про", r"таксометр", r"агрегатор\w*", r"самозанят\w*", r"минтранс"])
+    taxi_context = regex_any(
+        t,
+        [
+            r"\bтакси\b",
+            r"водител\w*",
+            r"таксопарк\w*",
+            r"яндекс\s+про",
+            r"таксометр",
+            r"агрегатор\w*",
+            r"самозанят\w*",
+            r"минтранс",
+        ],
+    )
 
     # Taxi profile: preserved for existing taxi chat projects.
-    if "Забастовка" in tag_values_clean or regex_any(t, [r"\bзабастов\w*", r"\bбойкот\w*", r"\bстачк\w*", r"\bмитинг\w*", r"коллективн\w+\s+акци"]):
+    if "Забастовка" in tag_values_clean or regex_any(
+        t,
+        [
+            r"\bзабастов\w*",
+            r"\bбойкот\w*",
+            r"\bстачк\w*",
+            r"\bмитинг\w*",
+            r"коллективн\w+\s+акци",
+        ],
+    ):
         return "strike"
-    if "WB Такси" in tag_values_clean or regex_any(t, [r"wb\s*такси", r"вб\s*такси", r"wildberries\s*такси", r"вайлдбер\w*\s*такси"]):
+    if "WB Такси" in tag_values_clean or regex_any(
+        t,
+        [r"wb\s*такси", r"вб\s*такси", r"wildberries\s*такси", r"вайлдбер\w*\s*такси"],
+    ):
         return "wb_launch"
-    if "Фастен" in tag_values_clean or regex_any(t, [r"fasten", r"фаст[еэо]н", r"фастон"]):
+    if "Фастен" in tag_values_clean or regex_any(
+        t, [r"fasten", r"фаст[еэо]н", r"фастон"]
+    ):
         return "fasten_service"
-    if "Законы и налоги" in tag_values_clean or (taxi_context and regex_any(t, [r"налог\w*", r"патент\w*", r"самозанят\w*", r"минтранс", r"реестр\w*", r"закон\w*", r"разрешени\w*", r"лиценз\w*", r"штраф\w*", r"провер\w*"])):
+    if "Законы и налоги" in tag_values_clean or (
+        taxi_context
+        and regex_any(
+            t,
+            [
+                r"налог\w*",
+                r"патент\w*",
+                r"самозанят\w*",
+                r"минтранс",
+                r"реестр\w*",
+                r"закон\w*",
+                r"разрешени\w*",
+                r"лиценз\w*",
+                r"штраф\w*",
+                r"провер\w*",
+            ],
+        )
+    ):
         return "tax_law"
-    if regex_any(t, [r"не\s+работа\w*", r"не\s+открыва\w*", r"не\s+груз\w*", r"не\s+заход\w*", r"завис\w*", r"висит", r"\bсбой\w*", r"\bошибк\w*", r"глюк\w*", r"вылета\w*", r"приложени\w*", r"яндекс\s+про"]):
-        if regex_any(t, [r"нет\s+заказ\w*", r"заказ\w*\s+не\s+приход", r"пропал\w*\s+заказ", r"заказ\w*\s+пропал", r"распределени\w*\s+заказ"]):
+    if regex_any(
+        t,
+        [
+            r"не\s+работа\w*",
+            r"не\s+открыва\w*",
+            r"не\s+груз\w*",
+            r"не\s+заход\w*",
+            r"завис\w*",
+            r"висит",
+            r"\bсбой\w*",
+            r"\bошибк\w*",
+            r"глюк\w*",
+            r"вылета\w*",
+            r"приложени\w*",
+            r"яндекс\s+про",
+        ],
+    ):
+        if regex_any(
+            t,
+            [
+                r"нет\s+заказ\w*",
+                r"заказ\w*\s+не\s+приход",
+                r"пропал\w*\s+заказ",
+                r"заказ\w*\s+пропал",
+                r"распределени\w*\s+заказ",
+            ],
+        ):
             return "app_orders"
         return "app_bug"
-    if taxi_context and regex_any(t, [r"\bоплат\w*", r"выплат\w*", r"деньг\w*", r"перевод\w*", r"задолж\w*", r"баланс\w*", r"комисс\w*"]):
+    if taxi_context and regex_any(
+        t,
+        [
+            r"\bоплат\w*",
+            r"выплат\w*",
+            r"деньг\w*",
+            r"перевод\w*",
+            r"задолж\w*",
+            r"баланс\w*",
+            r"комисс\w*",
+        ],
+    ):
         return "payments"
-    if regex_any(t, [r"блокир\w*", r"заблок\w*", r"\bбан\b", r"аккаунт\w*", r"доступ\s+(?:к\s+)?(?:аккаунт\w*|профил\w*|яндекс\w*)", r"деактив\w*", r"профил\w*\s+(?:заблок|не\s+работ|отключ)", r"самозанят\w*\s+не\s+подтверж"]):
+    if regex_any(
+        t,
+        [
+            r"блокир\w*",
+            r"заблок\w*",
+            r"\bбан\b",
+            r"аккаунт\w*",
+            r"доступ\s+(?:к\s+)?(?:аккаунт\w*|профил\w*|яндекс\w*)",
+            r"деактив\w*",
+            r"профил\w*\s+(?:заблок|не\s+работ|отключ)",
+            r"самозанят\w*\s+не\s+подтверж",
+        ],
+    ):
         return "account_block"
-    if regex_any(t, [r"детск\w*\s+кресл\w*", r"кресл\w*.{0,40}ребен\w*", r"ребен\w*.{0,40}кресл\w*", r"ребенк\w*.{0,40}кресл\w*", r"бустер\w*"]):
+    if regex_any(
+        t,
+        [
+            r"детск\w*\s+кресл\w*",
+            r"кресл\w*.{0,40}ребен\w*",
+            r"ребен\w*.{0,40}кресл\w*",
+            r"ребенк\w*.{0,40}кресл\w*",
+            r"бустер\w*",
+        ],
+    ):
         return "child_seat"
-    if "Коэффициент" in tag_values_clean or (taxi_context and regex_any(t, [r"коэф\w*", r"коэффициент\w*", r"\bкэф\w*", r"приоритет\w*", r"тариф\w*", r"ценник\w*", r"подач\w*"])):
+    if "Коэффициент" in tag_values_clean or (
+        taxi_context
+        and regex_any(
+            t,
+            [
+                r"коэф\w*",
+                r"коэффициент\w*",
+                r"\bкэф\w*",
+                r"приоритет\w*",
+                r"тариф\w*",
+                r"ценник\w*",
+                r"подач\w*",
+            ],
+        )
+    ):
         return "coeff_priority"
-    if regex_any(t, [r"аэропорт\w*", r"пулково", r"шереметьево", r"внуково", r"домодедово"]):
+    if regex_any(
+        t, [r"аэропорт\w*", r"пулково", r"шереметьево", r"внуково", r"домодедово"]
+    ):
         return "airport"
-    if taxi_context and regex_any(t, [r"карт\w*", r"навигатор\w*", r"адрес\w*", r"геолокац\w*", r"gps", r"маршрут\w*"]):
+    if taxi_context and regex_any(
+        t,
+        [
+            r"карт\w*",
+            r"навигатор\w*",
+            r"адрес\w*",
+            r"геолокац\w*",
+            r"gps",
+            r"маршрут\w*",
+        ],
+    ):
         return "gps_map"
-    if taxi_context and regex_any(t, [r"поддержк\w*", r"диспетчер\w*", r"парк\w*", r"таксопарк\w*", r"оператор\w*"]):
+    if taxi_context and regex_any(
+        t,
+        [r"поддержк\w*", r"диспетчер\w*", r"парк\w*", r"таксопарк\w*", r"оператор\w*"],
+    ):
         return "support"
-    if "яндекс" in {x.lower() for x in tag_values_clean} or regex_any(t, [r"яндекс", r"\bяши\b", r"\bяше\b", r"\bяшу\b", r"yandex"]):
+    if "яндекс" in {x.lower() for x in tag_values_clean} or regex_any(
+        t, [r"яндекс", r"\bяши\b", r"\bяше\b", r"\bяшу\b", r"yandex"]
+    ):
         return "general_yandex"
 
     # Universal profile for non-taxi projects.
-    if regex_any(t, [r"\bпроблем\w*", r"\bжалоб\w*", r"\bнедоволь\w*", r"не\s+работа\w*", r"\bошибк\w*", r"\bсбой\w*", r"\bдефект\w*", r"\bбрак\w*", r"\bповрежд\w*", r"\bплох\w*", r"\bнегатив\w*"]):
+    if regex_any(
+        t,
+        [
+            r"\bпроблем\w*",
+            r"\bжалоб\w*",
+            r"\bнедоволь\w*",
+            r"не\s+работа\w*",
+            r"\bошибк\w*",
+            r"\bсбой\w*",
+            r"\bдефект\w*",
+            r"\bбрак\w*",
+            r"\bповрежд\w*",
+            r"\bплох\w*",
+            r"\bнегатив\w*",
+        ],
+    ):
         return "issue_problem"
-    if regex_any(t, [r"\bцен\w*", r"\bстоимост\w*", r"\bпрайс\w*", r"тариф\w*", r"\bскидк\w*", r"\bакци(?:я|и|ю|ей|ями|онн\w*)?\b", r"\bдешев\w*", r"\bдорог\w*", r"\bоплат\w*", r"\bсчет\w*", r"\bсчёт\w*"]):
+    if regex_any(
+        t,
+        [
+            r"\bцен\w*",
+            r"\bстоимост\w*",
+            r"\bпрайс\w*",
+            r"тариф\w*",
+            r"\bскидк\w*",
+            r"\bакци(?:я|и|ю|ей|ями|онн\w*)?\b",
+            r"\bдешев\w*",
+            r"\bдорог\w*",
+            r"\bоплат\w*",
+            r"\bсчет\w*",
+            r"\bсчёт\w*",
+        ],
+    ):
         return "price_terms"
-    if regex_any(t, [r"\bкачеств\w*", r"\bхарактерист\w*", r"\bматериал\w*", r"\bпрочност\w*", r"\bплотност\w*", r"\bтолщин\w*", r"\bразмер\w*", r"\bупаковк\w*", r"плесен\w*", r"плесён\w*"]):
+    if regex_any(
+        t,
+        [
+            r"\bкачеств\w*",
+            r"\bхарактерист\w*",
+            r"\bматериал\w*",
+            r"\bпрочност\w*",
+            r"\bплотност\w*",
+            r"\bтолщин\w*",
+            r"\bразмер\w*",
+            r"\bупаковк\w*",
+            r"плесен\w*",
+            r"плесён\w*",
+        ],
+    ):
         return "product_quality"
-    if regex_any(t, [r"\bналич\w*", r"\bсклад\w*", r"\bпоставк\w*", r"\bдоставк\w*", r"\bлогист\w*", r"\bотгруз\w*", r"\bсрок\w*", r"\bзаказ\w*", r"\bдефицит\w*"]):
+    if regex_any(
+        t,
+        [
+            r"\bналич\w*",
+            r"\bсклад\w*",
+            r"\bпоставк\w*",
+            r"\bдоставк\w*",
+            r"\bлогист\w*",
+            r"\bотгруз\w*",
+            r"\bсрок\w*",
+            r"\bзаказ\w*",
+            r"\bдефицит\w*",
+        ],
+    ):
         return "availability_supply"
-    if regex_any(t, [r"\bмонтаж\w*", r"\bустанов\w*", r"\bприменен\w*", r"\bиспользован\w*", r"\bэксплуатац\w*", r"\bстроитель\w*", r"\bутепл\w*", r"\bизоляц\w*", r"\bкровл\w*", r"\bфасад\w*"]):
+    if regex_any(
+        t,
+        [
+            r"\bмонтаж\w*",
+            r"\bустанов\w*",
+            r"\bприменен\w*",
+            r"\bиспользован\w*",
+            r"\bэксплуатац\w*",
+            r"\bстроитель\w*",
+            r"\bутепл\w*",
+            r"\bизоляц\w*",
+            r"\bкровл\w*",
+            r"\bфасад\w*",
+        ],
+    ):
         return "installation_usage"
-    if regex_any(t, [r"сертификат\w*", r"документ\w*", r"деклараци\w*", r"гост\w*", r"снип\w*", r"требован\w*", r"регламент\w*", r"стандарт\w*"]):
+    if regex_any(
+        t,
+        [
+            r"сертификат\w*",
+            r"документ\w*",
+            r"деклараци\w*",
+            r"гост\w*",
+            r"снип\w*",
+            r"требован\w*",
+            r"регламент\w*",
+            r"стандарт\w*",
+        ],
+    ):
         return "documents_certificates"
-    if regex_any(t, [r"пожар\w*", r"огне\w*", r"горюч\w*", r"негорюч\w*", r"безопасност\w*", r"опасн\w*", r"токсич\w*"]):
+    if regex_any(
+        t,
+        [
+            r"пожар\w*",
+            r"огне\w*",
+            r"горюч\w*",
+            r"негорюч\w*",
+            r"безопасност\w*",
+            r"опасн\w*",
+            r"токсич\w*",
+        ],
+    ):
         return "safety_fire"
-    if regex_any(t, [r"эколог\w*", r"переработ\w*", r"углерод\w*", r"энергоэффектив\w*", r"энергосбереж\w*", r"теплопотер\w*", r"устойчив\w*"]):
+    if regex_any(
+        t,
+        [
+            r"эколог\w*",
+            r"переработ\w*",
+            r"углерод\w*",
+            r"энергоэффектив\w*",
+            r"энергосбереж\w*",
+            r"теплопотер\w*",
+            r"устойчив\w*",
+        ],
+    ):
         return "sustainability_energy"
-    if regex_any(t, [r"конкурент\w*", r"аналог\w*", r"сравнен\w*", r"рынок\w*", r"бренд\w*", r"rockwool", r"роквул", r"технониколь", r"ursa", r"изовер"]):
+    if regex_any(
+        t,
+        [
+            r"конкурент\w*",
+            r"аналог\w*",
+            r"сравнен\w*",
+            r"рынок\w*",
+            r"бренд\w*",
+            r"rockwool",
+            r"роквул",
+            r"технониколь",
+            r"ursa",
+            r"изовер",
+        ],
+    ):
         return "competitors_market"
-    if regex_any(t, [r"поддержк\w*", r"сервис\w*", r"менеджер\w*", r"дилер\w*", r"продавец\w*", r"магазин\w*", r"клиент\w*"]):
+    if regex_any(
+        t,
+        [
+            r"поддержк\w*",
+            r"сервис\w*",
+            r"менеджер\w*",
+            r"дилер\w*",
+            r"продавец\w*",
+            r"магазин\w*",
+            r"клиент\w*",
+        ],
+    ):
         return "customer_service"
 
     # Source-provided labels are the strongest universal signal. Use them as
@@ -717,7 +1154,9 @@ def topic_bucket_for(row: pd.Series) -> str:
     return f"{source_topic}::{tag}::{microtopic}"
 
 
-def should_start_new_discussion(prev_row: pd.Series, row: pd.Series, window_minutes: int) -> bool:
+def should_start_new_discussion(
+    prev_row: pd.Series, row: pd.Series, window_minutes: int
+) -> bool:
     if pd.isna(prev_row["datetime"]) or pd.isna(row["datetime"]):
         return False
 
@@ -727,7 +1166,11 @@ def should_start_new_discussion(prev_row: pd.Series, row: pd.Series, window_minu
 
     prev_source_topic = normalize_spaces(prev_row.get("source_main_topic", ""))
     curr_source_topic = normalize_spaces(row.get("source_main_topic", ""))
-    if prev_source_topic and curr_source_topic and prev_source_topic != curr_source_topic:
+    if (
+        prev_source_topic
+        and curr_source_topic
+        and prev_source_topic != curr_source_topic
+    ):
         return True
 
     prev_micro = str(prev_row.get("microtopic", "other") or "other")
@@ -737,15 +1180,24 @@ def should_start_new_discussion(prev_row: pd.Series, row: pd.Series, window_minu
 
     prev_tags = tag_set(prev_row.get("tags", ""))
     curr_tags = tag_set(row.get("tags", ""))
-    if prev_tags and curr_tags and not (prev_tags & curr_tags) and gap > pd.Timedelta(minutes=8):
+    if (
+        prev_tags
+        and curr_tags
+        and not (prev_tags & curr_tags)
+        and gap > pd.Timedelta(minutes=8)
+    ):
         return True
 
     return False
 
 
-def make_discussions(messages: pd.DataFrame, window_minutes: int = 60) -> tuple[pd.DataFrame, pd.DataFrame]:
+def make_discussions(
+    messages: pd.DataFrame, window_minutes: int = 60
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     messages = messages.copy()
-    messages["parent_link"] = messages.get("parent_link", "").fillna("").astype(str).str.strip()
+    messages["parent_link"] = (
+        messages.get("parent_link", "").fillna("").astype(str).str.strip()
+    )
     messages["datetime"] = pd.to_datetime(messages["datetime"], errors="coerce")
     messages["sort_date"] = messages["datetime"].fillna(pd.Timestamp("1970-01-01"))
 
@@ -754,18 +1206,32 @@ def make_discussions(messages: pd.DataFrame, window_minutes: int = 60) -> tuple[
     # 1) Parent post is a useful anchor, but comments under one post often drift
     # into several sub-discussions. Split large parent threads by time, tags and microtopic.
     has_parent = messages["parent_link"].ne("")
-    for parent_link, group in messages[has_parent].sort_values(["parent_link", "sort_date", "message_id"]).groupby("parent_link", sort=False):
+    for parent_link, group in (
+        messages[has_parent]
+        .sort_values(["parent_link", "sort_date", "message_id"])
+        .groupby("parent_link", sort=False)
+    ):
         current_no = 0
         prev = None
         for _, row in group.iterrows():
-            if prev is None or should_start_new_discussion(prev, row, max(25, window_minutes // 2)):
+            if prev is None or should_start_new_discussion(
+                prev, row, max(25, window_minutes // 2)
+            ):
                 current_no += 1
             did = stable_hash(f"{parent_link}::{current_no:04d}", prefix="d_parent_")
-            discussion_links.append({"discussion_id": did, "message_id": row["message_id"], "discussion_source": "parent_link_segment"})
+            discussion_links.append(
+                {
+                    "discussion_id": did,
+                    "message_id": row["message_id"],
+                    "discussion_source": "parent_link_segment",
+                }
+            )
             prev = row
 
     # 2) For messages without parent, segment by chat, time, tag overlap and microtopic.
-    no_parent = messages[~has_parent].sort_values(["chat_id", "sort_date", "message_id"]).copy()
+    no_parent = (
+        messages[~has_parent].sort_values(["chat_id", "sort_date", "message_id"]).copy()
+    )
     for chat_id, group in no_parent.groupby("chat_id", sort=False):
         current_no = 0
         prev = None
@@ -776,7 +1242,13 @@ def make_discussions(messages: pd.DataFrame, window_minutes: int = 60) -> tuple[
                 if should_start_new_discussion(prev, row, window_minutes):
                     current_no += 1
             did = f"d_time_{chat_id}_{current_no:05d}"
-            discussion_links.append({"discussion_id": did, "message_id": row["message_id"], "discussion_source": "time_window"})
+            discussion_links.append(
+                {
+                    "discussion_id": did,
+                    "message_id": row["message_id"],
+                    "discussion_source": "time_window",
+                }
+            )
             prev = row
 
     discussion_messages = pd.DataFrame(discussion_links)
@@ -786,33 +1258,67 @@ def make_discussions(messages: pd.DataFrame, window_minutes: int = 60) -> tuple[
     for did, group in enriched.groupby("discussion_id", sort=False):
         group = group.sort_values(["sort_date", "message_id"])
 
-        tags = sorted(set(t for tags in group["tags"].fillna("") for t in str(tags).split("|") if t.strip()))
-        parent_texts = [normalize_spaces(x) for x in group.get("parent_text", pd.Series([], dtype=str)).fillna("").astype(str).unique() if normalize_spaces(x)]
-        message_texts = [normalize_spaces(x) for x in group["text_clean"].fillna("").astype(str).tolist() if normalize_spaces(x)]
+        tags = sorted(
+            set(
+                t
+                for tags in group["tags"].fillna("")
+                for t in str(tags).split("|")
+                if t.strip()
+            )
+        )
+        parent_texts = [
+            normalize_spaces(x)
+            for x in group.get("parent_text", pd.Series([], dtype=str))
+            .fillna("")
+            .astype(str)
+            .unique()
+            if normalize_spaces(x)
+        ]
+        message_texts = [
+            normalize_spaces(x)
+            for x in group["text_clean"].fillna("").astype(str).tolist()
+            if normalize_spaces(x)
+        ]
 
         # Message text should dominate. Parent text is only a compact context; otherwise
         # comments under the same parent post become artificially too similar.
         parent_block = "\n".join(parent_texts[:1])[:350]
         messages_block = "\n".join(message_texts[:80])
         if len(messages_block) < 120 and parent_block:
-            discussion_text = normalize_spaces((messages_block + "\n" + parent_block).strip())
+            discussion_text = normalize_spaces(
+                (messages_block + "\n" + parent_block).strip()
+            )
         else:
-            discussion_text = normalize_spaces((messages_block + "\n" + parent_block[:180]).strip())
+            discussion_text = normalize_spaces(
+                (messages_block + "\n" + parent_block[:180]).strip()
+            )
 
         source_main_topic_counts = Counter(
             normalize_spaces(x)
-            for x in group.get("source_main_topic", pd.Series(dtype=str)).fillna("").astype(str)
+            for x in group.get("source_main_topic", pd.Series(dtype=str))
+            .fillna("")
+            .astype(str)
             if normalize_spaces(x)
         )
-        source_main_topic = source_main_topic_counts.most_common(1)[0][0] if source_main_topic_counts else ""
+        source_main_topic = (
+            source_main_topic_counts.most_common(1)[0][0]
+            if source_main_topic_counts
+            else ""
+        )
         source_topic_values = []
-        for value in group.get("source_topics", pd.Series(dtype=str)).fillna("").astype(str):
+        for value in (
+            group.get("source_topics", pd.Series(dtype=str)).fillna("").astype(str)
+        ):
             for topic in split_source_topics(value):
                 if topic not in source_topic_values:
                     source_topic_values.append(topic)
 
-        microtopic_counts = Counter(group.get("microtopic", pd.Series(["other"])).fillna("other").astype(str))
-        microtopic = microtopic_counts.most_common(1)[0][0] if microtopic_counts else "other"
+        microtopic_counts = Counter(
+            group.get("microtopic", pd.Series(["other"])).fillna("other").astype(str)
+        )
+        microtopic = (
+            microtopic_counts.most_common(1)[0][0] if microtopic_counts else "other"
+        )
 
         rep_messages = []
         for _, r in group.head(5).iterrows():
@@ -820,26 +1326,48 @@ def make_discussions(messages: pd.DataFrame, window_minutes: int = 60) -> tuple[
             if text:
                 rep_messages.append(text[:300])
 
-        rows.append({
-            "discussion_id": did,
-            "discussion_source": group["discussion_source"].iloc[0],
-            "start_date": group["datetime"].min(),
-            "end_date": group["datetime"].max(),
-            "chat_id": group["chat_id"].iloc[0] if group["chat_id"].nunique() == 1 else "",
-            "chat_title": group["chat_title"].iloc[0] if "chat_title" in group else "",
-            "parent_link": group["parent_link"].iloc[0] if "parent_link" in group else "",
-            "main_tags": "|".join(tags),
-            "microtopic": microtopic,
-            "source_main_topic": source_main_topic,
-            "source_topics": "; ".join(source_topic_values),
-            "topic_bucket": source_topic_bucket_value(source_main_topic) + "::" + main_tag(["|".join(tags)]) + "::" + microtopic,
-            "message_count": int(group["message_id"].nunique()),
-            "author_count": int(group["author_id"].nunique()) if "author_id" in group else 0,
-            "negative_count": int(group["is_negative"].astype(bool).sum()) if "is_negative" in group else 0,
-            "toxic_count": int(group["is_toxic"].astype(bool).sum()) if "is_toxic" in group else 0,
-            "discussion_text": discussion_text,
-            "representative_messages": "\n---\n".join(rep_messages),
-        })
+        rows.append(
+            {
+                "discussion_id": did,
+                "discussion_source": group["discussion_source"].iloc[0],
+                "start_date": group["datetime"].min(),
+                "end_date": group["datetime"].max(),
+                "chat_id": (
+                    group["chat_id"].iloc[0] if group["chat_id"].nunique() == 1 else ""
+                ),
+                "chat_title": (
+                    group["chat_title"].iloc[0] if "chat_title" in group else ""
+                ),
+                "parent_link": (
+                    group["parent_link"].iloc[0] if "parent_link" in group else ""
+                ),
+                "main_tags": "|".join(tags),
+                "microtopic": microtopic,
+                "source_main_topic": source_main_topic,
+                "source_topics": "; ".join(source_topic_values),
+                "topic_bucket": source_topic_bucket_value(source_main_topic)
+                + "::"
+                + main_tag(["|".join(tags)])
+                + "::"
+                + microtopic,
+                "message_count": int(group["message_id"].nunique()),
+                "author_count": (
+                    int(group["author_id"].nunique()) if "author_id" in group else 0
+                ),
+                "negative_count": (
+                    int(group["is_negative"].astype(bool).sum())
+                    if "is_negative" in group
+                    else 0
+                ),
+                "toxic_count": (
+                    int(group["is_toxic"].astype(bool).sum())
+                    if "is_toxic" in group
+                    else 0
+                ),
+                "discussion_text": discussion_text,
+                "representative_messages": "\n---\n".join(rep_messages),
+            }
+        )
 
     discussions = pd.DataFrame(rows)
     for col in ["start_date", "end_date"]:
@@ -925,7 +1453,9 @@ def build_title(
         return source_main_topic
 
     for rule in TITLE_RULES:
-        if all_tags & set(rule.get("tags", set())) and (not rule.get("keywords") or kw & set(rule.get("keywords", set()))):
+        if all_tags & set(rule.get("tags", set())) and (
+            not rule.get("keywords") or kw & set(rule.get("keywords", set()))
+        ):
             return rule["title"]
 
     # Keep old taxi titles stable.
@@ -953,7 +1483,11 @@ def build_title(
     # Generic microtopics are useful when the file has no human markup.
     if microtopic in MICROTOPIC_TITLES and microtopic not in {"other", "general"}:
         title = MICROTOPIC_TITLES[microtopic]
-        if tag and tag not in {"Прочие обсуждения", "Общие обсуждения", title} and not tag.startswith("label_"):
+        if (
+            tag
+            and tag not in {"Прочие обсуждения", "Общие обсуждения", title}
+            and not tag.startswith("label_")
+        ):
             return tag
         return title
 
@@ -969,7 +1503,9 @@ def build_title(
     return "Прочие обсуждения"
 
 
-def summarize_event(group: pd.DataFrame, tag: str, keywords: list[str], phrases: list[str]) -> str:
+def summarize_event(
+    group: pd.DataFrame, tag: str, keywords: list[str], phrases: list[str]
+) -> str:
     """Fallback thesis-style description for processed files.
 
     The dashboard recalculates a richer description from the final message set,
@@ -998,9 +1534,8 @@ def split_labels_by_fixed_time_window(
     d["_label"] = labels.loc[d.index].astype(int)
     d["_start"] = pd.to_datetime(d["start_date"], errors="coerce")
     fallback = pd.Timestamp("1970-01-01")
-    d["_bucket"] = (
-        d["_start"].fillna(fallback).astype("int64")
-        // int(pd.Timedelta(hours=window_hours).value)
+    d["_bucket"] = d["_start"].fillna(fallback).astype("int64") // int(
+        pd.Timedelta(hours=window_hours).value
     )
 
     mapping = {}
@@ -1014,9 +1549,14 @@ def split_labels_by_fixed_time_window(
         result.loc[idx] = mapping[key]
     return result.astype(int)
 
+
 def dynamic_threshold(bucket: str, base: float) -> float:
     """Stricter threshold for broad/noisy buckets."""
-    if "general_yandex" in bucket or "::general" in bucket or bucket.endswith("::other"):
+    if (
+        "general_yandex" in bucket
+        or "::general" in bucket
+        or bucket.endswith("::other")
+    ):
         return min(0.72, base + 0.12)
     if "coeff_priority" in bucket:
         return min(0.68, base + 0.07)
@@ -1108,11 +1648,12 @@ def cluster_discussions_tfidf(
     d["_start"] = pd.to_datetime(d["start_date"], errors="coerce")
     fallback = pd.Timestamp("1970-01-01")
     bucket_hours = max(1.0, float(max_event_span_hours))
-    d["_time_bucket"] = (
-        d["_start"].fillna(fallback).astype("int64")
-        // int(pd.Timedelta(hours=bucket_hours).value)
+    d["_time_bucket"] = d["_start"].fillna(fallback).astype("int64") // int(
+        pd.Timedelta(hours=bucket_hours).value
     )
-    d["_cluster_bucket"] = d["topic_bucket"].astype(str) + "::t" + d["_time_bucket"].astype(str)
+    d["_cluster_bucket"] = (
+        d["topic_bucket"].astype(str) + "::t" + d["_time_bucket"].astype(str)
+    )
 
     result = pd.Series(index=d.index, dtype=int)
     next_label = 0
@@ -1128,7 +1669,9 @@ def cluster_discussions_tfidf(
             max_event_span_hours=max_event_span_hours,
             max_features=max_features,
         )
-        unique_local = {int(v): i + next_label for i, v in enumerate(sorted(local_labels.unique()))}
+        unique_local = {
+            int(v): i + next_label for i, v in enumerate(sorted(local_labels.unique()))
+        }
         result.loc[group.index] = local_labels.map(unique_local)
         next_label += len(unique_local)
 
@@ -1223,14 +1766,24 @@ def split_labels_by_time_gap(
             new_labels.loc[idx] = current_label
 
             if pd.notna(end):
-                prev_end = max(prev_end, end) if prev_end is not None and pd.notna(prev_end) else end
+                prev_end = (
+                    max(prev_end, end)
+                    if prev_end is not None and pd.notna(prev_end)
+                    else end
+                )
             elif pd.notna(start):
-                prev_end = max(prev_end, start) if prev_end is not None and pd.notna(prev_end) else start
+                prev_end = (
+                    max(prev_end, start)
+                    if prev_end is not None and pd.notna(prev_end)
+                    else start
+                )
 
     return new_labels.astype(int)
 
 
-def make_events_from_source_stories(discussions: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+def make_events_from_source_stories(
+    discussions: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Build one information event per Brand Analytics `Сюжет`.
 
     Brand Analytics already contains a human/system story column. For these
@@ -1251,17 +1804,29 @@ def make_events_from_source_stories(discussions: pd.DataFrame) -> tuple[pd.DataF
     rows = []
     for event_id, group in d.groupby("event_id", sort=False):
         story = str(group["__story"].iloc[0] or "Без сюжета")
-        keywords = top_keywords(group["discussion_text"].fillna("").astype(str), top_n=7)
+        keywords = top_keywords(
+            group["discussion_text"].fillna("").astype(str), top_n=7
+        )
         phrases = top_phrases(group["discussion_text"].fillna("").astype(str), top_n=5)
         start = pd.to_datetime(group["start_date"], errors="coerce").min()
         end = pd.to_datetime(group["end_date"], errors="coerce").max()
         msg_count = int(group["message_count"].sum())
         discussion_count = int(group["discussion_id"].nunique())
-        chat_count = int(group["chat_id"].replace("", np.nan).nunique()) if "chat_id" in group else 0
-        author_count = int(group["author_count"].sum()) if "author_count" in group else 0
-        negative_count = int(group["negative_count"].sum()) if "negative_count" in group else 0
+        chat_count = (
+            int(group["chat_id"].replace("", np.nan).nunique())
+            if "chat_id" in group
+            else 0
+        )
+        author_count = (
+            int(group["author_count"].sum()) if "author_count" in group else 0
+        )
+        negative_count = (
+            int(group["negative_count"].sum()) if "negative_count" in group else 0
+        )
         toxic_count = int(group["toxic_count"].sum()) if "toxic_count" in group else 0
-        all_tags = sorted(tag_set_from_series(group.get("main_tags", pd.Series(dtype=str))))
+        all_tags = sorted(
+            tag_set_from_series(group.get("main_tags", pd.Series(dtype=str)))
+        )
         tag = main_tag(group.get("main_tags", pd.Series(dtype=str)))
         negative_share = negative_count / msg_count if msg_count else 0.0
         toxic_share = toxic_count / msg_count if msg_count else 0.0
@@ -1274,36 +1839,40 @@ def make_events_from_source_stories(discussions: pd.DataFrame) -> tuple[pd.DataF
             + toxic_share * 2
             + tag_weight
         )
-        rows.append({
-            "event_id": event_id,
-            "event_title": story,
-            "event_summary": summarize_event(group, story, keywords, phrases),
-            "main_tag": tag,
-            "microtopic": label_microtopic(story),
-            "main_tags": "|".join(all_tags),
-            "source_main_topic": story,
-            "source_topics": story,
-            "keywords": "|".join(keywords),
-            "key_phrases": "|".join(phrases),
-            "start_date": start,
-            "end_date": end,
-            "discussion_count": discussion_count,
-            "message_count": msg_count,
-            "chat_count": chat_count,
-            "author_count": author_count,
-            "negative_count": negative_count,
-            "toxic_count": toxic_count,
-            "negative_share": round(negative_share, 4),
-            "toxic_share": round(toxic_share, 4),
-            "importance_score": round(float(importance_score), 2),
-            "status": "новый",
-            "is_hidden": False,
-            "event_source": "brand_analytics_story",
-        })
+        rows.append(
+            {
+                "event_id": event_id,
+                "event_title": story,
+                "event_summary": summarize_event(group, story, keywords, phrases),
+                "main_tag": tag,
+                "microtopic": label_microtopic(story),
+                "main_tags": "|".join(all_tags),
+                "source_main_topic": story,
+                "source_topics": story,
+                "keywords": "|".join(keywords),
+                "key_phrases": "|".join(phrases),
+                "start_date": start,
+                "end_date": end,
+                "discussion_count": discussion_count,
+                "message_count": msg_count,
+                "chat_count": chat_count,
+                "author_count": author_count,
+                "negative_count": negative_count,
+                "toxic_count": toxic_count,
+                "negative_share": round(negative_share, 4),
+                "toxic_share": round(toxic_share, 4),
+                "importance_score": round(float(importance_score), 2),
+                "status": "новый",
+                "is_hidden": False,
+                "event_source": "brand_analytics_story",
+            }
+        )
 
     events = pd.DataFrame(rows)
     if not events.empty:
-        events = events.sort_values(["importance_score", "message_count"], ascending=False)
+        events = events.sort_values(
+            ["importance_score", "message_count"], ascending=False
+        )
     return events, event_discussions
 
 
@@ -1320,19 +1889,33 @@ def make_events(
     rows = []
     for event_id, group in d.groupby("event_id", sort=True):
         tag = main_tag(group["main_tags"])
-        keywords = top_keywords(group["discussion_text"].fillna("").astype(str), top_n=7)
+        keywords = top_keywords(
+            group["discussion_text"].fillna("").astype(str), top_n=7
+        )
         phrases = top_phrases(group["discussion_text"].fillna("").astype(str), top_n=5)
-        microtopic_counter = Counter(group.get("microtopic", pd.Series(["other"])).fillna("other").astype(str))
-        microtopic = microtopic_counter.most_common(1)[0][0] if microtopic_counter else "other"
+        microtopic_counter = Counter(
+            group.get("microtopic", pd.Series(["other"])).fillna("other").astype(str)
+        )
+        microtopic = (
+            microtopic_counter.most_common(1)[0][0] if microtopic_counter else "other"
+        )
 
         source_main_topic_counter = Counter(
             normalize_spaces(x)
-            for x in group.get("source_main_topic", pd.Series(dtype=str)).fillna("").astype(str)
+            for x in group.get("source_main_topic", pd.Series(dtype=str))
+            .fillna("")
+            .astype(str)
             if normalize_spaces(x)
         )
-        source_main_topic = source_main_topic_counter.most_common(1)[0][0] if source_main_topic_counter else ""
+        source_main_topic = (
+            source_main_topic_counter.most_common(1)[0][0]
+            if source_main_topic_counter
+            else ""
+        )
         source_topic_values = []
-        for value in group.get("source_topics", pd.Series(dtype=str)).fillna("").astype(str):
+        for value in (
+            group.get("source_topics", pd.Series(dtype=str)).fillna("").astype(str)
+        ):
             for topic in split_source_topics(value):
                 if topic not in source_topic_values:
                     source_topic_values.append(topic)
@@ -1341,9 +1924,17 @@ def make_events(
         end = pd.to_datetime(group["end_date"], errors="coerce").max()
         msg_count = int(group["message_count"].sum())
         discussion_count = int(group["discussion_id"].nunique())
-        chat_count = int(group["chat_id"].replace("", np.nan).nunique()) if "chat_id" in group else 0
-        author_count = int(group["author_count"].sum()) if "author_count" in group else 0
-        negative_count = int(group["negative_count"].sum()) if "negative_count" in group else 0
+        chat_count = (
+            int(group["chat_id"].replace("", np.nan).nunique())
+            if "chat_id" in group
+            else 0
+        )
+        author_count = (
+            int(group["author_count"].sum()) if "author_count" in group else 0
+        )
+        negative_count = (
+            int(group["negative_count"].sum()) if "negative_count" in group else 0
+        )
         toxic_count = int(group["toxic_count"].sum()) if "toxic_count" in group else 0
 
         all_tags = sorted(tag_set_from_series(group["main_tags"]))
@@ -1360,43 +1951,51 @@ def make_events(
             + tag_weight
         )
 
-        rows.append({
-            "event_id": event_id,
-            "event_title": build_title(
-                tag,
-                keywords,
-                all_tags,
-                microtopic=microtopic,
-                phrases=phrases,
-                source_main_topic=source_main_topic,
-                source_topics="; ".join(source_topic_values),
-            ),
-            "event_summary": summarize_event(group, source_main_topic or MICROTOPIC_TITLES.get(microtopic, tag), keywords, phrases),
-            "main_tag": tag,
-            "microtopic": microtopic,
-            "main_tags": "|".join(all_tags),
-            "source_main_topic": source_main_topic,
-            "source_topics": "; ".join(source_topic_values),
-            "keywords": "|".join(keywords),
-            "key_phrases": "|".join(phrases),
-            "start_date": start,
-            "end_date": end,
-            "discussion_count": discussion_count,
-            "message_count": msg_count,
-            "chat_count": chat_count,
-            "author_count": author_count,
-            "negative_count": negative_count,
-            "toxic_count": toxic_count,
-            "negative_share": round(negative_share, 4),
-            "toxic_share": round(toxic_share, 4),
-            "importance_score": round(float(importance_score), 2),
-            "status": "новый",
-            "is_hidden": False,
-        })
+        rows.append(
+            {
+                "event_id": event_id,
+                "event_title": build_title(
+                    tag,
+                    keywords,
+                    all_tags,
+                    microtopic=microtopic,
+                    phrases=phrases,
+                    source_main_topic=source_main_topic,
+                    source_topics="; ".join(source_topic_values),
+                ),
+                "event_summary": summarize_event(
+                    group,
+                    source_main_topic or MICROTOPIC_TITLES.get(microtopic, tag),
+                    keywords,
+                    phrases,
+                ),
+                "main_tag": tag,
+                "microtopic": microtopic,
+                "main_tags": "|".join(all_tags),
+                "source_main_topic": source_main_topic,
+                "source_topics": "; ".join(source_topic_values),
+                "keywords": "|".join(keywords),
+                "key_phrases": "|".join(phrases),
+                "start_date": start,
+                "end_date": end,
+                "discussion_count": discussion_count,
+                "message_count": msg_count,
+                "chat_count": chat_count,
+                "author_count": author_count,
+                "negative_count": negative_count,
+                "toxic_count": toxic_count,
+                "negative_share": round(negative_share, 4),
+                "toxic_share": round(toxic_share, 4),
+                "importance_score": round(float(importance_score), 2),
+                "status": "новый",
+                "is_hidden": False,
+            }
+        )
 
-    events = pd.DataFrame(rows).sort_values(["importance_score", "message_count"], ascending=False)
+    events = pd.DataFrame(rows).sort_values(
+        ["importance_score", "message_count"], ascending=False
+    )
     return events, event_discussions
-
 
 
 def clear_processed_tables(output: Path) -> None:
@@ -1438,7 +2037,9 @@ def build_processed_tables(
     is_brand_analytics = is_brand_analytics_dataframe(raw)
 
     messages, message_tags = normalize_messages(raw, tag_cols)
-    discussions, discussion_messages = make_discussions(messages, window_minutes=window_minutes)
+    discussions, discussion_messages = make_discussions(
+        messages, window_minutes=window_minutes
+    )
 
     if is_brand_analytics:
         # Brand Analytics mode: events are source stories (`Сюжет`), not tag/text
@@ -1448,7 +2049,9 @@ def build_processed_tables(
         cluster_method_used = "brand_analytics_story"
     else:
         # Filter empty discussions from clustering, but preserve them as singleton events.
-        clusterable = discussions[discussions["discussion_text"].fillna("").str.len() > 10].copy()
+        clusterable = discussions[
+            discussions["discussion_text"].fillna("").str.len() > 10
+        ].copy()
         non_clusterable = discussions.drop(clusterable.index).copy()
 
         if cluster_method == "none":
@@ -1469,14 +2072,25 @@ def build_processed_tables(
 
         if len(clusterable):
             labels = refine_labels_by_tag(labels, clusterable)
-            labels = split_labels_by_time_gap(labels, clusterable, max_gap_hours=event_gap_hours)
-            labels = split_labels_by_fixed_time_window(labels, clusterable, window_hours=event_window_hours)
+            labels = split_labels_by_time_gap(
+                labels, clusterable, max_gap_hours=event_gap_hours
+            )
+            labels = split_labels_by_fixed_time_window(
+                labels, clusterable, window_hours=event_window_hours
+            )
 
         if len(non_clusterable):
             start_label = int(labels.max()) + 1 if len(labels) else 0
-            singleton_labels = pd.Series(range(start_label, start_label + len(non_clusterable)), index=non_clusterable.index)
-            all_discussions = pd.concat([clusterable, non_clusterable], axis=0).sort_index()
-            all_labels = pd.concat([labels, singleton_labels]).loc[all_discussions.index]
+            singleton_labels = pd.Series(
+                range(start_label, start_label + len(non_clusterable)),
+                index=non_clusterable.index,
+            )
+            all_discussions = pd.concat(
+                [clusterable, non_clusterable], axis=0
+            ).sort_index()
+            all_labels = pd.concat([labels, singleton_labels]).loc[
+                all_discussions.index
+            ]
         else:
             all_discussions = clusterable
             all_labels = labels
@@ -1488,9 +2102,13 @@ def build_processed_tables(
         "messages": str(write_table(messages, output, "messages")),
         "message_tags": str(write_table(message_tags, output, "message_tags")),
         "discussions": str(write_table(discussions, output, "discussions")),
-        "discussion_messages": str(write_table(discussion_messages, output, "discussion_messages")),
+        "discussion_messages": str(
+            write_table(discussion_messages, output, "discussion_messages")
+        ),
         "events": str(write_table(events, output, "events")),
-        "event_discussions": str(write_table(event_discussions, output, "event_discussions")),
+        "event_discussions": str(
+            write_table(event_discussions, output, "event_discussions")
+        ),
     }
 
     manifest = {
@@ -1502,7 +2120,9 @@ def build_processed_tables(
         "tag_columns": tag_cols,
         "window_minutes": window_minutes,
         "cluster_method": cluster_method_used,
-        "event_source": "brand_analytics_story" if is_brand_analytics else "algorithmic_cluster",
+        "event_source": (
+            "brand_analytics_story" if is_brand_analytics else "algorithmic_cluster"
+        ),
         "similarity_threshold": similarity_threshold,
         "event_gap_hours": event_gap_hours,
         "event_window_hours": event_window_hours,
@@ -1568,11 +2188,26 @@ def main() -> None:
     parser.add_argument("--input", required=True, help="Path to source CSV")
     parser.add_argument("--output", default="data/processed", help="Output directory")
     parser.add_argument("--window-minutes", type=int, default=60)
-    parser.add_argument("--cluster-method", choices=["tfidf", "embeddings", "none"], default="tfidf")
+    parser.add_argument(
+        "--cluster-method", choices=["tfidf", "embeddings", "none"], default="tfidf"
+    )
     parser.add_argument("--similarity-threshold", type=float, default=0.28)
-    parser.add_argument("--event-gap-hours", type=float, default=3.0, help="Split clusters into separate events when the time gap is larger than this value")
-    parser.add_argument("--event-window-hours", type=float, default=16.0, help="Additionally limit one event to a fixed time span")
-    parser.add_argument("--embedding-model", default="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+    parser.add_argument(
+        "--event-gap-hours",
+        type=float,
+        default=3.0,
+        help="Split clusters into separate events when the time gap is larger than this value",
+    )
+    parser.add_argument(
+        "--event-window-hours",
+        type=float,
+        default=16.0,
+        help="Additionally limit one event to a fixed time span",
+    )
+    parser.add_argument(
+        "--embedding-model",
+        default="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+    )
     args = parser.parse_args()
 
     manifest = run_preprocess(

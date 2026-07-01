@@ -6,17 +6,32 @@ import pandas as pd
 
 from .metrics_compute import numeric_series
 
-
 AUTO_GENERATED_TAGS_TO_HIDE = {
-    "коэффициент", "законы и налоги", "яндекс", "wb такси", "фастен",
-    "приложение и сбои", "яндекс про", "забастовка", "аэропорты",
-    "детские кресла", "карты и навигация",
-    "проблемы, жалобы и негативный опыт", "цены, стоимость и условия",
-    "качество продукта или услуги", "наличие, поставки и логистика",
-    "монтаж, применение и эксплуатация", "документы, сертификаты и требования",
-    "безопасность и пожарные свойства", "безопасность и риски",
-    "экология и энергоэффективность", "конкуренты и сравнение на рынке",
-    "поддержка и клиентский сервис", "общие обсуждения", "прочие обсуждения", "без тега",
+    "коэффициент",
+    "законы и налоги",
+    "яндекс",
+    "wb такси",
+    "фастен",
+    "приложение и сбои",
+    "яндекс про",
+    "забастовка",
+    "аэропорты",
+    "детские кресла",
+    "карты и навигация",
+    "проблемы, жалобы и негативный опыт",
+    "цены, стоимость и условия",
+    "качество продукта или услуги",
+    "наличие, поставки и логистика",
+    "монтаж, применение и эксплуатация",
+    "документы, сертификаты и требования",
+    "безопасность и пожарные свойства",
+    "безопасность и риски",
+    "экология и энергоэффективность",
+    "конкуренты и сравнение на рынке",
+    "поддержка и клиентский сервис",
+    "общие обсуждения",
+    "прочие обсуждения",
+    "без тега",
 }
 
 
@@ -42,7 +57,11 @@ def normalize_tag_key(value: Any) -> str:
 
 def declared_ba_tag_set(messages: pd.DataFrame) -> set[str]:
     """Return Brand Analytics tag names declared in source_tag_columns."""
-    if messages is None or messages.empty or "source_tag_columns" not in messages.columns:
+    if (
+        messages is None
+        or messages.empty
+        or "source_tag_columns" not in messages.columns
+    ):
         return set()
     tags: set[str] = set()
     for raw in messages["source_tag_columns"].dropna().astype(str).unique().tolist():
@@ -96,7 +115,16 @@ def clean_brand_analytics_tags(messages: pd.DataFrame) -> pd.DataFrame:
 def build_tag_statistics_compute(messages: pd.DataFrame) -> pd.DataFrame:
     """Build tag-level analytics: messages, total views/reach and engagement."""
     if messages is None or messages.empty or "tags" not in messages.columns:
-        return pd.DataFrame(columns=["Тег", "Сообщений", "Аудитория", "Охват", "Вовлеченность", "Негатив"])
+        return pd.DataFrame(
+            columns=[
+                "Тег",
+                "Сообщений",
+                "Аудитория",
+                "Охват",
+                "Вовлеченность",
+                "Негатив",
+            ]
+        )
 
     work = messages.copy()
     work["_tag"] = work["tags"].fillna("").astype(str).apply(split_pipe_values)
@@ -104,20 +132,44 @@ def build_tag_statistics_compute(messages: pd.DataFrame) -> pd.DataFrame:
     work["_tag"] = work["_tag"].fillna("").astype(str).str.strip()
     work = work[work["_tag"] != ""]
     if work.empty:
-        return pd.DataFrame(columns=["Тег", "Сообщений", "Аудитория", "Охват", "Вовлеченность", "Негатив"])
+        return pd.DataFrame(
+            columns=[
+                "Тег",
+                "Сообщений",
+                "Аудитория",
+                "Охват",
+                "Вовлеченность",
+                "Негатив",
+            ]
+        )
 
     work["_audience"] = numeric_series(work, ["audience", "Аудитория"])
-    work["_reach"] = numeric_series(work, ["views", "Просмотры", "Просмотров", "reach", "Охват"])
-    work["_engagement"] = numeric_series(work, ["engagement", "Вовлечённость", "Вовлеченность", "engagement_count"])
+    work["_reach"] = numeric_series(
+        work, ["views", "Просмотры", "Просмотров", "reach", "Охват"]
+    )
+    work["_engagement"] = numeric_series(
+        work, ["engagement", "Вовлечённость", "Вовлеченность", "engagement_count"]
+    )
     if "sentiment" in work.columns:
-        work["_negative"] = work["sentiment"].fillna("").astype(str).str.lower().str.contains("нег", regex=True).astype(int)
+        work["_negative"] = (
+            work["sentiment"]
+            .fillna("")
+            .astype(str)
+            .str.lower()
+            .str.contains("нег", regex=True)
+            .astype(int)
+        )
     else:
         work["_negative"] = 0
 
     stats = (
         work.groupby("_tag", as_index=False)
         .agg(
-            Сообщений=("message_id", "nunique") if "message_id" in work.columns else ("_tag", "size"),
+            Сообщений=(
+                ("message_id", "nunique")
+                if "message_id" in work.columns
+                else ("_tag", "size")
+            ),
             Аудитория=("_audience", "sum"),
             Охват=("_reach", "sum"),
             Вовлеченность=("_engagement", "sum"),
@@ -127,6 +179,14 @@ def build_tag_statistics_compute(messages: pd.DataFrame) -> pd.DataFrame:
     )
     for col in ["Сообщений", "Аудитория", "Охват", "Вовлеченность", "Негатив"]:
         if col in stats.columns:
-            stats[col] = pd.to_numeric(stats[col], errors="coerce").fillna(0).astype(int)
-    stats["Доля негатива"] = (stats["Негатив"] / stats["Сообщений"].replace(0, pd.NA) * 100).fillna(0).round(1)
-    return stats.sort_values(["Сообщений", "Аудитория", "Охват", "Вовлеченность"], ascending=False).reset_index(drop=True)
+            stats[col] = (
+                pd.to_numeric(stats[col], errors="coerce").fillna(0).astype(int)
+            )
+    stats["Доля негатива"] = (
+        (stats["Негатив"] / stats["Сообщений"].replace(0, pd.NA) * 100)
+        .fillna(0)
+        .round(1)
+    )
+    return stats.sort_values(
+        ["Сообщений", "Аудитория", "Охват", "Вовлеченность"], ascending=False
+    ).reset_index(drop=True)

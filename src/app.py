@@ -7,7 +7,7 @@ import uuid
 import re
 import textwrap
 from io import BytesIO
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +15,7 @@ import pandas as pd
 import streamlit as st
 import altair as alt
 
-from import_adapters import read_source_table, get_excel_sheet_names
+from import_adapters import read_source_table
 from io_utils import read_table
 from services.cached_store import (
     supabase_configured,
@@ -51,9 +51,6 @@ from services.metrics_compute import (
 )
 from services.tag_compute import (
     split_pipe_values,
-    normalize_tag_key,
-    declared_ba_tag_set,
-    is_brand_analytics_messages,
     clean_brand_analytics_tags,
     build_tag_statistics_compute,
 )
@@ -81,7 +78,14 @@ CHART_LABEL_POSITION_OPTIONS = {
     "center": "В центре",
     "bottom": "У нижнего края",
 }
-CHART_LABEL_FONT_OPTIONS = ["Arial", "Inter", "Roboto", "Verdana", "Tahoma", "Times New Roman"]
+CHART_LABEL_FONT_OPTIONS = [
+    "Arial",
+    "Inter",
+    "Roboto",
+    "Verdana",
+    "Tahoma",
+    "Times New Roman",
+]
 DEFAULT_CHART_LABEL_SETTINGS = {
     "font": "Arial",
     "font_size": 11,
@@ -123,34 +127,67 @@ DEFAULT_DASHBOARD_VIEW_SETTINGS = {
     "client_hide_technical": True,
 }
 
-DASHBOARD_SECTION_OPTIONS = ["Клиентский обзор", "Теги", "Инфоповоды", "Ключевые сообщения", "Динамика"]
-TAXI_DASHBOARD_SECTION_OPTIONS = ["Клиентский обзор", "Инфоповоды", "Ключевые сообщения", "Динамика"]
+DASHBOARD_SECTION_OPTIONS = [
+    "Клиентский обзор",
+    "Теги",
+    "Инфоповоды",
+    "Ключевые сообщения",
+    "Динамика",
+]
+TAXI_DASHBOARD_SECTION_OPTIONS = [
+    "Клиентский обзор",
+    "Инфоповоды",
+    "Ключевые сообщения",
+    "Динамика",
+]
 
 
-def dashboard_view_settings_from_project_settings(settings: dict[str, Any] | None) -> dict[str, Any]:
+def dashboard_view_settings_from_project_settings(
+    settings: dict[str, Any] | None,
+) -> dict[str, Any]:
     raw = {}
     if isinstance(settings, dict):
         raw = settings.get("dashboard_view_settings") or {}
     if not isinstance(raw, dict):
         raw = {}
     result = dict(DEFAULT_DASHBOARD_VIEW_SETTINGS)
-    mode = str(raw.get("default_view_mode") or result["default_view_mode"]).strip().lower()
-    result["default_view_mode"] = mode if mode in {"client", "analyst"} else result["default_view_mode"]
+    mode = (
+        str(raw.get("default_view_mode") or result["default_view_mode"]).strip().lower()
+    )
+    result["default_view_mode"] = (
+        mode if mode in {"client", "analyst"} else result["default_view_mode"]
+    )
     start_section = str(raw.get("start_section") or result["start_section"]).strip()
-    result["start_section"] = start_section if start_section in DASHBOARD_SECTION_OPTIONS else result["start_section"]
-    taxi_start_section = str(raw.get("taxi_start_section") or result["taxi_start_section"]).strip()
-    result["taxi_start_section"] = taxi_start_section if taxi_start_section in TAXI_DASHBOARD_SECTION_OPTIONS else result["taxi_start_section"]
+    result["start_section"] = (
+        start_section
+        if start_section in DASHBOARD_SECTION_OPTIONS
+        else result["start_section"]
+    )
+    taxi_start_section = str(
+        raw.get("taxi_start_section") or result["taxi_start_section"]
+    ).strip()
+    result["taxi_start_section"] = (
+        taxi_start_section
+        if taxi_start_section in TAXI_DASHBOARD_SECTION_OPTIONS
+        else result["taxi_start_section"]
+    )
     raw_charts = raw.get("comparison_visible_charts")
     if isinstance(raw_charts, list):
         charts = [str(x) for x in raw_charts if str(x) in COMPARISON_CHART_BLOCKS]
     else:
         charts = list(result["comparison_visible_charts"])
-    result["comparison_visible_charts"] = charts or list(DEFAULT_DASHBOARD_VIEW_SETTINGS["comparison_visible_charts"])
-    result["client_hide_technical"] = bool(raw.get("client_hide_technical", result["client_hide_technical"]))
+    result["comparison_visible_charts"] = charts or list(
+        DEFAULT_DASHBOARD_VIEW_SETTINGS["comparison_visible_charts"]
+    )
+    result["client_hide_technical"] = bool(
+        raw.get("client_hide_technical", result["client_hide_technical"])
+    )
     return result
 
 
-def dashboard_view_mode_for_session(role: str, settings: dict[str, Any], *, key: str = "dashboard_view_mode") -> str:
+def dashboard_view_mode_for_session(
+    role: str, settings: dict[str, Any], *, key: str = "dashboard_view_mode"
+) -> str:
     default_mode = str(settings.get("default_view_mode") or "client")
     if role_rank(role) < role_rank("editor"):
         st.sidebar.caption("Вид дашборда: клиентский")
@@ -176,22 +213,40 @@ def _valid_hex_color(value: Any, fallback: str) -> str:
     return fallback
 
 
-def report_branding_from_project_settings(settings: dict[str, Any] | None, *, project_name: str = "") -> dict[str, Any]:
+def report_branding_from_project_settings(
+    settings: dict[str, Any] | None, *, project_name: str = ""
+) -> dict[str, Any]:
     raw = {}
     if isinstance(settings, dict):
         raw = settings.get("report_branding") or {}
     if not isinstance(raw, dict):
         raw = {}
     result = dict(DEFAULT_REPORT_BRANDING)
-    result.update({k: str(raw.get(k) or result.get(k) or "").strip() for k in ["client_name", "report_title", "footer_text", "logo_url", "logo_storage_path", "logo_filename", "logo_mime_type"]})
-    result["accent_color"] = _valid_hex_color(raw.get("accent_color"), result["accent_color"])
-    result["background_color"] = _valid_hex_color(raw.get("background_color"), result["background_color"])
+    result.update(
+        {
+            k: str(raw.get(k) or result.get(k) or "").strip()
+            for k in [
+                "client_name",
+                "report_title",
+                "footer_text",
+                "logo_url",
+                "logo_storage_path",
+                "logo_filename",
+                "logo_mime_type",
+            ]
+        }
+    )
+    result["accent_color"] = _valid_hex_color(
+        raw.get("accent_color"), result["accent_color"]
+    )
+    result["background_color"] = _valid_hex_color(
+        raw.get("background_color"), result["background_color"]
+    )
     if not result.get("client_name"):
         result["client_name"] = str(project_name or "").strip()
     if not result.get("report_title"):
         result["report_title"] = "Дайджест упоминаний"
     return result
-
 
 
 def project_topic_profile(project_row: pd.Series | None) -> str:
@@ -234,32 +289,43 @@ def default_min_event_messages(profile: str, events: pd.DataFrame | None = None)
     return 4
 
 
-def render_min_event_messages_control(profile: str, events: pd.DataFrame | None = None, *, key: str = "min_event_messages") -> int:
+def render_min_event_messages_control(
+    profile: str, events: pd.DataFrame | None = None, *, key: str = "min_event_messages"
+) -> int:
     default_value = int(default_min_event_messages(profile, events))
     max_value = 50
     help_text = (
         "Инфоповоды с меньшим числом сообщений скрываются из таблицы и саммари. "
         "Сообщения при этом остаются в общей статистике и полной ленте."
     )
-    return int(st.sidebar.number_input(
-        "Мин. сообщений в инфоповоде",
-        min_value=1,
-        max_value=max_value,
-        value=default_value,
-        step=1,
-        help=help_text,
-        key=key,
-    ))
+    return int(
+        st.sidebar.number_input(
+            "Мин. сообщений в инфоповоде",
+            min_value=1,
+            max_value=max_value,
+            value=default_value,
+            step=1,
+            help=help_text,
+            key=key,
+        )
+    )
 
 
-def filter_small_events(events_agg: pd.DataFrame, min_messages: int) -> tuple[pd.DataFrame, int, int]:
+def filter_small_events(
+    events_agg: pd.DataFrame, min_messages: int
+) -> tuple[pd.DataFrame, int, int]:
     """Hide tiny information events from dashboard-level analytics.
 
     This does not delete events or messages from storage; it only filters the
     analytical view. It is intended to suppress one-off algorithmic clusters
     such as `Обсуждение: ...` with 1-3 messages.
     """
-    if events_agg is None or events_agg.empty or min_messages <= 1 or "message_count" not in events_agg.columns:
+    if (
+        events_agg is None
+        or events_agg.empty
+        or min_messages <= 1
+        or "message_count" not in events_agg.columns
+    ):
         return events_agg, 0, 0
     work = events_agg.copy()
     counts = pd.to_numeric(work["message_count"], errors="coerce").fillna(0).astype(int)
@@ -269,7 +335,9 @@ def filter_small_events(events_agg: pd.DataFrame, min_messages: int) -> tuple[pd
     return work[keep_mask].copy(), hidden_events, hidden_messages
 
 
-def render_small_events_notice(hidden_events: int, hidden_messages: int, min_messages: int) -> None:
+def render_small_events_notice(
+    hidden_events: int, hidden_messages: int, min_messages: int
+) -> None:
     if hidden_events <= 0:
         return
     st.caption(
@@ -289,7 +357,9 @@ def project_settings_from_row(row) -> dict[str, Any]:
     return settings if isinstance(settings, dict) else {}
 
 
-def chart_label_settings_from_project_settings(settings: dict[str, Any] | None) -> dict[str, Any]:
+def chart_label_settings_from_project_settings(
+    settings: dict[str, Any] | None,
+) -> dict[str, Any]:
     raw = {}
     if isinstance(settings, dict):
         raw = settings.get("chart_label_settings") or {}
@@ -304,13 +374,21 @@ def chart_label_settings_from_project_settings(settings: dict[str, Any] | None) 
         size = int(result["font_size"])
     result["font_size"] = max(8, min(28, size))
     position = str(raw.get("position") or result["position"]).strip()
-    result["position"] = position if position in CHART_LABEL_POSITION_OPTIONS else result["position"]
-    result["show_donut_legend"] = bool(raw.get("show_donut_legend", result.get("show_donut_legend", False)))
+    result["position"] = (
+        position if position in CHART_LABEL_POSITION_OPTIONS else result["position"]
+    )
+    result["show_donut_legend"] = bool(
+        raw.get("show_donut_legend", result.get("show_donut_legend", False))
+    )
     return result
 
 
-def chart_label_text_kwargs(settings: dict[str, Any] | None, *, chart_type: str = "line") -> dict[str, Any]:
-    cfg = chart_label_settings_from_project_settings({"chart_label_settings": settings or {}})
+def chart_label_text_kwargs(
+    settings: dict[str, Any] | None, *, chart_type: str = "line"
+) -> dict[str, Any]:
+    cfg = chart_label_settings_from_project_settings(
+        {"chart_label_settings": settings or {}}
+    )
     position = cfg.get("position", "top")
     kwargs: dict[str, Any] = {
         "align": "center",
@@ -329,7 +407,9 @@ def chart_label_text_kwargs(settings: dict[str, Any] | None, *, chart_type: str 
 
 
 def chart_label_radius(settings: dict[str, Any] | None) -> int:
-    cfg = chart_label_settings_from_project_settings({"chart_label_settings": settings or {}})
+    cfg = chart_label_settings_from_project_settings(
+        {"chart_label_settings": settings or {}}
+    )
     position = cfg.get("position", "top")
     if position == "center":
         return 72
@@ -338,10 +418,11 @@ def chart_label_radius(settings: dict[str, Any] | None) -> int:
     return 104
 
 
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("--work-dir", default=os.getenv("PLATFORM_WORK_DIR", "data/work"))
+    parser.add_argument(
+        "--work-dir", default=os.getenv("PLATFORM_WORK_DIR", "data/work")
+    )
     args, _ = parser.parse_known_args()
     return args
 
@@ -355,11 +436,15 @@ def get_secret_value(name: str, default: str = "") -> str:
 
 
 def is_platform_admin() -> bool:
-    admin_password = get_secret_value("PLATFORM_ADMIN_PASSWORD") or get_secret_value("ADMIN_PASSWORD")
+    admin_password = get_secret_value("PLATFORM_ADMIN_PASSWORD") or get_secret_value(
+        "ADMIN_PASSWORD"
+    )
     if "platform_is_admin" not in st.session_state:
         st.session_state["platform_is_admin"] = False
     if not admin_password:
-        st.sidebar.warning("PLATFORM_ADMIN_PASSWORD не настроен: режим владельца временно доступен всем.")
+        st.sidebar.warning(
+            "PLATFORM_ADMIN_PASSWORD не настроен: режим владельца временно доступен всем."
+        )
         return True
     if st.session_state.get("platform_is_admin"):
         st.sidebar.success("Режим: владелец платформы")
@@ -368,7 +453,9 @@ def is_platform_admin() -> bool:
             st.rerun()
         return True
     with st.sidebar.expander("Вход владельца платформы", expanded=False):
-        password = st.text_input("Пароль владельца", type="password", key="platform_admin_password")
+        password = st.text_input(
+            "Пароль владельца", type="password", key="platform_admin_password"
+        )
         if st.button("Войти", key="platform_admin_login"):
             if password == admin_password:
                 st.session_state["platform_is_admin"] = True
@@ -420,14 +507,34 @@ def first_existing_col(df: pd.DataFrame, columns: list[str | None]) -> str | Non
     return None
 
 
-
 def render_overview_statistics(messages: pd.DataFrame) -> None:
     """Render top-level numbers for the start page."""
     st.subheader("Статистика")
     total_messages = int(len(messages)) if isinstance(messages, pd.DataFrame) else 0
-    audience = int(numeric_series(messages, ["audience", "Аудитория"]).sum()) if total_messages else 0
-    reach = int(numeric_series(messages, ["views", "Просмотры", "Просмотров", "reach", "Охват"]).sum()) if total_messages else 0
-    engagement = int(numeric_series(messages, ["engagement", "Вовлечённость", "Вовлеченность", "engagement_count"]).sum()) if total_messages else 0
+    audience = (
+        int(numeric_series(messages, ["audience", "Аудитория"]).sum())
+        if total_messages
+        else 0
+    )
+    reach = (
+        int(
+            numeric_series(
+                messages, ["views", "Просмотры", "Просмотров", "reach", "Охват"]
+            ).sum()
+        )
+        if total_messages
+        else 0
+    )
+    engagement = (
+        int(
+            numeric_series(
+                messages,
+                ["engagement", "Вовлечённость", "Вовлеченность", "engagement_count"],
+            ).sum()
+        )
+        if total_messages
+        else 0
+    )
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Сообщений", format_int(total_messages))
     c2.metric("Суммарная аудитория", format_int(audience))
@@ -438,6 +545,7 @@ def render_overview_statistics(messages: pd.DataFrame) -> None:
 @st.cache_data(show_spinner=False)
 def build_tag_statistics(messages: pd.DataFrame) -> pd.DataFrame:
     return build_tag_statistics_compute(messages)
+
 
 def selected_period_label(periods: pd.DataFrame, period_ids: list[str]) -> str:
     """Human-readable label for the currently selected period set."""
@@ -460,16 +568,26 @@ def selected_period_label(periods: pd.DataFrame, period_ids: list[str]) -> str:
     dates: list[pd.Timestamp] = []
     for col in ["date_from", "date_to", "start_date", "end_date"]:
         if col in subset.columns:
-            parsed = pd.to_datetime(subset[col], errors="coerce", dayfirst=True).dropna()
+            parsed = pd.to_datetime(
+                subset[col], errors="coerce", dayfirst=True
+            ).dropna()
             dates.extend(parsed.tolist())
     if dates:
         start_s = fmt_date(min(dates))
         end_s = fmt_date(max(dates))
-        date_part = f"{start_s}–{end_s}" if start_s and end_s and start_s != end_s else start_s or end_s
+        date_part = (
+            f"{start_s}–{end_s}"
+            if start_s and end_s and start_s != end_s
+            else start_s or end_s
+        )
     else:
         date_part = ""
 
-    names = [str(x).strip() for x in subset.get("period_name", pd.Series(dtype=str)).fillna("").tolist() if str(x).strip()]
+    names = [
+        str(x).strip()
+        for x in subset.get("period_name", pd.Series(dtype=str)).fillna("").tolist()
+        if str(x).strip()
+    ]
     if len(names) <= 3 and names:
         name_part = "; ".join(names)
     else:
@@ -478,7 +596,9 @@ def selected_period_label(periods: pd.DataFrame, period_ids: list[str]) -> str:
 
 
 def _period_row_label(row: pd.Series, fallback: str = "") -> str:
-    name = str(row.get("period_name") or "").strip() if isinstance(row, pd.Series) else ""
+    name = (
+        str(row.get("period_name") or "").strip() if isinstance(row, pd.Series) else ""
+    )
     period = fmt_period(row) if isinstance(row, pd.Series) else ""
     if name and period:
         return f"{name} · {period}"
@@ -487,7 +607,12 @@ def _period_row_label(row: pd.Series, fallback: str = "") -> str:
 
 def _selected_period_rows(periods: pd.DataFrame, period_ids: list[str]) -> pd.DataFrame:
     ids = [str(x) for x in (period_ids or []) if str(x).strip()]
-    if not ids or periods is None or periods.empty or "period_id" not in periods.columns:
+    if (
+        not ids
+        or periods is None
+        or periods.empty
+        or "period_id" not in periods.columns
+    ):
         return pd.DataFrame({"period_id": ids})
     work = periods[periods["period_id"].astype(str).isin(ids)].copy()
     if work.empty:
@@ -496,7 +621,9 @@ def _selected_period_rows(periods: pd.DataFrame, period_ids: list[str]) -> pd.Da
     existing = set(work["period_id"].astype(str))
     missing = [pid for pid in ids if pid not in existing]
     if missing:
-        work = pd.concat([work, pd.DataFrame({"period_id": missing})], ignore_index=True)
+        work = pd.concat(
+            [work, pd.DataFrame({"period_id": missing})], ignore_index=True
+        )
     return work
 
 
@@ -515,8 +642,12 @@ def _ordered_period_ids(periods: pd.DataFrame, period_ids: list[str]) -> list[st
             parsed = pd.to_datetime(rows[col], errors="coerce", dayfirst=True)
             date_series = date_series.combine_first(parsed)
     rows["_sort_date"] = date_series
-    rows["_input_order"] = rows["period_id"].astype(str).map({pid: i for i, pid in enumerate(ids)})
-    rows = rows.sort_values(["_sort_date", "_input_order"], na_position="last", kind="mergesort")
+    rows["_input_order"] = (
+        rows["period_id"].astype(str).map({pid: i for i, pid in enumerate(ids)})
+    )
+    rows = rows.sort_values(
+        ["_sort_date", "_input_order"], na_position="last", kind="mergesort"
+    )
     ordered = rows["period_id"].astype(str).tolist()
     # If all dates are missing, keep the user's selection order.
     if rows["_sort_date"].isna().all():
@@ -551,16 +682,26 @@ def _pp_delta(current_share: float, previous_share: float) -> str:
     return f"{sign}{diff:.1f} п.п."
 
 
-def _period_metrics_for_comparison(messages: pd.DataFrame, periods: pd.DataFrame, period_ids: list[str]) -> list[dict[str, Any]]:
+def _period_metrics_for_comparison(
+    messages: pd.DataFrame, periods: pd.DataFrame, period_ids: list[str]
+) -> list[dict[str, Any]]:
     ordered_ids = _ordered_period_ids(periods, period_ids)
     result: list[dict[str, Any]] = []
     if len(ordered_ids) < 2:
         return result
 
     rows = _selected_period_rows(periods, ordered_ids)
-    row_by_id = {str(r.get("period_id")): r for _, r in rows.iterrows()} if not rows.empty else {}
+    row_by_id = (
+        {str(r.get("period_id")): r for _, r in rows.iterrows()}
+        if not rows.empty
+        else {}
+    )
     for pid in ordered_ids:
-        if isinstance(messages, pd.DataFrame) and not messages.empty and "period_id" in messages.columns:
+        if (
+            isinstance(messages, pd.DataFrame)
+            and not messages.empty
+            and "period_id" in messages.columns
+        ):
             subset = messages[messages["period_id"].astype(str) == str(pid)].copy()
         else:
             subset = pd.DataFrame()
@@ -568,38 +709,83 @@ def _period_metrics_for_comparison(messages: pd.DataFrame, periods: pd.DataFrame
         sent = metrics.get("sentiment", {})
         total = max(1, int(sent.get("total", 0) or 0))
         row = row_by_id.get(str(pid), pd.Series({"period_id": pid}))
-        metrics.update({
-            "period_id": str(pid),
-            "label": _period_row_label(row, str(pid)),
-            "positive_share": float(sent.get("positive", 0) or 0) / total if total else 0.0,
-            "neutral_share": float(sent.get("neutral", 0) or 0) / total if total else 0.0,
-            "negative_share": float(sent.get("negative", 0) or 0) / total if total else 0.0,
-        })
+        metrics.update(
+            {
+                "period_id": str(pid),
+                "label": _period_row_label(row, str(pid)),
+                "positive_share": (
+                    float(sent.get("positive", 0) or 0) / total if total else 0.0
+                ),
+                "neutral_share": (
+                    float(sent.get("neutral", 0) or 0) / total if total else 0.0
+                ),
+                "negative_share": (
+                    float(sent.get("negative", 0) or 0) / total if total else 0.0
+                ),
+            }
+        )
         result.append(metrics)
     return result
 
 
-def _comparison_row(metric: dict[str, Any], previous: dict[str, Any] | None = None) -> dict[str, Any]:
+def _comparison_row(
+    metric: dict[str, Any], previous: dict[str, Any] | None = None
+) -> dict[str, Any]:
     sent = metric.get("sentiment", {}) or {}
     row = {
         "Период": metric.get("label", metric.get("period_id", "")),
         "Сообщений": format_int(metric.get("messages", 0)),
-        "Δ сообщений": "—" if previous is None else _metric_delta(metric.get("messages", 0), previous.get("messages", 0)),
+        "Δ сообщений": (
+            "—"
+            if previous is None
+            else _metric_delta(metric.get("messages", 0), previous.get("messages", 0))
+        ),
         "Аудитория": format_int(metric.get("audience", 0)),
-        "Δ аудитории": "—" if previous is None else _metric_delta(metric.get("audience", 0), previous.get("audience", 0)),
+        "Δ аудитории": (
+            "—"
+            if previous is None
+            else _metric_delta(metric.get("audience", 0), previous.get("audience", 0))
+        ),
         "Охват": format_int(metric.get("reach", 0)),
-        "Δ охвата": "—" if previous is None else _metric_delta(metric.get("reach", 0), previous.get("reach", 0)),
+        "Δ охвата": (
+            "—"
+            if previous is None
+            else _metric_delta(metric.get("reach", 0), previous.get("reach", 0))
+        ),
         "Вовлеченность": format_int(metric.get("engagement", 0)),
-        "Δ вовлеченности": "—" if previous is None else _metric_delta(metric.get("engagement", 0), previous.get("engagement", 0)),
+        "Δ вовлеченности": (
+            "—"
+            if previous is None
+            else _metric_delta(
+                metric.get("engagement", 0), previous.get("engagement", 0)
+            )
+        ),
         "Позитив": percent_text(sent.get("positive", 0), sent.get("total", 0)),
-        "Δ позитива": "—" if previous is None else _pp_delta(metric.get("positive_share", 0), previous.get("positive_share", 0)),
+        "Δ позитива": (
+            "—"
+            if previous is None
+            else _pp_delta(
+                metric.get("positive_share", 0), previous.get("positive_share", 0)
+            )
+        ),
         "Нейтрал": percent_text(sent.get("neutral", 0), sent.get("total", 0)),
-        "Δ нейтрала": "—" if previous is None else _pp_delta(metric.get("neutral_share", 0), previous.get("neutral_share", 0)),
+        "Δ нейтрала": (
+            "—"
+            if previous is None
+            else _pp_delta(
+                metric.get("neutral_share", 0), previous.get("neutral_share", 0)
+            )
+        ),
         "Негатив": percent_text(sent.get("negative", 0), sent.get("total", 0)),
-        "Δ негатива": "—" if previous is None else _pp_delta(metric.get("negative_share", 0), previous.get("negative_share", 0)),
+        "Δ негатива": (
+            "—"
+            if previous is None
+            else _pp_delta(
+                metric.get("negative_share", 0), previous.get("negative_share", 0)
+            )
+        ),
     }
     return row
-
 
 
 def _short_period_chart_label(label: Any) -> str:
@@ -638,20 +824,28 @@ def _comparison_visual_rows(comparison: list[dict[str, Any]]) -> pd.DataFrame:
         sent = item.get("sentiment", {}) or {}
         total = max(1, int(sent.get("total", 0) or 0))
         full_label = str(item.get("label", item.get("period_id", "")) or "")
-        rows.append({
-            "Период": short_label,
-            "Полный период": full_label,
-            "Сообщения": int(item.get("messages", 0) or 0),
-            "Аудитория": int(item.get("audience", 0) or 0),
-            "Охват": int(item.get("reach", 0) or 0),
-            "Вовлеченность": int(item.get("engagement", 0) or 0),
-            "Позитив, %": round(float(sent.get("positive", 0) or 0) / total * 100, 1),
-            "Нейтрал, %": round(float(sent.get("neutral", 0) or 0) / total * 100, 1),
-            "Негатив, %": round(float(sent.get("negative", 0) or 0) / total * 100, 1),
-            "Позитив": int(sent.get("positive", 0) or 0),
-            "Нейтрал": int(sent.get("neutral", 0) or 0),
-            "Негатив": int(sent.get("negative", 0) or 0),
-        })
+        rows.append(
+            {
+                "Период": short_label,
+                "Полный период": full_label,
+                "Сообщения": int(item.get("messages", 0) or 0),
+                "Аудитория": int(item.get("audience", 0) or 0),
+                "Охват": int(item.get("reach", 0) or 0),
+                "Вовлеченность": int(item.get("engagement", 0) or 0),
+                "Позитив, %": round(
+                    float(sent.get("positive", 0) or 0) / total * 100, 1
+                ),
+                "Нейтрал, %": round(
+                    float(sent.get("neutral", 0) or 0) / total * 100, 1
+                ),
+                "Негатив, %": round(
+                    float(sent.get("negative", 0) or 0) / total * 100, 1
+                ),
+                "Позитив": int(sent.get("positive", 0) or 0),
+                "Нейтрал": int(sent.get("neutral", 0) or 0),
+                "Негатив": int(sent.get("negative", 0) or 0),
+            }
+        )
     return pd.DataFrame(rows)
 
 
@@ -667,31 +861,55 @@ def _chart_number_label(value: Any, *, percent: bool = False) -> str:
     return format_int(number)
 
 
-def _render_sentiment_donut(period_label: str, sentiment: dict[str, Any], *, key: str, label_settings: dict[str, Any] | None = None) -> None:
+def _render_sentiment_donut(
+    period_label: str,
+    sentiment: dict[str, Any],
+    *,
+    key: str,
+    label_settings: dict[str, Any] | None = None,
+) -> None:
     total = int((sentiment or {}).get("total", 0) or 0)
     if total <= 0:
         st.caption(f"{period_label}: нет данных для круговой диаграммы")
         return
-    pie = pd.DataFrame([
-        {"Тональность": "Позитив", "Сообщений": int((sentiment or {}).get("positive", 0) or 0)},
-        {"Тональность": "Нейтрал", "Сообщений": int((sentiment or {}).get("neutral", 0) or 0)},
-        {"Тональность": "Негатив", "Сообщений": int((sentiment or {}).get("negative", 0) or 0)},
-    ])
+    pie = pd.DataFrame(
+        [
+            {
+                "Тональность": "Позитив",
+                "Сообщений": int((sentiment or {}).get("positive", 0) or 0),
+            },
+            {
+                "Тональность": "Нейтрал",
+                "Сообщений": int((sentiment or {}).get("neutral", 0) or 0),
+            },
+            {
+                "Тональность": "Негатив",
+                "Сообщений": int((sentiment or {}).get("negative", 0) or 0),
+            },
+        ]
+    )
     pie = pie[pie["Сообщений"] > 0]
     if pie.empty:
         st.caption(f"{period_label}: нет данных для круговой диаграммы")
         return
     pie = pie.copy()
     pie["Доля"] = pie["Сообщений"] / total * 100
-    pie["Подпись"] = pie.apply(lambda r: f"{r['Тональность']}: {_chart_number_label(r['Доля'], percent=True)}", axis=1)
+    pie["Подпись"] = pie.apply(
+        lambda r: f"{r['Тональность']}: {_chart_number_label(r['Доля'], percent=True)}",
+        axis=1,
+    )
     color_map = dict(zip(SENTIMENT_COLOR_DOMAIN, SENTIMENT_COLOR_RANGE))
     pie["Цвет"] = pie["Тональность"].map(color_map).fillna("#999999")
 
     # Чтобы подписи не накладывались друг на друга, для круговой диаграммы показываем
     # сам donut отдельно, а значения — списком рядом с диаграммой.
     # Легенда по умолчанию скрыта, потому что справа уже есть блок значений.
-    donut_cfg = chart_label_settings_from_project_settings({"chart_label_settings": label_settings or {}})
-    donut_legend = alt.Legend(title="Тональность") if donut_cfg.get("show_donut_legend") else None
+    donut_cfg = chart_label_settings_from_project_settings(
+        {"chart_label_settings": label_settings or {}}
+    )
+    donut_legend = (
+        alt.Legend(title="Тональность") if donut_cfg.get("show_donut_legend") else None
+    )
     base = alt.Chart(pie).encode(
         theta=alt.Theta(field="Сообщений", type="quantitative"),
         color=alt.Color(
@@ -710,7 +928,9 @@ def _render_sentiment_donut(period_label: str, sentiment: dict[str, Any], *, key
 
     left, right = st.columns([3, 2])
     with left:
-        st.altair_chart(arcs.properties(height=260, title=period_label), use_container_width=True)
+        st.altair_chart(
+            arcs.properties(height=260, title=period_label), use_container_width=True
+        )
     with right:
         st.markdown("**Значения**")
         for _, row in pie.sort_values("Сообщений", ascending=False).iterrows():
@@ -729,8 +949,15 @@ def _render_sentiment_donut(period_label: str, sentiment: dict[str, Any], *, key
             )
 
 
-def _render_value_distribution_donut(df: pd.DataFrame, label_col: str, value_col: str, title: str) -> None:
-    if df is None or df.empty or label_col not in df.columns or value_col not in df.columns:
+def _render_value_distribution_donut(
+    df: pd.DataFrame, label_col: str, value_col: str, title: str
+) -> None:
+    if (
+        df is None
+        or df.empty
+        or label_col not in df.columns
+        or value_col not in df.columns
+    ):
         st.info("Нет данных для круговой диаграммы.")
         return
     pie_df = df[[label_col, value_col]].copy()
@@ -741,14 +968,24 @@ def _render_value_distribution_donut(df: pd.DataFrame, label_col: str, value_col
         st.info("Нет данных для круговой диаграммы.")
         return
     pie_df["Доля"] = pie_df[value_col] / total_value * 100
-    donut = alt.Chart(pie_df).mark_arc(innerRadius=50).encode(
-        theta=alt.Theta(field=value_col, type="quantitative"),
-        color=alt.Color(f"{label_col}:N", legend=None),
-        tooltip=[label_col, alt.Tooltip(f"{value_col}:Q", format=","), alt.Tooltip("Доля:Q", format=".1f", title="Доля, %")],
+    donut = (
+        alt.Chart(pie_df)
+        .mark_arc(innerRadius=50)
+        .encode(
+            theta=alt.Theta(field=value_col, type="quantitative"),
+            color=alt.Color(f"{label_col}:N", legend=None),
+            tooltip=[
+                label_col,
+                alt.Tooltip(f"{value_col}:Q", format=","),
+                alt.Tooltip("Доля:Q", format=".1f", title="Доля, %"),
+            ],
+        )
     )
     left, right = st.columns([3, 2])
     with left:
-        st.altair_chart(donut.properties(height=300, title=title), use_container_width=True)
+        st.altair_chart(
+            donut.properties(height=300, title=title), use_container_width=True
+        )
     with right:
         st.markdown("**Значения**")
         for _, row in pie_df.sort_values(value_col, ascending=False).iterrows():
@@ -758,7 +995,12 @@ def _render_value_distribution_donut(df: pd.DataFrame, label_col: str, value_col
             )
 
 
-def render_period_comparison_charts(comparison: list[dict[str, Any]], *, label_settings: dict[str, Any] | None = None, visible_blocks_default: list[str] | None = None) -> None:
+def render_period_comparison_charts(
+    comparison: list[dict[str, Any]],
+    *,
+    label_settings: dict[str, Any] | None = None,
+    visible_blocks_default: list[str] | None = None,
+) -> None:
     if not comparison:
         return
     chart_df = _comparison_visual_rows(comparison)
@@ -766,14 +1008,24 @@ def render_period_comparison_charts(comparison: list[dict[str, Any]], *, label_s
         return
 
     st.subheader("Визуализация сравнений")
-    st.caption("Выберите, какие графики показать на стартовой странице. Скрытые графики не рендерятся и не перегружают страницу.")
+    st.caption(
+        "Выберите, какие графики показать на стартовой странице. Скрытые графики не рендерятся и не перегружают страницу."
+    )
 
     chart_blocks = list(COMPARISON_CHART_BLOCKS)
-    default_blocks = [x for x in (visible_blocks_default or DEFAULT_DASHBOARD_VIEW_SETTINGS["comparison_visible_charts"]) if x in chart_blocks]
+    default_blocks = [
+        x
+        for x in (
+            visible_blocks_default
+            or DEFAULT_DASHBOARD_VIEW_SETTINGS["comparison_visible_charts"]
+        )
+        if x in chart_blocks
+    ]
     selected_blocks = st.multiselect(
         "Показывать графики",
         chart_blocks,
-        default=default_blocks or DEFAULT_DASHBOARD_VIEW_SETTINGS["comparison_visible_charts"],
+        default=default_blocks
+        or DEFAULT_DASHBOARD_VIEW_SETTINGS["comparison_visible_charts"],
         key=f"comparison_visible_charts_{abs(hash(tuple(chart_df['Период'].astype(str).tolist())))}",
         help="Можно оставить только нужные визуализации. Это ускоряет отображение страницы при большом числе периодов.",
     )
@@ -799,18 +1051,40 @@ def render_period_comparison_charts(comparison: list[dict[str, Any]], *, label_s
             key=f"main_metrics_chart_type_{abs(hash(tuple(chart_df['Период'].tolist())))}",
         )
         base_metrics = alt.Chart(metrics_long).encode(
-            x=alt.X("Период:N", sort=None, title="Период", axis=alt.Axis(labelAngle=0, labelLimit=120)),
+            x=alt.X(
+                "Период:N",
+                sort=None,
+                title="Период",
+                axis=alt.Axis(labelAngle=0, labelLimit=120),
+            ),
             y=alt.Y("Значение:Q", title="Значение"),
             color=alt.Color("Метрика:N", legend=alt.Legend(title="Метрика")),
-            tooltip=[alt.Tooltip("Полный период:N", title="Период"), "Метрика", alt.Tooltip("Значение:Q", format=",")],
+            tooltip=[
+                alt.Tooltip("Полный период:N", title="Период"),
+                "Метрика",
+                alt.Tooltip("Значение:Q", format=","),
+            ],
         )
         if chart_type == "Столбчатая":
-            bars = alt.Chart(metrics_long).mark_bar(size=18).encode(
-                x=alt.X("Период:N", sort=None, title="Период", axis=alt.Axis(labelAngle=0, labelLimit=120)),
-                xOffset=alt.XOffset("Метрика:N"),
-                y=alt.Y("Значение:Q", title="Значение"),
-                color=alt.Color("Метрика:N", legend=alt.Legend(title="Метрика")),
-                tooltip=[alt.Tooltip("Полный период:N", title="Период"), "Метрика", alt.Tooltip("Значение:Q", format=",")],
+            bars = (
+                alt.Chart(metrics_long)
+                .mark_bar(size=18)
+                .encode(
+                    x=alt.X(
+                        "Период:N",
+                        sort=None,
+                        title="Период",
+                        axis=alt.Axis(labelAngle=0, labelLimit=120),
+                    ),
+                    xOffset=alt.XOffset("Метрика:N"),
+                    y=alt.Y("Значение:Q", title="Значение"),
+                    color=alt.Color("Метрика:N", legend=alt.Legend(title="Метрика")),
+                    tooltip=[
+                        alt.Tooltip("Полный период:N", title="Период"),
+                        "Метрика",
+                        alt.Tooltip("Значение:Q", format=","),
+                    ],
+                )
             )
             st.altair_chart(bars.properties(height=320), use_container_width=True)
         elif chart_type == "Круговая диаграмма":
@@ -820,40 +1094,74 @@ def render_period_comparison_charts(comparison: list[dict[str, Any]], *, label_s
                 index=0,
                 key=f"main_metrics_pie_metric_{abs(hash(tuple(chart_df['Период'].tolist())))}",
             )
-            pie_df = chart_df[["Период", "Полный период", pie_metric]].rename(columns={pie_metric: "Значение"}).copy()
-            pie_df["Значение"] = pd.to_numeric(pie_df["Значение"], errors="coerce").fillna(0)
+            pie_df = (
+                chart_df[["Период", "Полный период", pie_metric]]
+                .rename(columns={pie_metric: "Значение"})
+                .copy()
+            )
+            pie_df["Значение"] = pd.to_numeric(
+                pie_df["Значение"], errors="coerce"
+            ).fillna(0)
             total_value = float(pie_df["Значение"].sum() or 0)
             if total_value <= 0:
                 st.info("Нет данных для круговой диаграммы по выбранной метрике.")
             else:
                 pie_df["Доля"] = pie_df["Значение"] / total_value * 100
-                pie_df["Подпись"] = pie_df.apply(lambda r: f"{_chart_number_label(r['Значение'])} · {_chart_number_label(r['Доля'], percent=True)}", axis=1)
-                donut = alt.Chart(pie_df).mark_arc(innerRadius=50).encode(
-                    theta=alt.Theta(field="Значение", type="quantitative"),
-                    color=alt.Color("Период:N", legend=None),
-                    tooltip=[alt.Tooltip("Полный период:N", title="Период"), alt.Tooltip("Значение:Q", format=","), alt.Tooltip("Доля:Q", format=".1f", title="Доля, %")],
+                pie_df["Подпись"] = pie_df.apply(
+                    lambda r: f"{_chart_number_label(r['Значение'])} · {_chart_number_label(r['Доля'], percent=True)}",
+                    axis=1,
+                )
+                donut = (
+                    alt.Chart(pie_df)
+                    .mark_arc(innerRadius=50)
+                    .encode(
+                        theta=alt.Theta(field="Значение", type="quantitative"),
+                        color=alt.Color("Период:N", legend=None),
+                        tooltip=[
+                            alt.Tooltip("Полный период:N", title="Период"),
+                            alt.Tooltip("Значение:Q", format=","),
+                            alt.Tooltip("Доля:Q", format=".1f", title="Доля, %"),
+                        ],
+                    )
                 )
                 left_pie, right_pie = st.columns([3, 2])
                 with left_pie:
-                    st.altair_chart(donut.properties(height=300, title=pie_metric), use_container_width=True)
+                    st.altair_chart(
+                        donut.properties(height=300, title=pie_metric),
+                        use_container_width=True,
+                    )
                 with right_pie:
                     st.markdown("**Значения**")
-                    for _, row in pie_df.sort_values("Значение", ascending=False).iterrows():
-                        st.markdown(f"**{row['Период']}**  \n{_chart_number_label(row['Значение'])} · {_chart_number_label(row['Доля'], percent=True)}")
+                    for _, row in pie_df.sort_values(
+                        "Значение", ascending=False
+                    ).iterrows():
+                        st.markdown(
+                            f"**{row['Период']}**  \n{_chart_number_label(row['Значение'])} · {_chart_number_label(row['Доля'], percent=True)}"
+                        )
         else:
             metrics_line = base_metrics.mark_line(point=True)
-            st.caption("Подписи значений скрыты, чтобы линии не накладывались. Значения доступны при наведении на точки.")
-            st.altair_chart(metrics_line.properties(height=320), use_container_width=True)
+            st.caption(
+                "Подписи значений скрыты, чтобы линии не накладывались. Значения доступны при наведении на точки."
+            )
+            st.altair_chart(
+                metrics_line.properties(height=320), use_container_width=True
+            )
 
     if "Динамика тональности" in selected_blocks:
         st.markdown("**Динамика долей тональности, %**")
-        sentiment_long = chart_df[["Период", "Позитив, %", "Нейтрал, %", "Негатив, %"]].melt(
+        sentiment_long = chart_df[
+            ["Период", "Позитив, %", "Нейтрал, %", "Негатив, %"]
+        ].melt(
             id_vars="Период",
             var_name="Тональность",
             value_name="Доля, %",
         )
-        sentiment_long["Тональность"] = sentiment_long["Тональность"].str.replace(", %", "", regex=False)
-        sentiment_long["Подпись"] = sentiment_long["Доля, %"].apply(lambda x: _chart_number_label(x, percent=True))
+        sentiment_long["Тональность"] = sentiment_long["Тональность"].str.replace(
+            ", %", "", regex=False
+        )
+        sentiment_long["Подпись"] = sentiment_long["Доля, %"].apply(
+            lambda x: _chart_number_label(x, percent=True)
+        )
         sentiment_chart_type = st.selectbox(
             "Тип визуализации тональности",
             ["График", "Столбчатая", "Круговая диаграмма"],
@@ -861,28 +1169,56 @@ def render_period_comparison_charts(comparison: list[dict[str, Any]], *, label_s
             key=f"sentiment_chart_type_{abs(hash(tuple(chart_df['Период'].tolist())))}",
         )
         base_sentiment = alt.Chart(sentiment_long).encode(
-            x=alt.X("Период:N", sort=None, title="Период", axis=alt.Axis(labelAngle=0, labelLimit=120)),
+            x=alt.X(
+                "Период:N",
+                sort=None,
+                title="Период",
+                axis=alt.Axis(labelAngle=0, labelLimit=120),
+            ),
             y=alt.Y("Доля, %:Q", title="Доля, %"),
             color=alt.Color(
                 "Тональность:N",
-                scale=alt.Scale(domain=SENTIMENT_COLOR_DOMAIN, range=SENTIMENT_COLOR_RANGE),
+                scale=alt.Scale(
+                    domain=SENTIMENT_COLOR_DOMAIN, range=SENTIMENT_COLOR_RANGE
+                ),
                 legend=alt.Legend(title="Тональность"),
             ),
-            tooltip=[alt.Tooltip("Полный период:N", title="Период"), "Тональность", alt.Tooltip("Доля, %:Q", format=".1f")],
+            tooltip=[
+                alt.Tooltip("Полный период:N", title="Период"),
+                "Тональность",
+                alt.Tooltip("Доля, %:Q", format=".1f"),
+            ],
         )
         if sentiment_chart_type == "Столбчатая":
-            sentiment_bars = alt.Chart(sentiment_long).mark_bar(size=18).encode(
-                x=alt.X("Период:N", sort=None, title="Период", axis=alt.Axis(labelAngle=0, labelLimit=120)),
-                xOffset=alt.XOffset("Тональность:N"),
-                y=alt.Y("Доля, %:Q", title="Доля, %"),
-                color=alt.Color(
-                    "Тональность:N",
-                    scale=alt.Scale(domain=SENTIMENT_COLOR_DOMAIN, range=SENTIMENT_COLOR_RANGE),
-                    legend=alt.Legend(title="Тональность"),
-                ),
-                tooltip=[alt.Tooltip("Полный период:N", title="Период"), "Тональность", alt.Tooltip("Доля, %:Q", format=".1f")],
+            sentiment_bars = (
+                alt.Chart(sentiment_long)
+                .mark_bar(size=18)
+                .encode(
+                    x=alt.X(
+                        "Период:N",
+                        sort=None,
+                        title="Период",
+                        axis=alt.Axis(labelAngle=0, labelLimit=120),
+                    ),
+                    xOffset=alt.XOffset("Тональность:N"),
+                    y=alt.Y("Доля, %:Q", title="Доля, %"),
+                    color=alt.Color(
+                        "Тональность:N",
+                        scale=alt.Scale(
+                            domain=SENTIMENT_COLOR_DOMAIN, range=SENTIMENT_COLOR_RANGE
+                        ),
+                        legend=alt.Legend(title="Тональность"),
+                    ),
+                    tooltip=[
+                        alt.Tooltip("Полный период:N", title="Период"),
+                        "Тональность",
+                        alt.Tooltip("Доля, %:Q", format=".1f"),
+                    ],
+                )
             )
-            st.altair_chart(sentiment_bars.properties(height=320), use_container_width=True)
+            st.altair_chart(
+                sentiment_bars.properties(height=320), use_container_width=True
+            )
         elif sentiment_chart_type == "Круговая диаграмма":
             period_options = [str(x) for x in chart_df["Период"].tolist()]
             selected_period_for_sentiment = st.selectbox(
@@ -891,12 +1227,24 @@ def render_period_comparison_charts(comparison: list[dict[str, Any]], *, label_s
                 index=len(period_options) - 1 if period_options else 0,
                 key=f"sentiment_pie_period_{abs(hash(tuple(period_options)))}",
             )
-            sentiment_by_label = {str(row["Период"]): item.get("sentiment", {}) for (_, row), item in zip(chart_df.iterrows(), comparison)}
-            _render_sentiment_donut(selected_period_for_sentiment, sentiment_by_label.get(selected_period_for_sentiment, {}), key="sentiment_selector", label_settings=label_settings)
+            sentiment_by_label = {
+                str(row["Период"]): item.get("sentiment", {})
+                for (_, row), item in zip(chart_df.iterrows(), comparison)
+            }
+            _render_sentiment_donut(
+                selected_period_for_sentiment,
+                sentiment_by_label.get(selected_period_for_sentiment, {}),
+                key="sentiment_selector",
+                label_settings=label_settings,
+            )
         else:
             sentiment_line = base_sentiment.mark_line(point=True)
-            st.caption("Подписи процентов скрыты, чтобы линии не накладывались. Значения доступны при наведении на точки.")
-            st.altair_chart(sentiment_line.properties(height=320), use_container_width=True)
+            st.caption(
+                "Подписи процентов скрыты, чтобы линии не накладывались. Значения доступны при наведении на точки."
+            )
+            st.altair_chart(
+                sentiment_line.properties(height=320), use_container_width=True
+            )
 
     if "Сравнение выбранной метрики" in selected_blocks:
         st.markdown("**Сравнение выбранной метрики по периодам**")
@@ -913,7 +1261,9 @@ def render_period_comparison_charts(comparison: list[dict[str, Any]], *, label_s
             key=f"comparison_metric_{abs(hash(tuple(chart_df['Период'].tolist())))}",
         )
         metric_col = metric_map[selected_metric]
-        bar_df = chart_df[["Период", "Полный период", metric_col]].rename(columns={metric_col: "Значение"})
+        bar_df = chart_df[["Период", "Полный период", metric_col]].rename(
+            columns={metric_col: "Значение"}
+        )
         bar_df["Подпись"] = bar_df["Значение"].apply(_chart_number_label)
         comparison_chart_type = st.selectbox(
             "Тип визуализации выбранной метрики",
@@ -922,37 +1272,71 @@ def render_period_comparison_charts(comparison: list[dict[str, Any]], *, label_s
             key=f"single_metric_chart_type_{abs(hash(tuple(chart_df['Период'].tolist())))}",
         )
         if comparison_chart_type == "Круговая диаграмма":
-            _render_value_distribution_donut(bar_df, "Период", "Значение", selected_metric)
+            _render_value_distribution_donut(
+                bar_df, "Период", "Значение", selected_metric
+            )
         else:
-            label_cfg = chart_label_settings_from_project_settings({"chart_label_settings": label_settings or {}})
+            label_cfg = chart_label_settings_from_project_settings(
+                {"chart_label_settings": label_settings or {}}
+            )
             if label_cfg.get("position") == "center":
-                bar_df["_label_y"] = pd.to_numeric(bar_df["Значение"], errors="coerce").fillna(0) / 2
+                bar_df["_label_y"] = (
+                    pd.to_numeric(bar_df["Значение"], errors="coerce").fillna(0) / 2
+                )
             elif label_cfg.get("position") == "bottom":
-                max_value = float(pd.to_numeric(bar_df["Значение"], errors="coerce").fillna(0).max() or 0)
+                max_value = float(
+                    pd.to_numeric(bar_df["Значение"], errors="coerce").fillna(0).max()
+                    or 0
+                )
                 bar_df["_label_y"] = max_value * 0.03
             else:
-                bar_df["_label_y"] = pd.to_numeric(bar_df["Значение"], errors="coerce").fillna(0)
+                bar_df["_label_y"] = pd.to_numeric(
+                    bar_df["Значение"], errors="coerce"
+                ).fillna(0)
             bar_base = alt.Chart(bar_df).encode(
-                x=alt.X("Период:N", sort=None, title="Период", axis=alt.Axis(labelAngle=0, labelLimit=120)),
+                x=alt.X(
+                    "Период:N",
+                    sort=None,
+                    title="Период",
+                    axis=alt.Axis(labelAngle=0, labelLimit=120),
+                ),
                 y=alt.Y("Значение:Q", title=selected_metric),
-                tooltip=[alt.Tooltip("Полный период:N", title="Период"), alt.Tooltip("Значение:Q", format=",")],
+                tooltip=[
+                    alt.Tooltip("Полный период:N", title="Период"),
+                    alt.Tooltip("Значение:Q", format=","),
+                ],
             )
             if comparison_chart_type == "График":
                 line = bar_base.mark_line(point=True)
-                line_labels = bar_base.mark_text(**chart_label_text_kwargs(label_settings, chart_type="line")).encode(text="Подпись:N")
-                st.altair_chart((line + line_labels).properties(height=320), use_container_width=True)
+                line_labels = bar_base.mark_text(
+                    **chart_label_text_kwargs(label_settings, chart_type="line")
+                ).encode(text="Подпись:N")
+                st.altair_chart(
+                    (line + line_labels).properties(height=320),
+                    use_container_width=True,
+                )
             else:
                 bar = bar_base.mark_bar(size=70)
-                bar_label_kwargs = chart_label_text_kwargs(label_settings, chart_type="bar")
+                bar_label_kwargs = chart_label_text_kwargs(
+                    label_settings, chart_type="bar"
+                )
                 if label_cfg.get("position") in {"center", "bottom"}:
                     bar_label_kwargs["dy"] = 0
-                    bar_label_kwargs["baseline"] = "middle" if label_cfg.get("position") == "center" else "bottom"
-                bar_labels = alt.Chart(bar_df).mark_text(**bar_label_kwargs).encode(
-                    x=alt.X("Период:N", sort=None),
-                    y=alt.Y("_label_y:Q"),
-                    text="Подпись:N",
+                    bar_label_kwargs["baseline"] = (
+                        "middle" if label_cfg.get("position") == "center" else "bottom"
+                    )
+                bar_labels = (
+                    alt.Chart(bar_df)
+                    .mark_text(**bar_label_kwargs)
+                    .encode(
+                        x=alt.X("Период:N", sort=None),
+                        y=alt.Y("_label_y:Q"),
+                        text="Подпись:N",
+                    )
                 )
-                st.altair_chart((bar + bar_labels).properties(height=320), use_container_width=True)
+                st.altair_chart(
+                    (bar + bar_labels).properties(height=320), use_container_width=True
+                )
 
     if "Круговые диаграммы тональности" in selected_blocks and len(comparison) >= 2:
         st.markdown("**Круговые диаграммы тональности**")
@@ -969,9 +1353,13 @@ def render_period_comparison_charts(comparison: list[dict[str, Any]], *, label_s
 
         for row_start in range(0, len(unique_periods), 2):
             cols = st.columns(2)
-            for offset, item in enumerate(unique_periods[row_start:row_start + 2]):
+            for offset, item in enumerate(unique_periods[row_start : row_start + 2]):
                 with cols[offset]:
-                    donut_key = str(item.get("period_id") or item.get("label") or f"period_{row_start + offset}")
+                    donut_key = str(
+                        item.get("period_id")
+                        or item.get("label")
+                        or f"period_{row_start + offset}"
+                    )
                     _render_sentiment_donut(
                         str(item.get("label", "Период")),
                         item.get("sentiment", {}),
@@ -980,8 +1368,14 @@ def render_period_comparison_charts(comparison: list[dict[str, Any]], *, label_s
                     )
 
 
-
-def render_period_comparison_metrics(messages: pd.DataFrame, periods: pd.DataFrame, period_ids: list[str], *, chart_label_settings: dict[str, Any] | None = None, comparison_visible_charts: list[str] | None = None) -> dict[str, Any] | None:
+def render_period_comparison_metrics(
+    messages: pd.DataFrame,
+    periods: pd.DataFrame,
+    period_ids: list[str],
+    *,
+    chart_label_settings: dict[str, Any] | None = None,
+    comparison_visible_charts: list[str] | None = None,
+) -> dict[str, Any] | None:
     """Render sequential comparison when two or more periods are selected."""
     comparison = _period_metrics_for_comparison(messages, periods, period_ids)
     if len(comparison) < 2:
@@ -992,15 +1386,35 @@ def render_period_comparison_metrics(messages: pd.DataFrame, periods: pd.DataFra
     st.subheader("Последовательное сравнение периодов")
     st.caption(
         "Сравнение идет цепочкой по хронологии: "
-        + " → ".join(item.get("label", item.get("period_id", "")) for item in comparison)
+        + " → ".join(
+            item.get("label", item.get("period_id", "")) for item in comparison
+        )
     )
 
-    st.markdown(f"**Последний период:** {current['label']} · сравнение с предыдущим: {previous['label']}")
+    st.markdown(
+        f"**Последний период:** {current['label']} · сравнение с предыдущим: {previous['label']}"
+    )
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Сообщений", format_int(current["messages"]), delta=_metric_delta(current["messages"], previous["messages"]))
-    c2.metric("Аудитория", format_int(current["audience"]), delta=_metric_delta(current["audience"], previous["audience"]))
-    c3.metric("Охват", format_int(current["reach"]), delta=_metric_delta(current["reach"], previous["reach"]))
-    c4.metric("Вовлеченность", format_int(current["engagement"]), delta=_metric_delta(current["engagement"], previous["engagement"]))
+    c1.metric(
+        "Сообщений",
+        format_int(current["messages"]),
+        delta=_metric_delta(current["messages"], previous["messages"]),
+    )
+    c2.metric(
+        "Аудитория",
+        format_int(current["audience"]),
+        delta=_metric_delta(current["audience"], previous["audience"]),
+    )
+    c3.metric(
+        "Охват",
+        format_int(current["reach"]),
+        delta=_metric_delta(current["reach"], previous["reach"]),
+    )
+    c4.metric(
+        "Вовлеченность",
+        format_int(current["engagement"]),
+        delta=_metric_delta(current["engagement"], previous["engagement"]),
+    )
 
     s1, s2, s3 = st.columns(3)
     s1.metric(
@@ -1022,7 +1436,11 @@ def render_period_comparison_metrics(messages: pd.DataFrame, periods: pd.DataFra
         help=f"{format_int(current['sentiment'].get('negative', 0))} сообщений в последнем периоде",
     )
 
-    render_period_comparison_charts(comparison, label_settings=chart_label_settings, visible_blocks_default=comparison_visible_charts)
+    render_period_comparison_charts(
+        comparison,
+        label_settings=chart_label_settings,
+        visible_blocks_default=comparison_visible_charts,
+    )
 
     table_rows = []
     prev_item: dict[str, Any] | None = None
@@ -1031,7 +1449,9 @@ def render_period_comparison_metrics(messages: pd.DataFrame, periods: pd.DataFra
         prev_item = item
 
     with st.expander("Последовательная сравнительная таблица", expanded=True):
-        st.dataframe(pd.DataFrame(table_rows), hide_index=True, use_container_width=True)
+        st.dataframe(
+            pd.DataFrame(table_rows), hide_index=True, use_container_width=True
+        )
 
     if len(comparison) > 2:
         st.caption(
@@ -1045,11 +1465,25 @@ def render_period_comparison_metrics(messages: pd.DataFrame, periods: pd.DataFra
     aggregate_metrics = overview_metrics(messages)
     aggregate_metrics["period_label"] = selected_period_label(periods, period_ids)
     aggregate_metrics["comparison_sequence"] = comparison
-    aggregate_metrics["comparison"] = {"first": first, "previous": previous, "current": current, "last": last}
+    aggregate_metrics["comparison"] = {
+        "first": first,
+        "previous": previous,
+        "current": current,
+        "last": last,
+    }
     return aggregate_metrics
 
 
-def render_project_intro(project_name: str, messages: pd.DataFrame, periods: pd.DataFrame, period_ids: list[str], *, profile_label: str = "", chart_label_settings: dict[str, Any] | None = None, comparison_visible_charts: list[str] | None = None) -> dict[str, Any]:
+def render_project_intro(
+    project_name: str,
+    messages: pd.DataFrame,
+    periods: pd.DataFrame,
+    period_ids: list[str],
+    *,
+    profile_label: str = "",
+    chart_label_settings: dict[str, Any] | None = None,
+    comparison_visible_charts: list[str] | None = None,
+) -> dict[str, Any]:
     """Unified top block for all project profiles.
 
     If several periods are selected, the top cards show aggregate values for
@@ -1068,7 +1502,9 @@ def render_project_intro(project_name: str, messages: pd.DataFrame, periods: pd.
     total = int(sent.get("total", 0))
 
     if len(selected_ids) >= 2:
-        st.caption(f"Выбрано периодов: {len(selected_ids)} · общие данные по выбранным периодам: {period_label}")
+        st.caption(
+            f"Выбрано периодов: {len(selected_ids)} · общие данные по выбранным периодам: {period_label}"
+        )
     else:
         st.caption(f"Период: {period_label}")
 
@@ -1079,18 +1515,42 @@ def render_project_intro(project_name: str, messages: pd.DataFrame, periods: pd.
     c4.metric("Суммарная вовлеченность", format_int(metrics["engagement"]))
 
     t1, t2, t3 = st.columns(3)
-    t1.metric("Позитив", f"{percent_text(sent.get('positive', 0), total)}", help=f"{format_int(sent.get('positive', 0))} сообщений")
-    t2.metric("Нейтрал", f"{percent_text(sent.get('neutral', 0), total)}", help=f"{format_int(sent.get('neutral', 0))} сообщений")
-    t3.metric("Негатив", f"{percent_text(sent.get('negative', 0), total)}", help=f"{format_int(sent.get('negative', 0))} сообщений")
+    t1.metric(
+        "Позитив",
+        f"{percent_text(sent.get('positive', 0), total)}",
+        help=f"{format_int(sent.get('positive', 0))} сообщений",
+    )
+    t2.metric(
+        "Нейтрал",
+        f"{percent_text(sent.get('neutral', 0), total)}",
+        help=f"{format_int(sent.get('neutral', 0))} сообщений",
+    )
+    t3.metric(
+        "Негатив",
+        f"{percent_text(sent.get('negative', 0), total)}",
+        help=f"{format_int(sent.get('negative', 0))} сообщений",
+    )
 
     metrics["period_label"] = period_label
     metrics["project_name"] = project_name
 
-    if len(selected_ids) >= 2 and isinstance(messages, pd.DataFrame) and "period_id" in messages.columns:
+    if (
+        len(selected_ids) >= 2
+        and isinstance(messages, pd.DataFrame)
+        and "period_id" in messages.columns
+    ):
         st.divider()
-        comparison_metrics = render_period_comparison_metrics(messages, periods, period_ids, chart_label_settings=chart_label_settings, comparison_visible_charts=comparison_visible_charts)
+        comparison_metrics = render_period_comparison_metrics(
+            messages,
+            periods,
+            period_ids,
+            chart_label_settings=chart_label_settings,
+            comparison_visible_charts=comparison_visible_charts,
+        )
         if comparison_metrics is not None:
-            metrics["comparison_sequence"] = comparison_metrics.get("comparison_sequence")
+            metrics["comparison_sequence"] = comparison_metrics.get(
+                "comparison_sequence"
+            )
             metrics["comparison"] = comparison_metrics.get("comparison")
 
     return metrics
@@ -1109,7 +1569,9 @@ def safe_export_filename(project_name: str, period_label: str, ext: str) -> str:
     return f"{safe[:140] or 'summary'}.{ext}"
 
 
-def export_top_tags(messages: pd.DataFrame | None, limit: int = 5) -> list[dict[str, Any]]:
+def export_top_tags(
+    messages: pd.DataFrame | None, limit: int = 5
+) -> list[dict[str, Any]]:
     if messages is None or not isinstance(messages, pd.DataFrame) or messages.empty:
         return []
     try:
@@ -1121,43 +1583,68 @@ def export_top_tags(messages: pd.DataFrame | None, limit: int = 5) -> list[dict[
         tag = str(row.get("Тег") or "").strip()
         if not tag:
             continue
-        result.append({
-            "name": tag,
-            "messages": int(row.get("Сообщений", 0) or 0),
-            "audience": int(row.get("Аудитория", 0) or 0),
-            "reach": int(row.get("Охват", 0) or 0),
-            "engagement": int(row.get("Вовлеченность", 0) or 0),
-        })
+        result.append(
+            {
+                "name": tag,
+                "messages": int(row.get("Сообщений", 0) or 0),
+                "audience": int(row.get("Аудитория", 0) or 0),
+                "reach": int(row.get("Охват", 0) or 0),
+                "engagement": int(row.get("Вовлеченность", 0) or 0),
+            }
+        )
     return result
 
 
-def export_top_events(events: pd.DataFrame | None, limit: int = 5) -> list[dict[str, Any]]:
+def export_top_events(
+    events: pd.DataFrame | None, limit: int = 5
+) -> list[dict[str, Any]]:
     if events is None or not isinstance(events, pd.DataFrame) or events.empty:
         return []
     work = events.copy()
-    title_col = first_existing_col(work, ["display_title", "event_title", "title", "Сюжет / инфоповод", "Сюжет"])
+    title_col = first_existing_col(
+        work, ["display_title", "event_title", "title", "Сюжет / инфоповод", "Сюжет"]
+    )
     if title_col is None:
         return []
     work["_title"] = work[title_col].fillna("").astype(str).str.strip()
     # Технические категории не должны попадать в клиентскую инфографику.
-    work = work[(work["_title"] != "") & (~work["_title"].str.lower().isin({"без сюжета", "без_сюжета", "без темы", "прочее"}))]
+    work = work[
+        (work["_title"] != "")
+        & (
+            ~work["_title"]
+            .str.lower()
+            .isin({"без сюжета", "без_сюжета", "без темы", "прочее"})
+        )
+    ]
     if work.empty:
         return []
     count_col = first_existing_col(work, ["message_count", "messages", "Сообщений"])
-    reach_col = first_existing_col(work, ["views", "reach", "Охват", "Просмотры", "Просмотров"])
-    engagement_col = first_existing_col(work, ["engagement", "Вовлеченность", "Вовлечённость"])
-    work["_messages"] = numeric_series(work, [count_col]).astype(int) if count_col else 0
+    reach_col = first_existing_col(
+        work, ["views", "reach", "Охват", "Просмотры", "Просмотров"]
+    )
+    engagement_col = first_existing_col(
+        work, ["engagement", "Вовлеченность", "Вовлечённость"]
+    )
+    work["_messages"] = (
+        numeric_series(work, [count_col]).astype(int) if count_col else 0
+    )
     work["_reach"] = numeric_series(work, [reach_col]).astype(int) if reach_col else 0
-    work["_engagement"] = numeric_series(work, [engagement_col]).astype(int) if engagement_col else 0
-    work = work.sort_values(["_messages", "_reach", "_engagement"], ascending=False).head(limit)
+    work["_engagement"] = (
+        numeric_series(work, [engagement_col]).astype(int) if engagement_col else 0
+    )
+    work = work.sort_values(
+        ["_messages", "_reach", "_engagement"], ascending=False
+    ).head(limit)
     result: list[dict[str, Any]] = []
     for _, row in work.iterrows():
-        result.append({
-            "name": str(row.get("_title") or "").strip(),
-            "messages": int(row.get("_messages", 0) or 0),
-            "reach": int(row.get("_reach", 0) or 0),
-            "engagement": int(row.get("_engagement", 0) or 0),
-        })
+        result.append(
+            {
+                "name": str(row.get("_title") or "").strip(),
+                "messages": int(row.get("_messages", 0) or 0),
+                "reach": int(row.get("_reach", 0) or 0),
+                "engagement": int(row.get("_engagement", 0) or 0),
+            }
+        )
     return result
 
 
@@ -1188,7 +1675,9 @@ def _load_report_logo_bytes(branding: dict[str, Any] | None) -> bytes:
         try:
             from urllib.request import urlopen
 
-            with urlopen(url, timeout=6) as response:  # nosec - user-provided report asset URL
+            with urlopen(
+                url, timeout=6
+            ) as response:  # nosec - user-provided report asset URL
                 return response.read()
         except Exception:
             return b""
@@ -1219,8 +1708,12 @@ def summary_export_payload(
     branding: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     sent = metrics.get("sentiment", {}) if isinstance(metrics, dict) else {}
-    report_template = report_template if report_template in REPORT_TEMPLATE_OPTIONS else "summary"
-    branding = report_branding_from_project_settings({"report_branding": branding or {}}, project_name=project_name)
+    report_template = (
+        report_template if report_template in REPORT_TEMPLATE_OPTIONS else "summary"
+    )
+    branding = report_branding_from_project_settings(
+        {"report_branding": branding or {}}, project_name=project_name
+    )
     return {
         "project_name": project_name,
         "client_name": branding.get("client_name") or project_name,
@@ -1234,7 +1727,9 @@ def summary_export_payload(
         "logo_mime_type": branding.get("logo_mime_type") or "",
         "logo_bytes": _load_report_logo_bytes(branding),
         "report_template": report_template,
-        "report_template_label": REPORT_TEMPLATE_OPTIONS.get(report_template, report_template),
+        "report_template_label": REPORT_TEMPLATE_OPTIONS.get(
+            report_template, report_template
+        ),
         "period_label": period_label,
         "summary_text": clean_summary_for_export(summary_text),
         "summary_highlights": summary_highlights(summary_text),
@@ -1247,8 +1742,12 @@ def summary_export_payload(
         "negative": int(sent.get("negative", 0) or 0),
         "total": int(sent.get("total", 0) or 0),
         "comparison_sequence": metrics.get("comparison_sequence") or [],
-        "top_tags": export_top_tags(messages, limit=8 if report_template == "full" else 5),
-        "top_events": export_top_events(events_agg, limit=8 if report_template == "full" else 5),
+        "top_tags": export_top_tags(
+            messages, limit=8 if report_template == "full" else 5
+        ),
+        "top_events": export_top_events(
+            events_agg, limit=8 if report_template == "full" else 5
+        ),
         "created_at": datetime.now().strftime("%d.%m.%Y %H:%M"),
     }
 
@@ -1285,7 +1784,18 @@ def _adaptive_font_size(value: str, *, base: int = 15, min_size: int = 10) -> in
     return base
 
 
-def _draw_export_card(ax, x: float, y: float, w: float, h: float, title: str, value: str, subtitle: str = "", *, accent_color: str = "#2563eb") -> None:
+def _draw_export_card(
+    ax,
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    title: str,
+    value: str,
+    subtitle: str = "",
+    *,
+    accent_color: str = "#2563eb",
+) -> None:
     from matplotlib.patches import FancyBboxPatch
 
     patch = FancyBboxPatch(
@@ -1298,8 +1808,21 @@ def _draw_export_card(ax, x: float, y: float, w: float, h: float, title: str, va
         facecolor="#f8fafc",
     )
     ax.add_patch(patch)
-    ax.plot([x + 0.016, x + 0.016], [y + 0.022, y + h - 0.022], color=accent_color, linewidth=2.2)
-    ax.text(x + 0.040, y + h - 0.026, title, fontsize=8.8, color="#4b5563", va="top", ha="left")
+    ax.plot(
+        [x + 0.016, x + 0.016],
+        [y + 0.022, y + h - 0.022],
+        color=accent_color,
+        linewidth=2.2,
+    )
+    ax.text(
+        x + 0.040,
+        y + h - 0.026,
+        title,
+        fontsize=8.8,
+        color="#4b5563",
+        va="top",
+        ha="left",
+    )
     ax.text(
         x + 0.040,
         y + h * 0.50,
@@ -1311,23 +1834,36 @@ def _draw_export_card(ax, x: float, y: float, w: float, h: float, title: str, va
         fontweight="bold",
     )
     if subtitle:
-        ax.text(x + 0.040, y + 0.018, subtitle, fontsize=7.4, color="#6b7280", va="bottom", ha="left")
+        ax.text(
+            x + 0.040,
+            y + 0.018,
+            subtitle,
+            fontsize=7.4,
+            color="#6b7280",
+            va="bottom",
+            ha="left",
+        )
 
 
 def generate_summary_infographic_png(payload: dict[str, Any]) -> bytes:
     try:
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         from matplotlib.patches import Rectangle
     except Exception as exc:
-        raise RuntimeError("Для инфографики нужен matplotlib>=3.8 в requirements.txt.") from exc
+        raise RuntimeError(
+            "Для инфографики нужен matplotlib>=3.8 в requirements.txt."
+        ) from exc
 
-    plt.rcParams.update({
-        "font.family": "DejaVu Sans",
-        "font.size": 9,
-        "axes.unicode_minus": False,
-    })
+    plt.rcParams.update(
+        {
+            "font.family": "DejaVu Sans",
+            "font.size": 9,
+            "axes.unicode_minus": False,
+        }
+    )
     fig = plt.figure(figsize=(8.27, 11.69), dpi=170)
     ax = fig.add_axes([0, 0, 1, 1])
     ax.set_xlim(0, 1)
@@ -1339,25 +1875,65 @@ def generate_summary_infographic_png(payload: dict[str, Any]) -> bytes:
     fig.patch.set_facecolor(background)
     ax.add_patch(Rectangle((0, 0), 1, 1, facecolor=background, edgecolor="none"))
 
-    project = _short_label(payload.get("client_name") or payload.get("project_name") or "Проект", 42)
-    report_title = _short_label(payload.get("report_title") or "Дайджест упоминаний", 44)
+    project = _short_label(
+        payload.get("client_name") or payload.get("project_name") or "Проект", 42
+    )
+    report_title = _short_label(
+        payload.get("report_title") or "Дайджест упоминаний", 44
+    )
     template_label = _short_label(payload.get("report_template_label") or "", 34)
     period = _short_label(payload.get("period_label") or "выбранный период", 56)
     created = str(payload.get("created_at") or "")
     comparison = payload.get("comparison_sequence") or []
 
     # Header
-    ax.add_patch(Rectangle((0, 0.885), 1, 0.115, facecolor=accent, edgecolor="none", alpha=0.96))
-    ax.text(0.060, 0.965, report_title, fontsize=11.5, fontweight="bold", color="white", va="top", ha="left")
-    ax.text(0.060, 0.935, project, fontsize=19, fontweight="bold", color="white", va="top", ha="left")
-    ax.text(0.060, 0.904, f"{template_label} · {period}".strip(" ·"), fontsize=8.6, color="#e5e7eb", va="top", ha="left")
+    ax.add_patch(
+        Rectangle((0, 0.885), 1, 0.115, facecolor=accent, edgecolor="none", alpha=0.96)
+    )
+    ax.text(
+        0.060,
+        0.965,
+        report_title,
+        fontsize=11.5,
+        fontweight="bold",
+        color="white",
+        va="top",
+        ha="left",
+    )
+    ax.text(
+        0.060,
+        0.935,
+        project,
+        fontsize=19,
+        fontweight="bold",
+        color="white",
+        va="top",
+        ha="left",
+    )
+    ax.text(
+        0.060,
+        0.904,
+        f"{template_label} · {period}".strip(" ·"),
+        fontsize=8.6,
+        color="#e5e7eb",
+        va="top",
+        ha="left",
+    )
     ax.text(0.935, 0.965, created, fontsize=8.0, color="#e5e7eb", va="top", ha="right")
 
     logo_img = _logo_image_from_payload(payload)
     if logo_img is not None:
         from matplotlib.patches import FancyBboxPatch
 
-        box = FancyBboxPatch((0.785, 0.902), 0.150, 0.055, boxstyle="round,pad=0.006,rounding_size=0.010", linewidth=0, facecolor="white", alpha=0.94)
+        box = FancyBboxPatch(
+            (0.785, 0.902),
+            0.150,
+            0.055,
+            boxstyle="round,pad=0.006,rounding_size=0.010",
+            linewidth=0,
+            facecolor="white",
+            alpha=0.94,
+        )
         ax.add_patch(box)
         logo_ax = fig.add_axes([0.795, 0.910, 0.130, 0.040])
         logo_ax.imshow(logo_img)
@@ -1367,12 +1943,44 @@ def generate_summary_infographic_png(payload: dict[str, Any]) -> bytes:
     if len(comparison) >= 2:
         previous, current = comparison[-2], comparison[-1]
         metric_cards = [
-            ("Сообщения", current.get("messages", 0), _metric_delta_for_export(current.get("messages", 0), previous.get("messages", 0))),
-            ("Аудитория", current.get("audience", 0), _metric_delta_for_export(current.get("audience", 0), previous.get("audience", 0))),
-            ("Охват", current.get("reach", 0), _metric_delta_for_export(current.get("reach", 0), previous.get("reach", 0))),
-            ("Вовлеченность", current.get("engagement", 0), _metric_delta_for_export(current.get("engagement", 0), previous.get("engagement", 0))),
+            (
+                "Сообщения",
+                current.get("messages", 0),
+                _metric_delta_for_export(
+                    current.get("messages", 0), previous.get("messages", 0)
+                ),
+            ),
+            (
+                "Аудитория",
+                current.get("audience", 0),
+                _metric_delta_for_export(
+                    current.get("audience", 0), previous.get("audience", 0)
+                ),
+            ),
+            (
+                "Охват",
+                current.get("reach", 0),
+                _metric_delta_for_export(
+                    current.get("reach", 0), previous.get("reach", 0)
+                ),
+            ),
+            (
+                "Вовлеченность",
+                current.get("engagement", 0),
+                _metric_delta_for_export(
+                    current.get("engagement", 0), previous.get("engagement", 0)
+                ),
+            ),
         ]
-        ax.text(0.060, 0.862, f"Последний период: {_short_label(current.get('label'), 48)}", fontsize=8.2, color="#6b7280", va="top", ha="left")
+        ax.text(
+            0.060,
+            0.862,
+            f"Последний период: {_short_label(current.get('label'), 48)}",
+            fontsize=8.2,
+            color="#6b7280",
+            va="top",
+            ha="left",
+        )
     else:
         metric_cards = [
             ("Сообщения", payload.get("messages", 0), ""),
@@ -1408,7 +2016,16 @@ def generate_summary_infographic_png(payload: dict[str, Any]) -> bytes:
         neu = int(sent.get("neutral", 0) or 0)
         neg = int(sent.get("negative", 0) or 0)
 
-    ax.text(0.060, 0.585, "Тональность", fontsize=12, fontweight="bold", color="#111827", va="top", ha="left")
+    ax.text(
+        0.060,
+        0.585,
+        "Тональность",
+        fontsize=12,
+        fontweight="bold",
+        color="#111827",
+        va="top",
+        ha="left",
+    )
     pie_ax = fig.add_axes([0.070, 0.427, 0.220, 0.145])
     pie_ax.axis("equal")
     values = [max(pos, 0), max(neu, 0), max(neg, 0)]
@@ -1419,45 +2036,158 @@ def generate_summary_infographic_png(payload: dict[str, Any]) -> bytes:
         pie_colors = ["#d1d5db"]
     else:
         pie_colors = colors
-    pie_ax.pie(values, colors=pie_colors, startangle=90, counterclock=False, wedgeprops={"width": 0.42, "edgecolor": "white"})
-    pie_ax.text(0, 0.05, format_int(total), ha="center", va="center", fontsize=12.5, fontweight="bold", color="#111827")
-    pie_ax.text(0, -0.13, "сообщений", ha="center", va="center", fontsize=7.5, color="#6b7280")
+    pie_ax.pie(
+        values,
+        colors=pie_colors,
+        startangle=90,
+        counterclock=False,
+        wedgeprops={"width": 0.42, "edgecolor": "white"},
+    )
+    pie_ax.text(
+        0,
+        0.05,
+        format_int(total),
+        ha="center",
+        va="center",
+        fontsize=12.5,
+        fontweight="bold",
+        color="#111827",
+    )
+    pie_ax.text(
+        0, -0.13, "сообщений", ha="center", va="center", fontsize=7.5, color="#6b7280"
+    )
     pie_ax.set_xticks([])
     pie_ax.set_yticks([])
 
     y0 = 0.545
     for i, (lab, val, col) in enumerate(zip(labels, [pos, neu, neg], colors)):
         yy = y0 - i * 0.041
-        ax.add_patch(Rectangle((0.330, yy - 0.010), 0.014, 0.014, facecolor=col, edgecolor="none"))
+        ax.add_patch(
+            Rectangle(
+                (0.330, yy - 0.010), 0.014, 0.014, facecolor=col, edgecolor="none"
+            )
+        )
         ax.text(0.352, yy, lab, fontsize=9.2, color="#111827", va="center", ha="left")
-        ax.text(0.490, yy, format_int(val), fontsize=9.2, color="#111827", va="center", ha="right", fontweight="bold")
-        ax.text(0.510, yy, percent_text(val, total), fontsize=8.4, color="#6b7280", va="center", ha="left")
+        ax.text(
+            0.490,
+            yy,
+            format_int(val),
+            fontsize=9.2,
+            color="#111827",
+            va="center",
+            ha="right",
+            fontweight="bold",
+        )
+        ax.text(
+            0.510,
+            yy,
+            percent_text(val, total),
+            fontsize=8.4,
+            color="#6b7280",
+            va="center",
+            ha="left",
+        )
 
     # Top lists: safer fixed columns and shorter labels to avoid overlap.
     top_tags = payload.get("top_tags") or []
     top_events = payload.get("top_events") or []
-    ax.text(0.060, 0.382, "Топ тегов", fontsize=11.5, fontweight="bold", color="#111827", va="top", ha="left")
+    ax.text(
+        0.060,
+        0.382,
+        "Топ тегов",
+        fontsize=11.5,
+        fontweight="bold",
+        color="#111827",
+        va="top",
+        ha="left",
+    )
     y = 0.354
     if top_tags:
         for item in top_tags[:5]:
-            ax.text(0.070, y, f"• {_short_label(item.get('name'), 28)}", fontsize=8.4, color="#111827", va="top", ha="left")
-            ax.text(0.430, y, f"{format_int(item.get('messages', 0))} сообщ.", fontsize=7.8, color="#6b7280", va="top", ha="right")
+            ax.text(
+                0.070,
+                y,
+                f"• {_short_label(item.get('name'), 28)}",
+                fontsize=8.4,
+                color="#111827",
+                va="top",
+                ha="left",
+            )
+            ax.text(
+                0.430,
+                y,
+                f"{format_int(item.get('messages', 0))} сообщ.",
+                fontsize=7.8,
+                color="#6b7280",
+                va="top",
+                ha="right",
+            )
             y -= 0.028
     else:
-        ax.text(0.070, y, "Нет тегов для отображения", fontsize=8.4, color="#6b7280", va="top", ha="left")
+        ax.text(
+            0.070,
+            y,
+            "Нет тегов для отображения",
+            fontsize=8.4,
+            color="#6b7280",
+            va="top",
+            ha="left",
+        )
 
-    ax.text(0.525, 0.382, "Топ инфоповодов", fontsize=11.5, fontweight="bold", color="#111827", va="top", ha="left")
+    ax.text(
+        0.525,
+        0.382,
+        "Топ инфоповодов",
+        fontsize=11.5,
+        fontweight="bold",
+        color="#111827",
+        va="top",
+        ha="left",
+    )
     y = 0.354
     if top_events:
         for item in top_events[:5]:
-            ax.text(0.535, y, f"• {_short_label(item.get('name'), 29)}", fontsize=8.4, color="#111827", va="top", ha="left")
-            ax.text(0.935, y, f"{format_int(item.get('messages', 0))} сообщ.", fontsize=7.8, color="#6b7280", va="top", ha="right")
+            ax.text(
+                0.535,
+                y,
+                f"• {_short_label(item.get('name'), 29)}",
+                fontsize=8.4,
+                color="#111827",
+                va="top",
+                ha="left",
+            )
+            ax.text(
+                0.935,
+                y,
+                f"{format_int(item.get('messages', 0))} сообщ.",
+                fontsize=7.8,
+                color="#6b7280",
+                va="top",
+                ha="right",
+            )
             y -= 0.028
     else:
-        ax.text(0.535, y, "Нет инфоповодов для отображения", fontsize=8.4, color="#6b7280", va="top", ha="left")
+        ax.text(
+            0.535,
+            y,
+            "Нет инфоповодов для отображения",
+            fontsize=8.4,
+            color="#6b7280",
+            va="top",
+            ha="left",
+        )
 
     # Summary highlights: limited lines with consistent spacing.
-    ax.text(0.060, 0.205, "Главное", fontsize=11.5, fontweight="bold", color="#111827", va="top", ha="left")
+    ax.text(
+        0.060,
+        0.205,
+        "Главное",
+        fontsize=11.5,
+        fontweight="bold",
+        color="#111827",
+        va="top",
+        ha="left",
+    )
     summary_y = 0.178
     line_count = 0
     for block in (payload.get("summary_highlights") or [])[:4]:
@@ -1465,7 +2195,15 @@ def generate_summary_infographic_png(payload: dict[str, Any]) -> bytes:
         bullet = True
         for seg in wrapped[:2]:
             prefix = "• " if bullet else "  "
-            ax.text(0.070, summary_y, prefix + seg, fontsize=8.4, color="#111827", va="top", ha="left")
+            ax.text(
+                0.070,
+                summary_y,
+                prefix + seg,
+                fontsize=8.4,
+                color="#111827",
+                va="top",
+                ha="left",
+            )
             summary_y -= 0.021
             line_count += 1
             bullet = False
@@ -1475,8 +2213,19 @@ def generate_summary_infographic_png(payload: dict[str, Any]) -> bytes:
         if line_count >= 8:
             break
 
-    footer_text = str(payload.get("footer_text") or "Инфографика сформирована автоматически на основе выбранного периода и текущего саммари.")
-    ax.text(0.060, 0.045, _short_label(footer_text, 110), fontsize=7.8, color="#6b7280", va="bottom", ha="left")
+    footer_text = str(
+        payload.get("footer_text")
+        or "Инфографика сформирована автоматически на основе выбранного периода и текущего саммари."
+    )
+    ax.text(
+        0.060,
+        0.045,
+        _short_label(footer_text, 110),
+        fontsize=7.8,
+        color="#6b7280",
+        va="bottom",
+        ha="left",
+    )
 
     out = BytesIO()
     # Do not use bbox_inches="tight": it changes image geometry and can cause PDF scaling/cropping.
@@ -1491,7 +2240,9 @@ def generate_summary_docx(payload: dict[str, Any]) -> bytes:
         from docx.shared import Pt, Inches, Cm
         from docx.enum.text import WD_ALIGN_PARAGRAPH
     except Exception as exc:
-        raise RuntimeError("Для выгрузки Word добавьте python-docx в requirements.txt.") from exc
+        raise RuntimeError(
+            "Для выгрузки Word добавьте python-docx в requirements.txt."
+        ) from exc
 
     doc = Document()
     section = doc.sections[0]
@@ -1515,7 +2266,9 @@ def generate_summary_docx(payload: dict[str, Any]) -> bytes:
     p.paragraph_format.space_after = Pt(4)
 
     p2 = doc.add_paragraph()
-    r2 = p2.add_run(str(payload.get("client_name") or payload.get("project_name") or "Проект"))
+    r2 = p2.add_run(
+        str(payload.get("client_name") or payload.get("project_name") or "Проект")
+    )
     r2.bold = True
     r2.font.size = Pt(13)
     p2.paragraph_format.space_after = Pt(6)
@@ -1555,9 +2308,19 @@ def generate_summary_docx(payload: dict[str, Any]) -> bytes:
         top_tags = payload.get("top_tags") or []
         top_events = payload.get("top_events") or []
         if top_tags:
-            doc.add_paragraph("Топ тегов: " + "; ".join(str(x.get("name") or "") for x in top_tags[:5] if x.get("name")))
+            doc.add_paragraph(
+                "Топ тегов: "
+                + "; ".join(
+                    str(x.get("name") or "") for x in top_tags[:5] if x.get("name")
+                )
+            )
         if top_events:
-            doc.add_paragraph("Топ инфоповодов: " + "; ".join(str(x.get("name") or "") for x in top_events[:5] if x.get("name")))
+            doc.add_paragraph(
+                "Топ инфоповодов: "
+                + "; ".join(
+                    str(x.get("name") or "") for x in top_events[:5] if x.get("name")
+                )
+            )
 
     doc.add_heading("Саммари периода", level=2)
     for block in str(payload.get("summary_text") or "").split("\n"):
@@ -1588,26 +2351,56 @@ def _pdf_font_candidates() -> list[tuple[str, str | None]]:
     # Optional project-local fonts. Do not commit font files unless licensing is clear;
     # this path is only for private deployments that provide their own font.
     here = Path(__file__).resolve().parent
-    candidates.extend([
-        (str(here / "assets" / "fonts" / "DejaVuSans.ttf"), str(here / "assets" / "fonts" / "DejaVuSans-Bold.ttf")),
-        (str(here.parent / "assets" / "fonts" / "DejaVuSans.ttf"), str(here.parent / "assets" / "fonts" / "DejaVuSans-Bold.ttf")),
-    ])
+    candidates.extend(
+        [
+            (
+                str(here / "assets" / "fonts" / "DejaVuSans.ttf"),
+                str(here / "assets" / "fonts" / "DejaVuSans-Bold.ttf"),
+            ),
+            (
+                str(here.parent / "assets" / "fonts" / "DejaVuSans.ttf"),
+                str(here.parent / "assets" / "fonts" / "DejaVuSans-Bold.ttf"),
+            ),
+        ]
+    )
 
     # Common Linux/Streamlit Cloud system fonts.
-    candidates.extend([
-        ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
-        ("/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf"),
-        ("/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf", "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf"),
-        ("/usr/share/fonts/truetype/freefont/FreeSans.ttf", "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf"),
-        ("/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf", "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf"),
-        ("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf", "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"),
-    ])
+    candidates.extend(
+        [
+            (
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            ),
+            (
+                "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf",
+            ),
+            (
+                "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+                "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+            ),
+            (
+                "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+                "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+            ),
+            (
+                "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+                "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+            ),
+            (
+                "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+                "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+            ),
+        ]
+    )
 
     try:
         import matplotlib  # type: ignore
 
         mpl_fonts = Path(matplotlib.get_data_path()) / "fonts" / "ttf"
-        candidates.append((str(mpl_fonts / "DejaVuSans.ttf"), str(mpl_fonts / "DejaVuSans-Bold.ttf")))
+        candidates.append(
+            (str(mpl_fonts / "DejaVuSans.ttf"), str(mpl_fonts / "DejaVuSans-Bold.ttf"))
+        )
     except Exception:
         pass
 
@@ -1619,7 +2412,9 @@ def _pdf_font_name() -> str:
         from reportlab.pdfbase import pdfmetrics
         from reportlab.pdfbase.ttfonts import TTFont
     except Exception as exc:
-        raise RuntimeError("Для выгрузки PDF добавьте reportlab в requirements.txt.") from exc
+        raise RuntimeError(
+            "Для выгрузки PDF добавьте reportlab в requirements.txt."
+        ) from exc
 
     for regular_path, bold_path in _pdf_font_candidates():
         regular = Path(regular_path)
@@ -1655,18 +2450,54 @@ def generate_summary_pdf(payload: dict[str, Any]) -> bytes:
         from reportlab.lib.pagesizes import A4
         from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
         from reportlab.lib.units import cm
-        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, PageBreak
+        from reportlab.platypus import (
+            SimpleDocTemplate,
+            Paragraph,
+            Spacer,
+            Image,
+            PageBreak,
+        )
         from xml.sax.saxutils import escape as xml_escape
     except Exception as exc:
-        raise RuntimeError("Для выгрузки PDF добавьте reportlab в requirements.txt.") from exc
+        raise RuntimeError(
+            "Для выгрузки PDF добавьте reportlab в requirements.txt."
+        ) from exc
 
     font_name = _pdf_font_name()
     out = BytesIO()
-    doc = SimpleDocTemplate(out, pagesize=A4, leftMargin=1.7 * cm, rightMargin=1.7 * cm, topMargin=1.5 * cm, bottomMargin=1.5 * cm)
+    doc = SimpleDocTemplate(
+        out,
+        pagesize=A4,
+        leftMargin=1.7 * cm,
+        rightMargin=1.7 * cm,
+        topMargin=1.5 * cm,
+        bottomMargin=1.5 * cm,
+    )
     base = getSampleStyleSheet()
-    normal = ParagraphStyle("PlatformNormal", parent=base["Normal"], fontName=font_name, fontSize=10, leading=14)
-    title = ParagraphStyle("PlatformTitle", parent=normal, fontName=font_name, fontSize=16, leading=20, spaceAfter=10)
-    heading = ParagraphStyle("PlatformHeading", parent=normal, fontName=font_name, fontSize=12, leading=16, spaceBefore=8, spaceAfter=6)
+    normal = ParagraphStyle(
+        "PlatformNormal",
+        parent=base["Normal"],
+        fontName=font_name,
+        fontSize=10,
+        leading=14,
+    )
+    title = ParagraphStyle(
+        "PlatformTitle",
+        parent=normal,
+        fontName=font_name,
+        fontSize=16,
+        leading=20,
+        spaceAfter=10,
+    )
+    heading = ParagraphStyle(
+        "PlatformHeading",
+        parent=normal,
+        fontName=font_name,
+        fontSize=12,
+        leading=16,
+        spaceBefore=8,
+        spaceAfter=6,
+    )
 
     story = []
     infographic_added = False
@@ -1683,27 +2514,58 @@ def generate_summary_pdf(payload: dict[str, Any]) -> bytes:
 
     total = max(1, int(payload.get("total", 0) or 0))
     if not infographic_added:
-        story.extend([
-            Paragraph(f"<b>{xml_escape(str(payload.get('report_title') or 'Дайджест упоминаний'))}</b>", title),
-            Paragraph(xml_escape(str(payload.get('client_name') or payload.get('project_name') or 'Проект')), heading),
-            Paragraph(xml_escape(f"Шаблон: {payload.get('report_template_label') or ''}"), normal),
-            Paragraph(xml_escape(f"Период: {payload.get('period_label') or 'выбранный период'}"), normal),
-            Paragraph(xml_escape(f"Дата выгрузки: {payload.get('created_at') or ''}"), normal),
-            Spacer(1, 8),
-            Paragraph("<b>Основные метрики</b>", heading),
-            Paragraph(xml_escape(
-                f"Сообщений — {format_int(payload.get('messages', 0))}; "
-                f"аудитория — {format_int(payload.get('audience', 0))}; "
-                f"охват — {format_int(payload.get('reach', 0))}; "
-                f"вовлеченность — {format_int(payload.get('engagement', 0))}."
-            ), normal),
-            Paragraph(xml_escape(
-                f"Тональность: позитив — {percent_text(int(payload.get('positive', 0) or 0), total)}; "
-                f"нейтрал — {percent_text(int(payload.get('neutral', 0) or 0), total)}; "
-                f"негатив — {percent_text(int(payload.get('negative', 0) or 0), total)}."
-            ), normal),
-            Spacer(1, 8),
-        ])
+        story.extend(
+            [
+                Paragraph(
+                    f"<b>{xml_escape(str(payload.get('report_title') or 'Дайджест упоминаний'))}</b>",
+                    title,
+                ),
+                Paragraph(
+                    xml_escape(
+                        str(
+                            payload.get("client_name")
+                            or payload.get("project_name")
+                            or "Проект"
+                        )
+                    ),
+                    heading,
+                ),
+                Paragraph(
+                    xml_escape(f"Шаблон: {payload.get('report_template_label') or ''}"),
+                    normal,
+                ),
+                Paragraph(
+                    xml_escape(
+                        f"Период: {payload.get('period_label') or 'выбранный период'}"
+                    ),
+                    normal,
+                ),
+                Paragraph(
+                    xml_escape(f"Дата выгрузки: {payload.get('created_at') or ''}"),
+                    normal,
+                ),
+                Spacer(1, 8),
+                Paragraph("<b>Основные метрики</b>", heading),
+                Paragraph(
+                    xml_escape(
+                        f"Сообщений — {format_int(payload.get('messages', 0))}; "
+                        f"аудитория — {format_int(payload.get('audience', 0))}; "
+                        f"охват — {format_int(payload.get('reach', 0))}; "
+                        f"вовлеченность — {format_int(payload.get('engagement', 0))}."
+                    ),
+                    normal,
+                ),
+                Paragraph(
+                    xml_escape(
+                        f"Тональность: позитив — {percent_text(int(payload.get('positive', 0) or 0), total)}; "
+                        f"нейтрал — {percent_text(int(payload.get('neutral', 0) or 0), total)}; "
+                        f"негатив — {percent_text(int(payload.get('negative', 0) or 0), total)}."
+                    ),
+                    normal,
+                ),
+                Spacer(1, 8),
+            ]
+        )
 
     story.append(Paragraph("<b>Саммари периода</b>", heading))
     for block in str(payload.get("summary_text") or "").split("\n"):
@@ -1743,7 +2605,9 @@ def render_summary_export_buttons(
         report_template=report_template,
         branding=branding,
     )
-    st.caption(f"Брендирование: {payload.get('client_name') or project_name}; акцентный цвет {payload.get('accent_color')}.")
+    st.caption(
+        f"Брендирование: {payload.get('client_name') or project_name}; акцентный цвет {payload.get('accent_color')}."
+    )
     c1, c2, c3 = st.columns(3)
     with c1:
         try:
@@ -1783,7 +2647,9 @@ def render_summary_export_buttons(
             st.warning(str(exc))
 
 
-def render_tag_statistics(messages: pd.DataFrame, *, project_id: str | None = None) -> None:
+def render_tag_statistics(
+    messages: pd.DataFrame, *, project_id: str | None = None
+) -> None:
     stats = build_tag_statistics(messages)
     if stats.empty:
         st.info("Теги не найдены.")
@@ -1796,7 +2662,9 @@ def render_tag_statistics(messages: pd.DataFrame, *, project_id: str | None = No
         if col in display.columns:
             display[col] = display[col].apply(format_int)
     display["Доля негатива"] = display["Доля негатива"].astype(str) + "%"
-    st.caption("Теги берутся из системных колонок Brand Analytics после «Обработано». Аудитория, охват и вовлеченность суммируются по сообщениям с выбранным тегом.")
+    st.caption(
+        "Теги берутся из системных колонок Brand Analytics после «Обработано». Аудитория, охват и вовлеченность суммируются по сообщениям с выбранным тегом."
+    )
     tag_selection = st.dataframe(
         display,
         hide_index=True,
@@ -1805,9 +2673,15 @@ def render_tag_statistics(messages: pd.DataFrame, *, project_id: str | None = No
         on_select="rerun",
         key=f"tag_statistics_table_{project_id or 'global'}",
     )
-    rows = getattr(tag_selection, "selection", {}).get("rows", []) if tag_selection is not None else []
+    rows = (
+        getattr(tag_selection, "selection", {}).get("rows", [])
+        if tag_selection is not None
+        else []
+    )
     if not rows:
-        st.caption("Выберите строку тега, чтобы открыть метрики, ключевые сообщения и всю ленту сообщений по этому тегу.")
+        st.caption(
+            "Выберите строку тега, чтобы открыть метрики, ключевые сообщения и всю ленту сообщений по этому тегу."
+        )
         return
     selected_tag = str(top.iloc[rows[0]].get("Тег") or "").strip()
     if selected_tag:
@@ -1815,11 +2689,22 @@ def render_tag_statistics(messages: pd.DataFrame, *, project_id: str | None = No
 
 
 def messages_with_tag(messages: pd.DataFrame, tag: str) -> pd.DataFrame:
-    if messages is None or messages.empty or "tags" not in messages.columns or not str(tag).strip():
+    if (
+        messages is None
+        or messages.empty
+        or "tags" not in messages.columns
+        or not str(tag).strip()
+    ):
         return pd.DataFrame()
     key = str(tag).strip().lower().replace("ё", "е")
-    mask = messages["tags"].fillna("").astype(str).apply(
-        lambda value: key in {item.lower().replace("ё", "е") for item in split_pipe_values(value)}
+    mask = (
+        messages["tags"]
+        .fillna("")
+        .astype(str)
+        .apply(
+            lambda value: key
+            in {item.lower().replace("ё", "е") for item in split_pipe_values(value)}
+        )
     )
     return messages[mask].copy()
 
@@ -1831,7 +2716,14 @@ def _tag_auto_summary(tag: str, tag_messages: pd.DataFrame) -> str:
     sent = metrics.get("sentiment", {}) or {}
     total = int(sent.get("total", metrics.get("messages", 0)) or 0)
     negative = int(sent.get("negative", 0) or 0)
-    event_col = next((col for col in ["event_title", "source_main_topic", "Сюжет"] if col in tag_messages.columns), None)
+    event_col = next(
+        (
+            col
+            for col in ["event_title", "source_main_topic", "Сюжет"]
+            if col in tag_messages.columns
+        ),
+        None,
+    )
     event_part = ""
     if event_col:
         top_events = (
@@ -1843,11 +2735,14 @@ def _tag_auto_summary(tag: str, tag_messages: pd.DataFrame) -> str:
             .dropna()
             .value_counts()
             .head(5)
-            .index
-            .tolist()
+            .index.tolist()
         )
         if top_events:
-            event_part = " Основные связанные инфоповоды: " + "; ".join(map(str, top_events)) + "."
+            event_part = (
+                " Основные связанные инфоповоды: "
+                + "; ".join(map(str, top_events))
+                + "."
+            )
     return (
         f"По тегу «{tag}» найдено {format_int(total)} сообщений. "
         f"Негативных сообщений: {format_int(negative)} ({percent_text(negative, total)}). "
@@ -1857,7 +2752,9 @@ def _tag_auto_summary(tag: str, tag_messages: pd.DataFrame) -> str:
     )
 
 
-def render_selected_tag_detail(project_id: str, selected_tag: str, messages: pd.DataFrame) -> None:
+def render_selected_tag_detail(
+    project_id: str, selected_tag: str, messages: pd.DataFrame
+) -> None:
     """Render selected-tag card with metrics and messages, like selected event card."""
     tag_messages = messages_with_tag(messages, selected_tag)
     st.markdown(f"## Тег: {selected_tag}")
@@ -1874,12 +2771,26 @@ def render_selected_tag_detail(project_id: str, selected_tag: str, messages: pd.
     source_count = 0
     for col in ["chat_title", "platform", "source", "Источник", "Место публикации"]:
         if col in tag_messages.columns:
-            source_count = int(tag_messages[col].fillna("").astype(str).replace("", pd.NA).dropna().nunique())
+            source_count = int(
+                tag_messages[col]
+                .fillna("")
+                .astype(str)
+                .replace("", pd.NA)
+                .dropna()
+                .nunique()
+            )
             break
     author_count = 0
     for col in ["author", "Автор"]:
         if col in tag_messages.columns:
-            author_count = int(tag_messages[col].fillna("").astype(str).replace("", pd.NA).dropna().nunique())
+            author_count = int(
+                tag_messages[col]
+                .fillna("")
+                .astype(str)
+                .replace("", pd.NA)
+                .dropna()
+                .nunique()
+            )
             break
 
     c1, c2, c3, c4 = st.columns(4)
@@ -1904,35 +2815,60 @@ def render_selected_tag_detail(project_id: str, selected_tag: str, messages: pd.
     text_col = message_text_column(work)
     link_col = message_link_column(work)
     work["_audience"] = numeric_series(work, ["audience", "Аудитория"]).astype(int)
-    work["_reach"] = numeric_series(work, ["views", "Просмотры", "Просмотров", "reach", "Охват"]).astype(int)
-    work["_engagement"] = numeric_series(work, ["engagement", "Вовлечённость", "Вовлеченность", "engagement_count"]).astype(int)
+    work["_reach"] = numeric_series(
+        work, ["views", "Просмотры", "Просмотров", "reach", "Охват"]
+    ).astype(int)
+    work["_engagement"] = numeric_series(
+        work, ["engagement", "Вовлечённость", "Вовлеченность", "engagement_count"]
+    ).astype(int)
 
     if mode == "Ключевые сообщения":
-        st.caption("Показаны топ-15 сообщений выбранного тега по вовлеченности. Если вовлеченность равна 0, учитываются охват и аудитория.")
-        view = work.sort_values(["_engagement", "_reach", "_audience"], ascending=False).head(15).copy()
+        st.caption(
+            "Показаны топ-15 сообщений выбранного тега по вовлеченности. Если вовлеченность равна 0, учитываются охват и аудитория."
+        )
+        view = (
+            work.sort_values(["_engagement", "_reach", "_audience"], ascending=False)
+            .head(15)
+            .copy()
+        )
     else:
         search_key = f"selected_tag_feed_search_{project_id}_{abs(hash(selected_tag))}"
-        search = st.text_input("Поиск по ленте тега", placeholder="Введите слово или фразу", key=search_key)
+        search = st.text_input(
+            "Поиск по ленте тега", placeholder="Введите слово или фразу", key=search_key
+        )
         view = work.copy()
         if search.strip() and text_col:
-            view = view[view[text_col].fillna("").astype(str).str.contains(search.strip(), case=False, regex=False)]
-        view = view.sort_values("datetime", ascending=False) if "datetime" in view.columns else view
+            view = view[
+                view[text_col]
+                .fillna("")
+                .astype(str)
+                .str.contains(search.strip(), case=False, regex=False)
+            ]
+        view = (
+            view.sort_values("datetime", ascending=False)
+            if "datetime" in view.columns
+            else view
+        )
         total_found = int(len(view))
-        page_size = int(st.selectbox(
-            "Сообщений на странице",
-            [25, 50, 100, 200],
-            index=1,
-            key=f"selected_tag_feed_page_size_{project_id}_{abs(hash(selected_tag))}",
-        ))
+        page_size = int(
+            st.selectbox(
+                "Сообщений на странице",
+                [25, 50, 100, 200],
+                index=1,
+                key=f"selected_tag_feed_page_size_{project_id}_{abs(hash(selected_tag))}",
+            )
+        )
         total_pages = max(1, (total_found + page_size - 1) // page_size)
-        page = int(st.number_input(
-            "Страница",
-            min_value=1,
-            max_value=total_pages,
-            value=1,
-            step=1,
-            key=f"selected_tag_feed_page_{project_id}_{abs(hash(selected_tag))}",
-        ))
+        page = int(
+            st.number_input(
+                "Страница",
+                min_value=1,
+                max_value=total_pages,
+                value=1,
+                step=1,
+                key=f"selected_tag_feed_page_{project_id}_{abs(hash(selected_tag))}",
+            )
+        )
         start = (page - 1) * page_size
         end = start + page_size
         st.caption(
@@ -1944,7 +2880,9 @@ def render_selected_tag_detail(project_id: str, selected_tag: str, messages: pd.
     _render_message_list(view, text_col=text_col, link_col=link_col)
 
 
-def render_tag_explorer(messages: pd.DataFrame, *, key_prefix: str = "tag_explorer") -> None:
+def render_tag_explorer(
+    messages: pd.DataFrame, *, key_prefix: str = "tag_explorer"
+) -> None:
     stats = build_tag_statistics(messages)
     if stats.empty:
         return
@@ -1953,7 +2891,9 @@ def render_tag_explorer(messages: pd.DataFrame, *, key_prefix: str = "tag_explor
     st.caption("Выберите тег, чтобы посмотреть все сообщения с этим тегом.")
     options = stats["Тег"].astype(str).tolist()
     labels = {
-        str(row["Тег"]): f"{row['Тег']} · {format_int(row['Сообщений'])} сообщ. · {format_int(row['Аудитория'])} аудитория · {format_int(row['Охват'])} охват · {format_int(row['Вовлеченность'])} вовлеч."
+        str(
+            row["Тег"]
+        ): f"{row['Тег']} · {format_int(row['Сообщений'])} сообщ. · {format_int(row['Аудитория'])} аудитория · {format_int(row['Охват'])} охват · {format_int(row['Вовлеченность'])} вовлеч."
         for _, row in stats.iterrows()
     }
     selected_tag = st.selectbox(
@@ -1968,24 +2908,50 @@ def render_tag_explorer(messages: pd.DataFrame, *, key_prefix: str = "tag_explor
         return
     tag_messages = tag_messages.copy()
     tag_messages["Дата"] = tag_messages.get("datetime", "").apply(fmt_date)
-    tag_messages["Аудитория"] = numeric_series(tag_messages, ["audience", "Аудитория"]).astype(int)
-    tag_messages["Охват"] = numeric_series(tag_messages, ["views", "Просмотры", "Просмотров", "reach", "Охват"]).astype(int)
-    tag_messages["Вовлеченность"] = numeric_series(tag_messages, ["engagement", "Вовлечённость", "Вовлеченность", "engagement_count"]).astype(int)
-    columns = [c for c in ["Дата", "chat_title", "author", "event_title", "text", "url", "Аудитория", "Охват", "Вовлеченность"] if c in tag_messages.columns]
+    tag_messages["Аудитория"] = numeric_series(
+        tag_messages, ["audience", "Аудитория"]
+    ).astype(int)
+    tag_messages["Охват"] = numeric_series(
+        tag_messages, ["views", "Просмотры", "Просмотров", "reach", "Охват"]
+    ).astype(int)
+    tag_messages["Вовлеченность"] = numeric_series(
+        tag_messages,
+        ["engagement", "Вовлечённость", "Вовлеченность", "engagement_count"],
+    ).astype(int)
+    columns = [
+        c
+        for c in [
+            "Дата",
+            "chat_title",
+            "author",
+            "event_title",
+            "text",
+            "url",
+            "Аудитория",
+            "Охват",
+            "Вовлеченность",
+        ]
+        if c in tag_messages.columns
+    ]
     st.dataframe(
-        tag_messages[columns].rename(columns={
-            "chat_title": "Источник/площадка",
-            "author": "Автор",
-            "event_title": "Инфоповод",
-            "text": "Текст",
-            "url": "Ссылка",
-        }),
+        tag_messages[columns].rename(
+            columns={
+                "chat_title": "Источник/площадка",
+                "author": "Автор",
+                "event_title": "Инфоповод",
+                "text": "Текст",
+                "url": "Ссылка",
+            }
+        ),
         hide_index=True,
         use_container_width=True,
         height=420,
-        column_config={"Ссылка": st.column_config.LinkColumn("Ссылка")} if "url" in tag_messages.columns else None,
+        column_config=(
+            {"Ссылка": st.column_config.LinkColumn("Ссылка")}
+            if "url" in tag_messages.columns
+            else None
+        ),
     )
-
 
 
 TECHNICAL_EVENT_TITLES = {
@@ -2033,16 +2999,27 @@ def top_client_tags(messages: pd.DataFrame, limit: int = 5) -> pd.DataFrame:
     if stats is None or stats.empty:
         return pd.DataFrame()
     work = stats.copy()
-    for col in ["Сообщений", "Аудитория", "Охват", "Вовлеченность", "Негатив", "Доля негатива"]:
+    for col in [
+        "Сообщений",
+        "Аудитория",
+        "Охват",
+        "Вовлеченность",
+        "Негатив",
+        "Доля негатива",
+    ]:
         if col in work.columns:
             work[col] = pd.to_numeric(work[col], errors="coerce").fillna(0)
-    sort_cols = [c for c in ["Сообщений", "Охват", "Вовлеченность"] if c in work.columns]
+    sort_cols = [
+        c for c in ["Сообщений", "Охват", "Вовлеченность"] if c in work.columns
+    ]
     if sort_cols:
         work = work.sort_values(sort_cols, ascending=False)
     return work.head(limit).copy()
 
 
-def build_period_change_insights(messages: pd.DataFrame, periods: pd.DataFrame, selected_period_ids: list[str]) -> list[str]:
+def build_period_change_insights(
+    messages: pd.DataFrame, periods: pd.DataFrame, selected_period_ids: list[str]
+) -> list[str]:
     comparison = _period_metrics_for_comparison(messages, periods, selected_period_ids)
     if len(comparison) < 2:
         return []
@@ -2066,48 +3043,98 @@ def build_period_change_insights(messages: pd.DataFrame, periods: pd.DataFrame, 
         if label == "сообщений":
             direction = "выросло" if delta > 0 else "снизилось"
         percent = f" ({delta / old * 100:+.0f}%)" if old else ""
-        insights.append(f"Количество {label} {direction}: {format_int(delta)}{percent} к предыдущему периоду.")
+        insights.append(
+            f"Количество {label} {direction}: {format_int(delta)}{percent} к предыдущему периоду."
+        )
 
-    neg_delta = float(cur.get("negative_share", 0) or 0) - float(prev.get("negative_share", 0) or 0)
+    neg_delta = float(cur.get("negative_share", 0) or 0) - float(
+        prev.get("negative_share", 0) or 0
+    )
     if abs(neg_delta) >= 0.001:
-        insights.append(f"Доля негатива изменилась на {neg_delta * 100:+.1f} п.п. к предыдущему периоду.")
+        insights.append(
+            f"Доля негатива изменилась на {neg_delta * 100:+.1f} п.п. к предыдущему периоду."
+        )
     return insights
 
 
-def build_tag_change_table(messages: pd.DataFrame, periods: pd.DataFrame, selected_period_ids: list[str], limit: int = 10) -> pd.DataFrame:
+def build_tag_change_table(
+    messages: pd.DataFrame,
+    periods: pd.DataFrame,
+    selected_period_ids: list[str],
+    limit: int = 10,
+) -> pd.DataFrame:
     ordered_ids = _ordered_period_ids(periods, selected_period_ids)
-    if len(ordered_ids) < 2 or messages is None or messages.empty or "period_id" not in messages.columns:
+    if (
+        len(ordered_ids) < 2
+        or messages is None
+        or messages.empty
+        or "period_id" not in messages.columns
+    ):
         return pd.DataFrame()
     prev_id, cur_id = str(ordered_ids[-2]), str(ordered_ids[-1])
-    prev_stats = build_tag_statistics(messages[messages["period_id"].astype(str) == prev_id].copy())
-    cur_stats = build_tag_statistics(messages[messages["period_id"].astype(str) == cur_id].copy())
+    prev_stats = build_tag_statistics(
+        messages[messages["period_id"].astype(str) == prev_id].copy()
+    )
+    cur_stats = build_tag_statistics(
+        messages[messages["period_id"].astype(str) == cur_id].copy()
+    )
     if prev_stats.empty and cur_stats.empty:
         return pd.DataFrame()
-    prev = prev_stats[["Тег", "Сообщений", "Охват", "Вовлеченность", "Негатив"]].copy() if not prev_stats.empty else pd.DataFrame(columns=["Тег", "Сообщений", "Охват", "Вовлеченность", "Негатив"])
-    cur = cur_stats[["Тег", "Сообщений", "Охват", "Вовлеченность", "Негатив"]].copy() if not cur_stats.empty else pd.DataFrame(columns=["Тег", "Сообщений", "Охват", "Вовлеченность", "Негатив"])
+    prev = (
+        prev_stats[["Тег", "Сообщений", "Охват", "Вовлеченность", "Негатив"]].copy()
+        if not prev_stats.empty
+        else pd.DataFrame(
+            columns=["Тег", "Сообщений", "Охват", "Вовлеченность", "Негатив"]
+        )
+    )
+    cur = (
+        cur_stats[["Тег", "Сообщений", "Охват", "Вовлеченность", "Негатив"]].copy()
+        if not cur_stats.empty
+        else pd.DataFrame(
+            columns=["Тег", "Сообщений", "Охват", "Вовлеченность", "Негатив"]
+        )
+    )
     prev = prev.rename(columns={c: f"{c}_prev" for c in prev.columns if c != "Тег"})
     cur = cur.rename(columns={c: f"{c}_cur" for c in cur.columns if c != "Тег"})
     merged = cur.merge(prev, on="Тег", how="outer").fillna(0)
     for metric in ["Сообщений", "Охват", "Вовлеченность", "Негатив"]:
-        merged[f"Δ {metric.lower()}"] = pd.to_numeric(merged.get(f"{metric}_cur", 0), errors="coerce").fillna(0) - pd.to_numeric(merged.get(f"{metric}_prev", 0), errors="coerce").fillna(0)
-    merged["abs_delta"] = merged[["Δ сообщений", "Δ охват", "Δ вовлеченность", "Δ негатив"]].abs().sum(axis=1)
+        merged[f"Δ {metric.lower()}"] = pd.to_numeric(
+            merged.get(f"{metric}_cur", 0), errors="coerce"
+        ).fillna(0) - pd.to_numeric(
+            merged.get(f"{metric}_prev", 0), errors="coerce"
+        ).fillna(
+            0
+        )
+    merged["abs_delta"] = (
+        merged[["Δ сообщений", "Δ охват", "Δ вовлеченность", "Δ негатив"]]
+        .abs()
+        .sum(axis=1)
+    )
     merged = merged.sort_values("abs_delta", ascending=False).head(limit)
-    out = pd.DataFrame({
-        "Тег": merged["Тег"].astype(str),
-        "Сообщений сейчас": merged["Сообщений_cur"].astype(int),
-        "Δ сообщений": merged["Δ сообщений"].astype(int),
-        "Охват сейчас": merged["Охват_cur"].astype(int),
-        "Δ охвата": merged["Δ охват"].astype(int),
-        "Вовлеченность сейчас": merged["Вовлеченность_cur"].astype(int),
-        "Δ вовлеченности": merged["Δ вовлеченность"].astype(int),
-        "Негатив сейчас": merged["Негатив_cur"].astype(int),
-        "Δ негатива": merged["Δ негатив"].astype(int),
-    })
+    out = pd.DataFrame(
+        {
+            "Тег": merged["Тег"].astype(str),
+            "Сообщений сейчас": merged["Сообщений_cur"].astype(int),
+            "Δ сообщений": merged["Δ сообщений"].astype(int),
+            "Охват сейчас": merged["Охват_cur"].astype(int),
+            "Δ охвата": merged["Δ охват"].astype(int),
+            "Вовлеченность сейчас": merged["Вовлеченность_cur"].astype(int),
+            "Δ вовлеченности": merged["Δ вовлеченность"].astype(int),
+            "Негатив сейчас": merged["Негатив_cur"].astype(int),
+            "Δ негатива": merged["Δ негатив"].astype(int),
+        }
+    )
     return out
 
 
-
-def build_client_insights_summary(messages: pd.DataFrame, events_agg: pd.DataFrame, periods: pd.DataFrame, selected_period_ids: list[str], *, profile: str = "") -> str:
+def build_client_insights_summary(
+    messages: pd.DataFrame,
+    events_agg: pd.DataFrame,
+    periods: pd.DataFrame,
+    selected_period_ids: list[str],
+    *,
+    profile: str = "",
+) -> str:
     """Return a text version of the client-insights block for automatic summaries."""
     metrics = overview_metrics(messages)
     sent = metrics.get("sentiment", {}) or {}
@@ -2115,21 +3142,31 @@ def build_client_insights_summary(messages: pd.DataFrame, events_agg: pd.DataFra
     negative = int(sent.get("negative", 0) or 0)
     negative_share = negative / total if total else 0.0
     engagement = int(metrics.get("engagement", 0) or 0)
-    risk_level = "низкий" if negative_share < 0.01 else "средний" if negative_share < 0.05 else "высокий"
+    risk_level = (
+        "низкий"
+        if negative_share < 0.01
+        else "средний" if negative_share < 0.05 else "высокий"
+    )
 
     lines: list[str] = []
     lines.append("Клиентский обзор")
-    lines.append(f"Риск негатива: {risk_level}; негативных сообщений — {format_int(negative)} ({negative_share * 100:.1f}%).")
+    lines.append(
+        f"Риск негатива: {risk_level}; негативных сообщений — {format_int(negative)} ({negative_share * 100:.1f}%)."
+    )
     lines.append(f"Суммарная вовлеченность: {format_int(engagement)}.")
 
     if len(selected_period_ids or []) >= 2:
-        change_lines = build_period_change_insights(messages, periods, selected_period_ids)
+        change_lines = build_period_change_insights(
+            messages, periods, selected_period_ids
+        )
         if change_lines:
             lines.append("Что изменилось к предыдущему периоду:")
             for item in change_lines[:5]:
                 lines.append(f"• {item}")
 
-        tag_changes = build_tag_change_table(messages, periods, selected_period_ids, limit=5)
+        tag_changes = build_tag_change_table(
+            messages, periods, selected_period_ids, limit=5
+        )
         if tag_changes is not None and not tag_changes.empty:
             lines.append("Теги с заметными изменениями:")
             for _, row in tag_changes.head(5).iterrows():
@@ -2171,13 +3208,25 @@ def build_client_insights_summary(messages: pd.DataFrame, events_agg: pd.DataFra
         title_col = _event_title_col(top_events) or "title"
         lines.append("Топ инфоповодов для отчета:")
         for _, row in top_events.iterrows():
-            lines.append(f"• {row.get(title_col, '')} — {format_int(row.get('message_count', 0))} сообщ.")
+            lines.append(
+                f"• {row.get(title_col, '')} — {format_int(row.get('message_count', 0))} сообщ."
+            )
 
     return "\n".join(line for line in lines if str(line).strip())
 
-def render_client_insights(messages: pd.DataFrame, events_agg: pd.DataFrame, periods: pd.DataFrame, selected_period_ids: list[str], *, profile: str = "") -> None:
+
+def render_client_insights(
+    messages: pd.DataFrame,
+    events_agg: pd.DataFrame,
+    periods: pd.DataFrame,
+    selected_period_ids: list[str],
+    *,
+    profile: str = "",
+) -> None:
     st.subheader("Клиентский обзор")
-    st.caption("Сводный слой для презентации заказчику: риски, ключевые сигналы и изменения между периодами.")
+    st.caption(
+        "Сводный слой для презентации заказчику: риски, ключевые сигналы и изменения между периодами."
+    )
 
     metrics = overview_metrics(messages)
     sent = metrics.get("sentiment", {}) or {}
@@ -2187,35 +3236,95 @@ def render_client_insights(messages: pd.DataFrame, events_agg: pd.DataFrame, per
     engagement = int(metrics.get("engagement", 0) or 0)
 
     cards = st.columns(4)
-    cards[0].metric("Риск негатива", "низкий" if negative_share < 0.01 else "средний" if negative_share < 0.05 else "высокий", help=f"Негативных сообщений: {format_int(negative)}")
+    cards[0].metric(
+        "Риск негатива",
+        (
+            "низкий"
+            if negative_share < 0.01
+            else "средний" if negative_share < 0.05 else "высокий"
+        ),
+        help=f"Негативных сообщений: {format_int(negative)}",
+    )
     cards[1].metric("Доля негатива", f"{negative_share * 100:.1f}%")
     cards[2].metric("Вовлеченность", format_int(engagement))
-    cards[3].metric("Инфоповодов", format_int(len(events_agg) if isinstance(events_agg, pd.DataFrame) else 0))
+    cards[3].metric(
+        "Инфоповодов",
+        format_int(len(events_agg) if isinstance(events_agg, pd.DataFrame) else 0),
+    )
 
     signals: list[dict[str, Any]] = []
     if negative > 0:
-        signals.append({"Сигнал": "Есть негативные сообщения", "Что смотреть": "Негативные публикации и темы с высокой вовлеченностью", "Данные": f"{format_int(negative)} сообщ. · {negative_share * 100:.1f}%", "Приоритет": "Средний" if negative_share < 0.05 else "Высокий"})
+        signals.append(
+            {
+                "Сигнал": "Есть негативные сообщения",
+                "Что смотреть": "Негативные публикации и темы с высокой вовлеченностью",
+                "Данные": f"{format_int(negative)} сообщ. · {negative_share * 100:.1f}%",
+                "Приоритет": "Средний" if negative_share < 0.05 else "Высокий",
+            }
+        )
     else:
-        signals.append({"Сигнал": "Критичный негатив не выявлен", "Что смотреть": "Контролировать всплески по тегам и инфоповодам", "Данные": "0 негативных сообщений", "Приоритет": "Низкий"})
+        signals.append(
+            {
+                "Сигнал": "Критичный негатив не выявлен",
+                "Что смотреть": "Контролировать всплески по тегам и инфоповодам",
+                "Данные": "0 негативных сообщений",
+                "Приоритет": "Низкий",
+            }
+        )
 
-    if isinstance(events_agg, pd.DataFrame) and not events_agg.empty and "negative_count" in events_agg.columns:
+    if (
+        isinstance(events_agg, pd.DataFrame)
+        and not events_agg.empty
+        and "negative_count" in events_agg.columns
+    ):
         risky_events = events_agg.copy()
-        risky_events["negative_count"] = pd.to_numeric(risky_events["negative_count"], errors="coerce").fillna(0)
-        risky_events = risky_events[(risky_events["negative_count"] > 0) & (~risky_events.get("title", pd.Series(dtype=str)).apply(is_technical_event_title))]
+        risky_events["negative_count"] = pd.to_numeric(
+            risky_events["negative_count"], errors="coerce"
+        ).fillna(0)
+        risky_events = risky_events[
+            (risky_events["negative_count"] > 0)
+            & (
+                ~risky_events.get("title", pd.Series(dtype=str)).apply(
+                    is_technical_event_title
+                )
+            )
+        ]
         if not risky_events.empty:
-            risky_events = risky_events.sort_values(["negative_count", "message_count"], ascending=False).head(3)
+            risky_events = risky_events.sort_values(
+                ["negative_count", "message_count"], ascending=False
+            ).head(3)
             title_col = _event_title_col(risky_events) or "title"
             names = "; ".join(risky_events[title_col].astype(str).head(3).tolist())
-            signals.append({"Сигнал": "Темы с негативом", "Что смотреть": names, "Данные": f"{format_int(risky_events['negative_count'].sum())} нег. сообщ.", "Приоритет": "Средний"})
+            signals.append(
+                {
+                    "Сигнал": "Темы с негативом",
+                    "Что смотреть": names,
+                    "Данные": f"{format_int(risky_events['negative_count'].sum())} нег. сообщ.",
+                    "Приоритет": "Средний",
+                }
+            )
 
     tags = build_tag_statistics(messages)
     if tags is not None and not tags.empty and "Негатив" in tags.columns:
         neg_tags = tags.copy()
-        neg_tags["Негатив"] = pd.to_numeric(neg_tags["Негатив"], errors="coerce").fillna(0)
-        neg_tags = neg_tags[neg_tags["Негатив"] > 0].sort_values(["Негатив", "Сообщений"], ascending=False).head(3)
+        neg_tags["Негатив"] = pd.to_numeric(
+            neg_tags["Негатив"], errors="coerce"
+        ).fillna(0)
+        neg_tags = (
+            neg_tags[neg_tags["Негатив"] > 0]
+            .sort_values(["Негатив", "Сообщений"], ascending=False)
+            .head(3)
+        )
         if not neg_tags.empty:
             tag_names = "; ".join(neg_tags["Тег"].astype(str).tolist())
-            signals.append({"Сигнал": "Теги с негативом", "Что смотреть": tag_names, "Данные": f"{format_int(neg_tags['Негатив'].sum())} нег. сообщ.", "Приоритет": "Средний"})
+            signals.append(
+                {
+                    "Сигнал": "Теги с негативом",
+                    "Что смотреть": tag_names,
+                    "Данные": f"{format_int(neg_tags['Негатив'].sum())} нег. сообщ.",
+                    "Приоритет": "Средний",
+                }
+            )
 
     st.markdown("#### Риски и сигналы")
     st.dataframe(pd.DataFrame(signals), hide_index=True, use_container_width=True)
@@ -2228,7 +3337,9 @@ def render_client_insights(messages: pd.DataFrame, events_agg: pd.DataFrame, per
                 st.markdown(f"- {item}")
         else:
             st.caption("Значимых изменений по основным метрикам не найдено.")
-        tag_changes = build_tag_change_table(messages, periods, selected_period_ids, limit=10)
+        tag_changes = build_tag_change_table(
+            messages, periods, selected_period_ids, limit=10
+        )
         if not tag_changes.empty:
             display = tag_changes.copy()
             for col in [c for c in display.columns if c != "Тег"]:
@@ -2245,7 +3356,9 @@ def render_client_insights(messages: pd.DataFrame, events_agg: pd.DataFrame, per
             st.caption("Теги не найдены.")
         else:
             for _, row in top_tags.iterrows():
-                st.markdown(f"- **{row['Тег']}** — {format_int(row.get('Сообщений', 0))} сообщ. · охват {format_int(row.get('Охват', 0))}")
+                st.markdown(
+                    f"- **{row['Тег']}** — {format_int(row.get('Сообщений', 0))} сообщ. · охват {format_int(row.get('Охват', 0))}"
+                )
     with c2:
         st.markdown("**Топ инфоповодов**")
         top_events = top_client_events(events_agg, limit=5)
@@ -2254,29 +3367,42 @@ def render_client_insights(messages: pd.DataFrame, events_agg: pd.DataFrame, per
         else:
             title_col = _event_title_col(top_events) or "title"
             for _, row in top_events.iterrows():
-                st.markdown(f"- **{row.get(title_col, '')}** — {format_int(row.get('message_count', 0))} сообщ.")
+                st.markdown(
+                    f"- **{row.get(title_col, '')}** — {format_int(row.get('message_count', 0))} сообщ."
+                )
 
 
 def render_project_access(is_admin: bool) -> tuple[str | None, str, pd.DataFrame]:
     projects = list_projects(include_inactive=is_admin)
     if projects.empty:
         if is_admin:
-            st.info("Пока нет проектов. Создайте первый проект в блоке управления ниже.")
+            st.info(
+                "Пока нет проектов. Создайте первый проект в блоке управления ниже."
+            )
         else:
             st.warning("Пока нет доступных проектов.")
         return None, "owner" if is_admin else "none", projects
 
     if is_admin:
         options = projects["project_id"].astype(str).tolist()
-        labels = {str(r["project_id"]): str(r.get("project_name") or r["project_id"]) for _, r in projects.iterrows()}
-        selected = st.sidebar.selectbox("Проект", options, format_func=lambda x: labels.get(x, x))
+        labels = {
+            str(r["project_id"]): str(r.get("project_name") or r["project_id"])
+            for _, r in projects.iterrows()
+        }
+        selected = st.sidebar.selectbox(
+            "Проект", options, format_func=lambda x: labels.get(x, x)
+        )
         return selected, "owner", projects
 
     if st.session_state.get("platform_project_id"):
         project_id = st.session_state["platform_project_id"]
         role = st.session_state.get("platform_project_role", "viewer")
         project_row = projects[projects["project_id"].astype(str) == str(project_id)]
-        project_name = str(project_row.iloc[0].get("project_name") if not project_row.empty else project_id)
+        project_name = str(
+            project_row.iloc[0].get("project_name")
+            if not project_row.empty
+            else project_id
+        )
         st.sidebar.success(f"Доступ: {project_name} · {role}")
         if st.sidebar.button("Сменить проект / выйти"):
             st.session_state.pop("platform_project_id", None)
@@ -2285,7 +3411,9 @@ def render_project_access(is_admin: bool) -> tuple[str | None, str, pd.DataFrame
         return project_id, role, projects
 
     st.sidebar.info("Введите код доступа к проекту")
-    access_code = st.sidebar.text_input("Код проекта", type="password", key="project_access_code")
+    access_code = st.sidebar.text_input(
+        "Код проекта", type="password", key="project_access_code"
+    )
     if st.sidebar.button("Открыть проект"):
         project_id, role = resolve_project_access(access_code)
         if project_id:
@@ -2309,8 +3437,12 @@ def render_project_manager(projects: pd.DataFrame) -> None:
             key="new_topic_profile",
             help="Профиль не привязывает платформу к одной отрасли: по умолчанию темы берутся из колонок выгрузки и универсальных правил.",
         )
-        viewer_code = st.text_input("Код просмотра", type="password", key="new_viewer_code")
-        editor_code = st.text_input("Код редактора", type="password", key="new_editor_code")
+        viewer_code = st.text_input(
+            "Код просмотра", type="password", key="new_viewer_code"
+        )
+        editor_code = st.text_input(
+            "Код редактора", type="password", key="new_editor_code"
+        )
         if st.button("Создать проект", type="primary"):
             if not name.strip():
                 st.error("Укажите название проекта.")
@@ -2332,23 +3464,64 @@ def render_project_manager(projects: pd.DataFrame) -> None:
     for col in ["created_at", "updated_at"]:
         if col in view.columns:
             view[col] = view[col].apply(fmt_date)
-    show = view[[c for c in ["project_name", "description", "status", "created_at", "updated_at", "project_id"] if c in view.columns]].rename(columns={
-        "project_name": "Проект",
-        "description": "Описание",
-        "status": "Статус",
-        "created_at": "Создан",
-        "updated_at": "Обновлен",
-        "project_id": "ID",
-    })
-    event = st.dataframe(show, hide_index=True, use_container_width=True, selection_mode="single-row", on_select="rerun")
+    show = view[
+        [
+            c
+            for c in [
+                "project_name",
+                "description",
+                "status",
+                "created_at",
+                "updated_at",
+                "project_id",
+            ]
+            if c in view.columns
+        ]
+    ].rename(
+        columns={
+            "project_name": "Проект",
+            "description": "Описание",
+            "status": "Статус",
+            "created_at": "Создан",
+            "updated_at": "Обновлен",
+            "project_id": "ID",
+        }
+    )
+    event = st.dataframe(
+        show,
+        hide_index=True,
+        use_container_width=True,
+        selection_mode="single-row",
+        on_select="rerun",
+    )
     rows = getattr(event, "selection", {}).get("rows", []) if event is not None else []
     if rows:
         row = projects.iloc[rows[0]]
         project_id = str(row["project_id"])
         with st.expander(f"Редактировать: {row.get('project_name')}", expanded=True):
-            new_name = st.text_input("Название", value=str(row.get("project_name") or ""), key=f"edit_project_name_{project_id}")
-            new_description = st.text_area("Описание", value=str(row.get("description") or ""), key=f"edit_project_description_{project_id}")
-            new_status = st.selectbox("Статус", ["active", "hidden", "archived"], index=["active", "hidden", "archived"].index(str(row.get("status") or "active")) if str(row.get("status") or "active") in ["active", "hidden", "archived"] else 0, key=f"edit_project_status_{project_id}")
+            new_name = st.text_input(
+                "Название",
+                value=str(row.get("project_name") or ""),
+                key=f"edit_project_name_{project_id}",
+            )
+            new_description = st.text_area(
+                "Описание",
+                value=str(row.get("description") or ""),
+                key=f"edit_project_description_{project_id}",
+            )
+            new_status = st.selectbox(
+                "Статус",
+                ["active", "hidden", "archived"],
+                index=(
+                    ["active", "hidden", "archived"].index(
+                        str(row.get("status") or "active")
+                    )
+                    if str(row.get("status") or "active")
+                    in ["active", "hidden", "archived"]
+                    else 0
+                ),
+                key=f"edit_project_status_{project_id}",
+            )
             current_settings = project_settings_from_row(row)
             current_profile = str(current_settings.get("topic_profile") or "universal")
             if current_profile not in ALGORITHM_PROFILE_OPTIONS:
@@ -2360,12 +3533,21 @@ def render_project_manager(projects: pd.DataFrame) -> None:
                 format_func=lambda x: ALGORITHM_PROFILE_OPTIONS.get(x, x),
                 key=f"edit_topic_profile_{project_id}",
             )
-            current_chart_labels = chart_label_settings_from_project_settings(current_settings)
+            current_chart_labels = chart_label_settings_from_project_settings(
+                current_settings
+            )
             with st.expander("Настройки подписей на графиках", expanded=False):
                 chart_font = st.selectbox(
                     "Шрифт значений",
                     CHART_LABEL_FONT_OPTIONS,
-                    index=CHART_LABEL_FONT_OPTIONS.index(current_chart_labels.get("font", "Arial")) if current_chart_labels.get("font", "Arial") in CHART_LABEL_FONT_OPTIONS else 0,
+                    index=(
+                        CHART_LABEL_FONT_OPTIONS.index(
+                            current_chart_labels.get("font", "Arial")
+                        )
+                        if current_chart_labels.get("font", "Arial")
+                        in CHART_LABEL_FONT_OPTIONS
+                        else 0
+                    ),
                     key=f"chart_label_font_{project_id}",
                 )
                 chart_font_size = st.slider(
@@ -2381,7 +3563,11 @@ def render_project_manager(projects: pd.DataFrame) -> None:
                 chart_position = st.radio(
                     "Местоположение значений",
                     position_keys,
-                    index=position_keys.index(current_position) if current_position in position_keys else 0,
+                    index=(
+                        position_keys.index(current_position)
+                        if current_position in position_keys
+                        else 0
+                    ),
                     format_func=lambda x: CHART_LABEL_POSITION_OPTIONS.get(x, x),
                     horizontal=True,
                     key=f"chart_label_position_{project_id}",
@@ -2392,9 +3578,13 @@ def render_project_manager(projects: pd.DataFrame) -> None:
                     help="По умолчанию легенда скрыта, потому что рядом с круговой диаграммой уже есть блок значений.",
                     key=f"chart_label_show_donut_legend_{project_id}",
                 )
-                st.caption("Настройка применяется к подписям на линейных, столбчатых и круговых графиках сравнения периодов.")
+                st.caption(
+                    "Настройка применяется к подписям на линейных, столбчатых и круговых графиках сравнения периодов."
+                )
 
-            current_branding = report_branding_from_project_settings(current_settings, project_name=str(row.get("project_name") or ""))
+            current_branding = report_branding_from_project_settings(
+                current_settings, project_name=str(row.get("project_name") or "")
+            )
             with st.expander("Брендирование отчетов", expanded=False):
                 report_client_name = st.text_input(
                     "Название клиента в отчете",
@@ -2404,20 +3594,26 @@ def render_project_manager(projects: pd.DataFrame) -> None:
                 )
                 report_title = st.text_input(
                     "Заголовок отчета",
-                    value=str(current_branding.get("report_title") or "Дайджест упоминаний"),
+                    value=str(
+                        current_branding.get("report_title") or "Дайджест упоминаний"
+                    ),
                     key=f"report_title_{project_id}",
                 )
                 b1, b2 = st.columns(2)
                 with b1:
                     report_accent_color = st.color_picker(
                         "Акцентный цвет",
-                        value=_valid_hex_color(current_branding.get("accent_color"), "#2563eb"),
+                        value=_valid_hex_color(
+                            current_branding.get("accent_color"), "#2563eb"
+                        ),
                         key=f"report_accent_color_{project_id}",
                     )
                 with b2:
                     report_background_color = st.color_picker(
                         "Фон инфографики",
-                        value=_valid_hex_color(current_branding.get("background_color"), "#ffffff"),
+                        value=_valid_hex_color(
+                            current_branding.get("background_color"), "#ffffff"
+                        ),
                         key=f"report_background_color_{project_id}",
                     )
                 report_footer_text = st.text_input(
@@ -2432,16 +3628,24 @@ def render_project_manager(projects: pd.DataFrame) -> None:
                     key=f"report_logo_url_{project_id}",
                     help="Можно указать публичную ссылку на логотип или загрузить файл ниже. Для стабильной выгрузки лучше использовать загрузку файла.",
                 )
-                current_logo_path = str(current_branding.get("logo_storage_path") or "").strip()
+                current_logo_path = str(
+                    current_branding.get("logo_storage_path") or ""
+                ).strip()
                 if current_logo_path or report_logo_url:
-                    st.caption(f"Текущий логотип: {current_branding.get('logo_filename') or report_logo_url or current_logo_path}")
+                    st.caption(
+                        f"Текущий логотип: {current_branding.get('logo_filename') or report_logo_url or current_logo_path}"
+                    )
                     try:
                         if current_logo_path:
-                            st.image(download_storage_file(current_logo_path), width=160)
+                            st.image(
+                                download_storage_file(current_logo_path), width=160
+                            )
                         elif report_logo_url:
                             st.image(report_logo_url, width=160)
                     except Exception:
-                        st.caption("Предпросмотр логотипа недоступен, но ссылка/путь сохранены в настройках.")
+                        st.caption(
+                            "Предпросмотр логотипа недоступен, но ссылка/путь сохранены в настройках."
+                        )
                 report_logo_file = st.file_uploader(
                     "Загрузить / заменить логотип",
                     type=["png", "jpg", "jpeg", "webp"],
@@ -2454,16 +3658,32 @@ def render_project_manager(projects: pd.DataFrame) -> None:
                     key=f"remove_report_logo_{project_id}",
                     help="Удалит файл логотипа из Storage и очистит настройки логотипа после сохранения проекта.",
                 )
-                st.caption("Брендирование применяется к Word/PDF/PNG-выгрузкам саммари и клиентских отчетов.")
+                st.caption(
+                    "Брендирование применяется к Word/PDF/PNG-выгрузкам саммари и клиентских отчетов."
+                )
 
-            current_view_settings = dashboard_view_settings_from_project_settings(current_settings)
-            with st.expander("Клиентский режим и сохраненные представления", expanded=False):
+            current_view_settings = dashboard_view_settings_from_project_settings(
+                current_settings
+            )
+            with st.expander(
+                "Клиентский режим и сохраненные представления", expanded=False
+            ):
                 view_mode_options = ["client", "analyst"]
                 default_view_mode = st.radio(
                     "Вид дашборда по умолчанию",
                     view_mode_options,
-                    index=view_mode_options.index(current_view_settings.get("default_view_mode", "client")) if current_view_settings.get("default_view_mode", "client") in view_mode_options else 0,
-                    format_func=lambda x: {"client": "Клиентский", "analyst": "Аналитический"}.get(x, x),
+                    index=(
+                        view_mode_options.index(
+                            current_view_settings.get("default_view_mode", "client")
+                        )
+                        if current_view_settings.get("default_view_mode", "client")
+                        in view_mode_options
+                        else 0
+                    ),
+                    format_func=lambda x: {
+                        "client": "Клиентский",
+                        "analyst": "Аналитический",
+                    }.get(x, x),
                     horizontal=True,
                     key=f"default_view_mode_{project_id}",
                     help="Клиентский вид подходит для демонстрации заказчику: меньше технических настроек и больше готовой аналитики.",
@@ -2471,32 +3691,75 @@ def render_project_manager(projects: pd.DataFrame) -> None:
                 start_section = st.selectbox(
                     "Стартовый раздел обычного проекта",
                     DASHBOARD_SECTION_OPTIONS,
-                    index=DASHBOARD_SECTION_OPTIONS.index(current_view_settings.get("start_section", "Клиентский обзор")) if current_view_settings.get("start_section", "Клиентский обзор") in DASHBOARD_SECTION_OPTIONS else 0,
+                    index=(
+                        DASHBOARD_SECTION_OPTIONS.index(
+                            current_view_settings.get(
+                                "start_section", "Клиентский обзор"
+                            )
+                        )
+                        if current_view_settings.get(
+                            "start_section", "Клиентский обзор"
+                        )
+                        in DASHBOARD_SECTION_OPTIONS
+                        else 0
+                    ),
                     key=f"start_section_{project_id}",
                 )
                 taxi_start_section = st.selectbox(
                     "Стартовый раздел водительского проекта",
                     TAXI_DASHBOARD_SECTION_OPTIONS,
-                    index=TAXI_DASHBOARD_SECTION_OPTIONS.index(current_view_settings.get("taxi_start_section", "Клиентский обзор")) if current_view_settings.get("taxi_start_section", "Клиентский обзор") in TAXI_DASHBOARD_SECTION_OPTIONS else 0,
+                    index=(
+                        TAXI_DASHBOARD_SECTION_OPTIONS.index(
+                            current_view_settings.get(
+                                "taxi_start_section", "Клиентский обзор"
+                            )
+                        )
+                        if current_view_settings.get(
+                            "taxi_start_section", "Клиентский обзор"
+                        )
+                        in TAXI_DASHBOARD_SECTION_OPTIONS
+                        else 0
+                    ),
                     key=f"taxi_start_section_{project_id}",
                 )
                 default_comparison_charts = st.multiselect(
                     "Графики сравнения по умолчанию",
                     COMPARISON_CHART_BLOCKS,
-                    default=[x for x in current_view_settings.get("comparison_visible_charts", DEFAULT_DASHBOARD_VIEW_SETTINGS["comparison_visible_charts"]) if x in COMPARISON_CHART_BLOCKS],
+                    default=[
+                        x
+                        for x in current_view_settings.get(
+                            "comparison_visible_charts",
+                            DEFAULT_DASHBOARD_VIEW_SETTINGS[
+                                "comparison_visible_charts"
+                            ],
+                        )
+                        if x in COMPARISON_CHART_BLOCKS
+                    ],
                     key=f"default_comparison_charts_{project_id}",
                     help="Эти графики будут включены по умолчанию в блоке «Визуализация сравнений». Пользователь сможет изменить выбор на странице.",
                 )
                 client_hide_technical = st.checkbox(
                     "Скрывать технические настройки в клиентском виде",
-                    value=bool(current_view_settings.get("client_hide_technical", True)),
+                    value=bool(
+                        current_view_settings.get("client_hide_technical", True)
+                    ),
                     key=f"client_hide_technical_{project_id}",
                 )
-                st.caption("Настройки сохраняют подготовленный клиентский вид проекта: стартовый раздел, набор графиков и уровень технических элементов.")
+                st.caption(
+                    "Настройки сохраняют подготовленный клиентский вид проекта: стартовый раздел, набор графиков и уровень технических элементов."
+                )
 
             st.caption("Коды доступа заполняйте только если хотите заменить текущие.")
-            new_viewer_code = st.text_input("Новый код просмотра", type="password", key=f"edit_viewer_code_{project_id}")
-            new_editor_code = st.text_input("Новый код редактора", type="password", key=f"edit_editor_code_{project_id}")
+            new_viewer_code = st.text_input(
+                "Новый код просмотра",
+                type="password",
+                key=f"edit_viewer_code_{project_id}",
+            )
+            new_editor_code = st.text_input(
+                "Новый код редактора",
+                type="password",
+                key=f"edit_editor_code_{project_id}",
+            )
             if st.button("Сохранить проект", key=f"save_project_{project_id}"):
                 updated_settings = dict(current_settings)
                 updated_settings["topic_profile"] = new_topic_profile
@@ -2506,9 +3769,13 @@ def render_project_manager(projects: pd.DataFrame) -> None:
                     "position": chart_position,
                     "show_donut_legend": bool(show_donut_legend),
                 }
-                logo_storage_path = str(current_branding.get("logo_storage_path") or "").strip()
+                logo_storage_path = str(
+                    current_branding.get("logo_storage_path") or ""
+                ).strip()
                 logo_filename = str(current_branding.get("logo_filename") or "").strip()
-                logo_mime_type = str(current_branding.get("logo_mime_type") or "").strip()
+                logo_mime_type = str(
+                    current_branding.get("logo_mime_type") or ""
+                ).strip()
                 logo_url_value = str(report_logo_url or "").strip()
 
                 if remove_report_logo:
@@ -2527,11 +3794,23 @@ def render_project_manager(projects: pd.DataFrame) -> None:
                     if logo_storage_path:
                         delete_storage_file(logo_storage_path)
                     try:
-                        logo_meta = save_report_logo_to_storage(project_id, report_logo_file.name, logo_bytes)
-                        logo_storage_path = str(logo_meta.get("logo_storage_path") or "")
-                        logo_url_value = str(logo_meta.get("logo_url") or logo_url_value or "")
-                        logo_filename = str(logo_meta.get("logo_filename") or report_logo_file.name)
-                        logo_mime_type = str(logo_meta.get("logo_mime_type") or report_logo_file.type or "")
+                        logo_meta = save_report_logo_to_storage(
+                            project_id, report_logo_file.name, logo_bytes
+                        )
+                        logo_storage_path = str(
+                            logo_meta.get("logo_storage_path") or ""
+                        )
+                        logo_url_value = str(
+                            logo_meta.get("logo_url") or logo_url_value or ""
+                        )
+                        logo_filename = str(
+                            logo_meta.get("logo_filename") or report_logo_file.name
+                        )
+                        logo_mime_type = str(
+                            logo_meta.get("logo_mime_type")
+                            or report_logo_file.type
+                            or ""
+                        )
                     except Exception as exc:
                         st.error(f"Не удалось загрузить логотип в Storage: {exc}")
                         st.stop()
@@ -2589,7 +3868,9 @@ def render_project_manager(projects: pd.DataFrame) -> None:
                     key=f"delete_project_{project_id}",
                 ):
                     try:
-                        result = delete_project(project_id, delete_storage=delete_storage_files)
+                        result = delete_project(
+                            project_id, delete_storage=delete_storage_files
+                        )
                         st.success(
                             "Проект удален: "
                             f"периодов — {result.get('periods_deleted', 0)}, "
@@ -2615,7 +3896,12 @@ def render_period_selector(project_id: str) -> tuple[list[str], pd.DataFrame]:
         period_id = str(r["period_id"])
         labels[period_id] = f"{r.get('period_name') or period_id} · {fmt_period(r)}"
     default = periods["period_id"].astype(str).head(3).tolist()
-    selected = st.sidebar.multiselect("Периоды", periods["period_id"].astype(str).tolist(), default=default, format_func=lambda x: labels.get(x, x))
+    selected = st.sidebar.multiselect(
+        "Периоды",
+        periods["period_id"].astype(str).tolist(),
+        default=default,
+        format_func=lambda x: labels.get(x, x),
+    )
     return selected, periods
 
 
@@ -2634,7 +3920,16 @@ def read_uploaded_to_canonical(uploaded_file, source_system: str) -> pd.DataFram
 
 
 def read_generated_tables_from_dir(output_dir: Path) -> dict[str, pd.DataFrame]:
-    return {name: read_table(str(output_dir), name) for name in ["events", "discussions", "messages", "discussion_messages", "event_discussions"]}
+    return {
+        name: read_table(str(output_dir), name)
+        for name in [
+            "events",
+            "discussions",
+            "messages",
+            "discussion_messages",
+            "event_discussions",
+        ]
+    }
 
 
 def render_upload_page(project_id: str, role: str, work_dir: str) -> None:
@@ -2644,28 +3939,40 @@ def render_upload_page(project_id: str, role: str, work_dir: str) -> None:
         return
 
     with st.form("upload_form"):
-        period_name = st.text_input("Название периода", placeholder="Например: 24.04.2026–30.04.2026")
+        period_name = st.text_input(
+            "Название периода", placeholder="Например: 24.04.2026–30.04.2026"
+        )
         date_col1, date_col2 = st.columns(2)
         with date_col1:
             date_from = st.date_input("Дата начала", value=None, format="DD.MM.YYYY")
         with date_col2:
             date_to = st.date_input("Дата окончания", value=None, format="DD.MM.YYYY")
-        source_system = st.selectbox("Источник", ["auto", "mediologia", "mediologia_excel", "brand_analytics", "generic"], format_func=lambda x: {
-            "auto": "Автоопределение",
-            "mediologia": "Медиалогия CSV",
-            "mediologia_excel": "Медиалогия Excel",
-            "brand_analytics": "Brand Analytics",
-            "generic": "Универсальный CSV/Excel",
-        }.get(x, x))
-        uploaded = st.file_uploader("CSV или Excel", type=["csv", "xlsx", "xls", "xlsm"])
+        source_system = st.selectbox(
+            "Источник",
+            ["auto", "mediologia", "mediologia_excel", "brand_analytics", "generic"],
+            format_func=lambda x: {
+                "auto": "Автоопределение",
+                "mediologia": "Медиалогия CSV",
+                "mediologia_excel": "Медиалогия Excel",
+                "brand_analytics": "Brand Analytics",
+                "generic": "Универсальный CSV/Excel",
+            }.get(x, x),
+        )
+        uploaded = st.file_uploader(
+            "CSV или Excel", type=["csv", "xlsx", "xls", "xlsm"]
+        )
         st.caption("Алгоритм")
         c1, c2, c3 = st.columns(3)
         with c1:
             threshold = st.slider("Похожесть", 0.10, 0.60, 0.30, 0.01)
         with c2:
-            event_gap_hours = st.slider("Разрыв между волнами, часов", 1.0, 24.0, 3.0, 1.0)
+            event_gap_hours = st.slider(
+                "Разрыв между волнами, часов", 1.0, 24.0, 3.0, 1.0
+            )
         with c3:
-            event_window_hours = st.slider("Макс. окно инфоповода, часов", 4.0, 72.0, 16.0, 4.0)
+            event_window_hours = st.slider(
+                "Макс. окно инфоповода, часов", 4.0, 72.0, 16.0, 4.0
+            )
         submitted = st.form_submit_button("Обработать и сохранить", type="primary")
 
     if not submitted:
@@ -2711,9 +4018,13 @@ def render_upload_page(project_id: str, role: str, work_dir: str) -> None:
 
     storage_path = ""
     try:
-        storage_path = save_uploaded_file_to_storage(project_id, period_id, uploaded.name, uploaded.getvalue())
+        storage_path = save_uploaded_file_to_storage(
+            project_id, period_id, uploaded.name, uploaded.getvalue()
+        )
     except Exception as exc:
-        st.warning(f"Обработанные данные сохраню в БД, но сырой файл не удалось сохранить в Storage: {exc}")
+        st.warning(
+            f"Обработанные данные сохраню в БД, но сырой файл не удалось сохранить в Storage: {exc}"
+        )
 
     with st.spinner("Сохраняю данные проекта в Supabase..."):
         manifest = dict(manifest or {})
@@ -2744,35 +4055,98 @@ def render_period_history(project_id: str, role: str) -> None:
         return
     view = periods.copy()
     view["Период"] = view.apply(fmt_period, axis=1)
-    show = view[[c for c in ["period_name", "Период", "source_filename", "status", "period_id"] if c in view.columns]].rename(columns={
-        "period_name": "Название",
-        "source_filename": "Файл",
-        "status": "Статус",
-        "period_id": "ID",
-    })
-    event = st.dataframe(show, hide_index=True, use_container_width=True, selection_mode="single-row", on_select="rerun")
+    show = view[
+        [
+            c
+            for c in ["period_name", "Период", "source_filename", "status", "period_id"]
+            if c in view.columns
+        ]
+    ].rename(
+        columns={
+            "period_name": "Название",
+            "source_filename": "Файл",
+            "status": "Статус",
+            "period_id": "ID",
+        }
+    )
+    event = st.dataframe(
+        show,
+        hide_index=True,
+        use_container_width=True,
+        selection_mode="single-row",
+        on_select="rerun",
+    )
     rows = getattr(event, "selection", {}).get("rows", []) if event is not None else []
     if not rows:
         return
     row = periods.iloc[rows[0]]
     period_id = str(row["period_id"])
     with st.expander("Редактировать период", expanded=True):
-        name = st.text_input("Название периода", value=str(row.get("period_name") or ""), key=f"period_name_{period_id}")
+        name = st.text_input(
+            "Название периода",
+            value=str(row.get("period_name") or ""),
+            key=f"period_name_{period_id}",
+        )
+
         def to_date(v):
             ts = pd.to_datetime(v, errors="coerce")
             return None if pd.isna(ts) else ts.date()
-        date_from = st.date_input("Дата начала", value=to_date(row.get("date_from")), format="DD.MM.YYYY", key=f"date_from_{period_id}")
-        date_to = st.date_input("Дата окончания", value=to_date(row.get("date_to")), format="DD.MM.YYYY", key=f"date_to_{period_id}")
-        filename = st.text_input("Файл", value=str(row.get("source_filename") or ""), key=f"filename_{period_id}")
-        status = st.selectbox("Статус", ["active", "hidden", "archived"], index=["active", "hidden", "archived"].index(str(row.get("status") or "active")) if str(row.get("status") or "active") in ["active", "hidden", "archived"] else 0, key=f"status_{period_id}")
-        comment = st.text_area("Комментарий", value=str((row.get("manifest") or {}).get("comment", "")) if isinstance(row.get("manifest"), dict) else "", key=f"comment_{period_id}")
+
+        date_from = st.date_input(
+            "Дата начала",
+            value=to_date(row.get("date_from")),
+            format="DD.MM.YYYY",
+            key=f"date_from_{period_id}",
+        )
+        date_to = st.date_input(
+            "Дата окончания",
+            value=to_date(row.get("date_to")),
+            format="DD.MM.YYYY",
+            key=f"date_to_{period_id}",
+        )
+        filename = st.text_input(
+            "Файл",
+            value=str(row.get("source_filename") or ""),
+            key=f"filename_{period_id}",
+        )
+        status = st.selectbox(
+            "Статус",
+            ["active", "hidden", "archived"],
+            index=(
+                ["active", "hidden", "archived"].index(
+                    str(row.get("status") or "active")
+                )
+                if str(row.get("status") or "active")
+                in ["active", "hidden", "archived"]
+                else 0
+            ),
+            key=f"status_{period_id}",
+        )
+        comment = st.text_area(
+            "Комментарий",
+            value=(
+                str((row.get("manifest") or {}).get("comment", ""))
+                if isinstance(row.get("manifest"), dict)
+                else ""
+            ),
+            key=f"comment_{period_id}",
+        )
         c1, c2 = st.columns(2)
         with c1:
             if st.button("Сохранить изменения", key=f"save_period_{period_id}"):
                 if date_from and date_to and date_from > date_to:
                     st.error("Дата начала не может быть позже даты окончания.")
                 else:
-                    update_period_metadata(project_id, period_id, period_name=name, date_from=date_from, date_to=date_to, source_filename=filename, status=status, manifest_updates={"comment": comment})
+                    update_period_metadata(
+                        project_id,
+                        period_id,
+                        period_name=name,
+                        date_from=date_from,
+                        date_to=date_to,
+                        source_filename=filename,
+                        status=status,
+                        manifest_updates={"comment": comment},
+                    )
                     st.success("Период обновлен.")
                     st.rerun()
         with c2:
@@ -2787,7 +4161,9 @@ def render_period_history(project_id: str, role: str) -> None:
                 "Также будут удалены ручные правки, которые явно ссылаются на этот период. "
                 "Другие проекты и другие периоды не затрагиваются."
             )
-            manifest = row.get("manifest") if isinstance(row.get("manifest"), dict) else {}
+            manifest = (
+                row.get("manifest") if isinstance(row.get("manifest"), dict) else {}
+            )
             storage_path = str((manifest or {}).get("storage_path") or "").strip()
             if storage_path:
                 st.caption(f"Исходный файл в Storage: {storage_path}")
@@ -2797,7 +4173,11 @@ def render_period_history(project_id: str, role: str) -> None:
                 key=f"delete_storage_{period_id}",
             )
             st.caption("Удаление запускается одной кнопкой. Действие необратимо.")
-            if st.button("Удалить выгрузку", key=f"hard_delete_period_{period_id}", type="primary"):
+            if st.button(
+                "Удалить выгрузку",
+                key=f"hard_delete_period_{period_id}",
+                type="primary",
+            ):
                 try:
                     result = delete_period(
                         project_id,
@@ -2811,23 +4191,54 @@ def render_period_history(project_id: str, role: str) -> None:
                     st.exception(exc)
                     return
 
-                manual_count = int(result.get("manual_rows_deleted") or 0) if isinstance(result, dict) else 0
-                table_count = int(result.get("table_rows_deleted") or 0) if isinstance(result, dict) else 0
-                storage_deleted = bool(result.get("storage_deleted")) if isinstance(result, dict) else False
+                manual_count = (
+                    int(result.get("manual_rows_deleted") or 0)
+                    if isinstance(result, dict)
+                    else 0
+                )
+                table_count = (
+                    int(result.get("table_rows_deleted") or 0)
+                    if isinstance(result, dict)
+                    else 0
+                )
+                storage_deleted = (
+                    bool(result.get("storage_deleted"))
+                    if isinstance(result, dict)
+                    else False
+                )
                 mode = str(result.get("mode") or "") if isinstance(result, dict) else ""
-                for warning in (result.get("warnings") or []) if isinstance(result, dict) else []:
+                for warning in (
+                    (result.get("warnings") or []) if isinstance(result, dict) else []
+                ):
                     st.warning(str(warning))
-                if delete_storage and storage_path and not storage_deleted and mode != "soft_fallback":
-                    st.warning("Выгрузка удалена из базы, но исходный файл в Storage удалить не удалось или он уже отсутствовал.")
+                if (
+                    delete_storage
+                    and storage_path
+                    and not storage_deleted
+                    and mode != "soft_fallback"
+                ):
+                    st.warning(
+                        "Выгрузка удалена из базы, но исходный файл в Storage удалить не удалось или он уже отсутствовал."
+                    )
                 if mode == "soft_fallback":
-                    st.warning("Физическое удаление не завершилось, поэтому период скрыт из интерфейса. Для полной очистки можно повторить удаление позже или выполнить очистку в Supabase.")
+                    st.warning(
+                        "Физическое удаление не завершилось, поэтому период скрыт из интерфейса. Для полной очистки можно повторить удаление позже или выполнить очистку в Supabase."
+                    )
                 else:
-                    st.success(f"Выгрузка удалена. Удалено строк данных: {table_count}. Удалено связанных ручных правок: {manual_count}.")
+                    st.success(
+                        f"Выгрузка удалена. Удалено строк данных: {table_count}. Удалено связанных ручных правок: {manual_count}."
+                    )
                 clear_platform_caches(project_id)
                 st.rerun()
 
+
 @st.cache_data(show_spinner=False)
-def enrich_messages(messages: pd.DataFrame, event_discussions: pd.DataFrame, discussion_messages: pd.DataFrame, events: pd.DataFrame) -> pd.DataFrame:
+def enrich_messages(
+    messages: pd.DataFrame,
+    event_discussions: pd.DataFrame,
+    discussion_messages: pd.DataFrame,
+    events: pd.DataFrame,
+) -> pd.DataFrame:
     """Attach event ids/titles to messages safely.
 
     Some project profiles, especially Brand Analytics story-based imports, may
@@ -2853,7 +4264,9 @@ def enrich_messages(messages: pd.DataFrame, event_discussions: pd.DataFrame, dis
         and "discussion_id" in event_discussions.columns
         and "discussion_id" in discussion_messages.columns
     ):
-        link = discussion_messages.merge(event_discussions, on="discussion_id", how="left")
+        link = discussion_messages.merge(
+            event_discussions, on="discussion_id", how="left"
+        )
         if "message_id" in link.columns and "event_id" in link.columns:
             msg_event = (
                 link[["message_id", "event_id"]]
@@ -2861,7 +4274,9 @@ def enrich_messages(messages: pd.DataFrame, event_discussions: pd.DataFrame, dis
                 .drop_duplicates("message_id")
             )
             msg_event["message_id"] = msg_event["message_id"].fillna("").astype(str)
-            out = out.merge(msg_event, on="message_id", how="left", suffixes=("", "_linked"))
+            out = out.merge(
+                msg_event, on="message_id", how="left", suffixes=("", "_linked")
+            )
             if "event_id_linked" in out.columns:
                 if "event_id" not in out.columns:
                     out["event_id"] = out["event_id_linked"]
@@ -2874,7 +4289,11 @@ def enrich_messages(messages: pd.DataFrame, event_discussions: pd.DataFrame, dis
         out["event_id"] = ""
     out["event_id"] = out["event_id"].fillna("").astype(str)
 
-    if isinstance(events, pd.DataFrame) and not events.empty and "event_id" in events.columns:
+    if (
+        isinstance(events, pd.DataFrame)
+        and not events.empty
+        and "event_id" in events.columns
+    ):
         events_work = events.copy()
         events_work["event_id"] = events_work["event_id"].fillna("").astype(str)
 
@@ -2899,7 +4318,15 @@ def enrich_messages(messages: pd.DataFrame, event_discussions: pd.DataFrame, dis
                         source_col = candidate
                         break
                 if source_col:
-                    keys = out[source_col].fillna("").astype(str).str.split(";").str[0].str.strip().str.lower()
+                    keys = (
+                        out[source_col]
+                        .fillna("")
+                        .astype(str)
+                        .str.split(";")
+                        .str[0]
+                        .str.strip()
+                        .str.lower()
+                    )
                     out["event_id"] = keys.map(topic_map).fillna(out["event_id"])
 
         # Add/fill event title without requiring a merge key to exist.
@@ -2911,12 +4338,16 @@ def enrich_messages(messages: pd.DataFrame, event_discussions: pd.DataFrame, dis
                 .astype(str)
                 .to_dict()
             )
-            mapped_titles = out["event_id"].fillna("").astype(str).map(title_map).fillna("")
+            mapped_titles = (
+                out["event_id"].fillna("").astype(str).map(title_map).fillna("")
+            )
             if "event_title" not in out.columns:
                 out["event_title"] = mapped_titles
             else:
                 current = out["event_title"].fillna("").astype(str)
-                out["event_title"] = current.where(current.str.strip().ne(""), mapped_titles)
+                out["event_title"] = current.where(
+                    current.str.strip().ne(""), mapped_titles
+                )
 
     if "event_title" not in out.columns:
         out["event_title"] = ""
@@ -2928,7 +4359,12 @@ def aggregate_events(events: pd.DataFrame) -> pd.DataFrame:
     if events.empty:
         return events
     df = events.copy()
-    df["title"] = df.get("event_title", "").fillna("Без названия").astype(str).replace("", "Без названия")
+    df["title"] = (
+        df.get("event_title", "")
+        .fillna("Без названия")
+        .astype(str)
+        .replace("", "Без названия")
+    )
     df["group_key"] = df["title"].str.lower().str.strip()
     rows = []
     for key, group in df.groupby("group_key", dropna=False):
@@ -2936,16 +4372,51 @@ def aggregate_events(events: pd.DataFrame) -> pd.DataFrame:
             "group_key": key,
             "title": group["title"].iloc[0],
             "description": pick_event_description(group),
-            "tags": " | ".join(sorted(set("|".join(group.get("main_tags", pd.Series(dtype=str)).fillna("").astype(str)).split("|")) - {""})),
-            "start_date": pd.to_datetime(group.get("start_date"), errors="coerce").min(),
+            "tags": " | ".join(
+                sorted(
+                    set(
+                        "|".join(
+                            group.get("main_tags", pd.Series(dtype=str))
+                            .fillna("")
+                            .astype(str)
+                        ).split("|")
+                    )
+                    - {""}
+                )
+            ),
+            "start_date": pd.to_datetime(
+                group.get("start_date"), errors="coerce"
+            ).min(),
             "end_date": pd.to_datetime(group.get("end_date"), errors="coerce").max(),
-            "message_count": int(pd.to_numeric(group.get("message_count", 0), errors="coerce").fillna(0).sum()),
-            "chat_count": int(pd.to_numeric(group.get("chat_count", 0), errors="coerce").fillna(0).sum()),
-            "negative_count": int(pd.to_numeric(group.get("negative_count", 0), errors="coerce").fillna(0).sum()),
-            "importance_score": float(pd.to_numeric(group.get("importance_score", 0), errors="coerce").fillna(0).max()),
-            "event_ids": list(group["event_id"].astype(str)) if "event_id" in group.columns else [],
+            "message_count": int(
+                pd.to_numeric(group.get("message_count", 0), errors="coerce")
+                .fillna(0)
+                .sum()
+            ),
+            "chat_count": int(
+                pd.to_numeric(group.get("chat_count", 0), errors="coerce")
+                .fillna(0)
+                .sum()
+            ),
+            "negative_count": int(
+                pd.to_numeric(group.get("negative_count", 0), errors="coerce")
+                .fillna(0)
+                .sum()
+            ),
+            "importance_score": float(
+                pd.to_numeric(group.get("importance_score", 0), errors="coerce")
+                .fillna(0)
+                .max()
+            ),
+            "event_ids": (
+                list(group["event_id"].astype(str))
+                if "event_id" in group.columns
+                else []
+            ),
         }
-        row["negative_share"] = row["negative_count"] / row["message_count"] if row["message_count"] else 0
+        row["negative_share"] = (
+            row["negative_count"] / row["message_count"] if row["message_count"] else 0
+        )
         rows.append(row)
     out = pd.DataFrame(rows)
     if not out.empty:
@@ -2955,20 +4426,84 @@ def aggregate_events(events: pd.DataFrame) -> pd.DataFrame:
 
 def build_event_description(group: pd.DataFrame) -> str:
     """Build a neutral, source-agnostic event description."""
-    text = " ".join(group.get("event_summary", pd.Series(dtype=str)).fillna("").astype(str).tolist())
-    tags = " | ".join(sorted(set("|".join(group.get("main_tags", pd.Series(dtype=str)).fillna("").astype(str)).split("|")) - {""}))
+    text = " ".join(
+        group.get("event_summary", pd.Series(dtype=str)).fillna("").astype(str).tolist()
+    )
+    tags = " | ".join(
+        sorted(
+            set(
+                "|".join(
+                    group.get("main_tags", pd.Series(dtype=str)).fillna("").astype(str)
+                ).split("|")
+            )
+            - {""}
+        )
+    )
     low = f"{text} {tags}".lower().replace("ё", "е")
     patterns = [
-        ("проблемы, жалобы и негативный опыт", ["жалоб", "проблем", "негатив", "ошиб", "не работает", "плохо", "брак", "дефект"]),
-        ("цены, стоимость и условия", ["цен", "стоим", "скид", "акци", "тариф", "услов", "дорого", "дешев"]),
-        ("качество продукта или услуги", ["качеств", "материал", "характерист", "свойств", "надежн", "эффектив"]),
-        ("наличие, поставки и логистика", ["достав", "налич", "склад", "постав", "логист", "срок", "отгруз"]),
-        ("монтаж, применение и эксплуатация", ["монтаж", "установ", "примен", "использ", "эксплуатац", "строител", "утепл", "изоляц"]),
-        ("документы, сертификаты и требования", ["сертифик", "документ", "декларац", "гост", "снип", "требован", "стандарт"]),
-        ("безопасность и риски", ["безопас", "пожар", "огне", "горюч", "опасн", "токсич"]),
-        ("экология и энергоэффективность", ["эколог", "энергоэфф", "энергосбереж", "устойчив", "переработ"]),
+        (
+            "проблемы, жалобы и негативный опыт",
+            [
+                "жалоб",
+                "проблем",
+                "негатив",
+                "ошиб",
+                "не работает",
+                "плохо",
+                "брак",
+                "дефект",
+            ],
+        ),
+        (
+            "цены, стоимость и условия",
+            ["цен", "стоим", "скид", "акци", "тариф", "услов", "дорого", "дешев"],
+        ),
+        (
+            "качество продукта или услуги",
+            ["качеств", "материал", "характерист", "свойств", "надежн", "эффектив"],
+        ),
+        (
+            "наличие, поставки и логистика",
+            ["достав", "налич", "склад", "постав", "логист", "срок", "отгруз"],
+        ),
+        (
+            "монтаж, применение и эксплуатация",
+            [
+                "монтаж",
+                "установ",
+                "примен",
+                "использ",
+                "эксплуатац",
+                "строител",
+                "утепл",
+                "изоляц",
+            ],
+        ),
+        (
+            "документы, сертификаты и требования",
+            [
+                "сертифик",
+                "документ",
+                "декларац",
+                "гост",
+                "снип",
+                "требован",
+                "стандарт",
+            ],
+        ),
+        (
+            "безопасность и риски",
+            ["безопас", "пожар", "огне", "горюч", "опасн", "токсич"],
+        ),
+        (
+            "экология и энергоэффективность",
+            ["эколог", "энергоэфф", "энергосбереж", "устойчив", "переработ"],
+        ),
         ("конкуренты и сравнение", ["конкур", "аналог", "сравнен", "рынок", "бренд"]),
-        ("клиентский сервис и поддержка", ["поддерж", "сервис", "менеджер", "дилер", "магазин", "клиент"]),
+        (
+            "клиентский сервис и поддержка",
+            ["поддерж", "сервис", "менеджер", "дилер", "магазин", "клиент"],
+        ),
     ]
     signals = []
     for label, keys in patterns:
@@ -2976,14 +4511,20 @@ def build_event_description(group: pd.DataFrame) -> str:
             signals.append(label)
     if signals:
         return "В теме обсуждались: " + "; ".join(signals[:5]) + "."
-    return f"В теме обсуждались: {tags}." if tags else "В теме обсуждались связанные сообщения выбранного периода."
+    return (
+        f"В теме обсуждались: {tags}."
+        if tags
+        else "В теме обсуждались связанные сообщения выбранного периода."
+    )
 
 
 def pick_event_description(group: pd.DataFrame) -> str:
     """Return manual description if present; otherwise build an automatic one."""
     for col in ["display_description", "manual_description", "event_description"]:
         if col in group.columns:
-            vals = [str(x).strip() for x in group[col].fillna("").tolist() if str(x).strip()]
+            vals = [
+                str(x).strip() for x in group[col].fillna("").tolist() if str(x).strip()
+            ]
             if vals:
                 return vals[0]
     return build_event_description(group)
@@ -3012,10 +4553,15 @@ def get_manual_state(project_id: str) -> dict[str, Any]:
     hidden_messages: set[str] = set()
     hidden_message_keys: dict[str, str] = {}
     for payload in manual_payloads(manual_df, "message_hidden"):
-        message_id = str(payload.get("message_id") or payload.get("_row_key", "").replace("message_hidden::", ""))
+        message_id = str(
+            payload.get("message_id")
+            or payload.get("_row_key", "").replace("message_hidden::", "")
+        )
         if message_id:
             hidden_messages.add(message_id)
-            hidden_message_keys[message_id] = str(payload.get("_row_key") or f"message_hidden::{message_id}")
+            hidden_message_keys[message_id] = str(
+                payload.get("_row_key") or f"message_hidden::{message_id}"
+            )
 
     irrelevant_pairs: set[tuple[str, str]] = set()
     irrelevant_keys: dict[tuple[str, str], str] = {}
@@ -3025,24 +4571,36 @@ def get_manual_state(project_id: str) -> dict[str, Any]:
         if event_id and message_id:
             pair = (event_id, message_id)
             irrelevant_pairs.add(pair)
-            irrelevant_keys[pair] = str(payload.get("_row_key") or f"message_irrelevant::{event_id}::{message_id}")
+            irrelevant_keys[pair] = str(
+                payload.get("_row_key")
+                or f"message_irrelevant::{event_id}::{message_id}"
+            )
 
     move_map: dict[str, str] = {}
     for payload in manual_payloads(manual_df, "message_moves"):
-        message_id = str(payload.get("message_id") or payload.get("_row_key", "").replace("message_move::", ""))
+        message_id = str(
+            payload.get("message_id")
+            or payload.get("_row_key", "").replace("message_move::", "")
+        )
         target_event_id = str(payload.get("target_event_id") or "")
         if message_id and target_event_id:
             move_map[message_id] = target_event_id
 
     event_edits: dict[str, dict[str, Any]] = {}
     for payload in manual_payloads(manual_df, "event_edits"):
-        event_id = str(payload.get("event_id") or payload.get("_row_key", "").replace("event_edit::", ""))
+        event_id = str(
+            payload.get("event_id")
+            or payload.get("_row_key", "").replace("event_edit::", "")
+        )
         if event_id:
             event_edits[event_id] = payload
 
     event_merges: dict[str, str] = {}
     for payload in manual_payloads(manual_df, "event_merges"):
-        source_event_id = str(payload.get("source_event_id") or payload.get("_row_key", "").replace("event_merge::", ""))
+        source_event_id = str(
+            payload.get("source_event_id")
+            or payload.get("_row_key", "").replace("event_merge::", "")
+        )
         target_event_id = str(payload.get("target_event_id") or "")
         if source_event_id and target_event_id:
             event_merges[source_event_id] = target_event_id
@@ -3062,7 +4620,9 @@ def get_manual_state(project_id: str) -> dict[str, Any]:
     }
 
 
-def append_manual_events(events: pd.DataFrame, manual_events: list[dict[str, Any]]) -> pd.DataFrame:
+def append_manual_events(
+    events: pd.DataFrame, manual_events: list[dict[str, Any]]
+) -> pd.DataFrame:
     if not manual_events:
         return events
     rows = []
@@ -3071,21 +4631,23 @@ def append_manual_events(events: pd.DataFrame, manual_events: list[dict[str, Any
         title = str(payload.get("title") or "").strip()
         if not event_id or not title:
             continue
-        rows.append({
-            "event_id": event_id,
-            "event_title": title,
-            "event_summary": str(payload.get("description") or ""),
-            "display_description": str(payload.get("description") or ""),
-            "main_tags": str(payload.get("tags") or "Ручной инфоповод"),
-            "start_date": pd.NaT,
-            "end_date": pd.NaT,
-            "message_count": 0,
-            "chat_count": 0,
-            "negative_count": 0,
-            "importance_score": 0,
-            "status": str(payload.get("status") or "active"),
-            "is_manual_event": True,
-        })
+        rows.append(
+            {
+                "event_id": event_id,
+                "event_title": title,
+                "event_summary": str(payload.get("description") or ""),
+                "display_description": str(payload.get("description") or ""),
+                "main_tags": str(payload.get("tags") or "Ручной инфоповод"),
+                "start_date": pd.NaT,
+                "end_date": pd.NaT,
+                "message_count": 0,
+                "chat_count": 0,
+                "negative_count": 0,
+                "importance_score": 0,
+                "status": str(payload.get("status") or "active"),
+                "is_manual_event": True,
+            }
+        )
     if not rows:
         return events
     extra = pd.DataFrame(rows)
@@ -3094,8 +4656,16 @@ def append_manual_events(events: pd.DataFrame, manual_events: list[dict[str, Any
     return pd.concat([events, extra], ignore_index=True, sort=False)
 
 
-def recompute_event_counts(events: pd.DataFrame, messages: pd.DataFrame) -> pd.DataFrame:
-    if events is None or events.empty or messages is None or messages.empty or "event_id" not in messages.columns:
+def recompute_event_counts(
+    events: pd.DataFrame, messages: pd.DataFrame
+) -> pd.DataFrame:
+    if (
+        events is None
+        or events.empty
+        or messages is None
+        or messages.empty
+        or "event_id" not in messages.columns
+    ):
         return events
     out = events.copy()
     msg = messages.copy()
@@ -3110,11 +4680,32 @@ def recompute_event_counts(events: pd.DataFrame, messages: pd.DataFrame) -> pd.D
             continue
         out.loc[mask, "message_count"] = int(len(group))
         if "chat_title" in group.columns:
-            out.loc[mask, "chat_count"] = int(group["chat_title"].fillna("").astype(str).replace("", pd.NA).dropna().nunique())
+            out.loc[mask, "chat_count"] = int(
+                group["chat_title"]
+                .fillna("")
+                .astype(str)
+                .replace("", pd.NA)
+                .dropna()
+                .nunique()
+            )
         elif "chat_id" in group.columns:
-            out.loc[mask, "chat_count"] = int(group["chat_id"].fillna("").astype(str).replace("", pd.NA).dropna().nunique())
+            out.loc[mask, "chat_count"] = int(
+                group["chat_id"]
+                .fillna("")
+                .astype(str)
+                .replace("", pd.NA)
+                .dropna()
+                .nunique()
+            )
         if "sentiment" in group.columns:
-            out.loc[mask, "negative_count"] = int(group["sentiment"].fillna("").astype(str).str.lower().str.contains("нег").sum())
+            out.loc[mask, "negative_count"] = int(
+                group["sentiment"]
+                .fillna("")
+                .astype(str)
+                .str.lower()
+                .str.contains("нег")
+                .sum()
+            )
         if "datetime" in group.columns:
             dt = pd.to_datetime(group["datetime"], errors="coerce").dropna()
             if not dt.empty:
@@ -3124,14 +4715,23 @@ def recompute_event_counts(events: pd.DataFrame, messages: pd.DataFrame) -> pd.D
 
 
 @st.cache_data(show_spinner=False)
-def apply_manual_overrides(project_id: str, events: pd.DataFrame, messages: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
+def apply_manual_overrides(
+    project_id: str, events: pd.DataFrame, messages: pd.DataFrame
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
     state = get_manual_state(project_id)
     events_out = events.copy() if events is not None else pd.DataFrame()
     messages_out = messages.copy() if messages is not None else pd.DataFrame()
 
     events_out = append_manual_events(events_out, state["manual_events"])
     if not events_out.empty:
-        for col in ["event_id", "event_title", "event_summary", "main_tags", "status", "display_description"]:
+        for col in [
+            "event_id",
+            "event_title",
+            "event_summary",
+            "main_tags",
+            "status",
+            "display_description",
+        ]:
             if col not in events_out.columns:
                 events_out[col] = ""
 
@@ -3144,8 +4744,12 @@ def apply_manual_overrides(project_id: str, events: pd.DataFrame, messages: pd.D
             if str(payload.get("title") or "").strip():
                 events_out.loc[mask, "event_title"] = str(payload.get("title")).strip()
             if "description" in payload:
-                events_out.loc[mask, "display_description"] = str(payload.get("description") or "").strip()
-                events_out.loc[mask, "event_summary"] = str(payload.get("description") or "").strip()
+                events_out.loc[mask, "display_description"] = str(
+                    payload.get("description") or ""
+                ).strip()
+                events_out.loc[mask, "event_summary"] = str(
+                    payload.get("description") or ""
+                ).strip()
             if str(payload.get("tags") or "").strip():
                 events_out.loc[mask, "main_tags"] = str(payload.get("tags")).strip()
             if str(payload.get("status") or "").strip():
@@ -3158,14 +4762,20 @@ def apply_manual_overrides(project_id: str, events: pd.DataFrame, messages: pd.D
             for _, row in events_out.iterrows()
         }
         summary_map = {
-            str(row.get("event_id")): str(row.get("display_description") or row.get("event_summary") or "")
+            str(row.get("event_id")): str(
+                row.get("display_description") or row.get("event_summary") or ""
+            )
             for _, row in events_out.iterrows()
         }
         for source_event_id, target_event_id in state["event_merges"].items():
             mask = events_out["event_id"].astype(str) == str(source_event_id)
             if mask.any():
-                events_out.loc[mask, "event_title"] = title_map.get(str(target_event_id), str(target_event_id))
-                events_out.loc[mask, "display_description"] = summary_map.get(str(target_event_id), "")
+                events_out.loc[mask, "event_title"] = title_map.get(
+                    str(target_event_id), str(target_event_id)
+                )
+                events_out.loc[mask, "display_description"] = summary_map.get(
+                    str(target_event_id), ""
+                )
                 events_out.loc[mask, "merged_into"] = str(target_event_id)
 
     if not messages_out.empty:
@@ -3174,45 +4784,83 @@ def apply_manual_overrides(project_id: str, events: pd.DataFrame, messages: pd.D
         messages_out["message_id"] = messages_out["message_id"].fillna("").astype(str)
 
         if state["hidden_messages"]:
-            messages_out = messages_out[~messages_out["message_id"].isin(state["hidden_messages"])].copy()
+            messages_out = messages_out[
+                ~messages_out["message_id"].isin(state["hidden_messages"])
+            ].copy()
 
         if "event_id" in messages_out.columns:
             messages_out["event_id"] = messages_out["event_id"].fillna("").astype(str)
             if state["event_merges"]:
-                messages_out["event_id"] = messages_out["event_id"].map(lambda x: state["event_merges"].get(str(x), str(x)))
+                messages_out["event_id"] = messages_out["event_id"].map(
+                    lambda x: state["event_merges"].get(str(x), str(x))
+                )
             if state["move_map"]:
-                messages_out["event_id"] = messages_out.apply(lambda r: state["move_map"].get(str(r.get("message_id")), str(r.get("event_id") or "")), axis=1)
+                messages_out["event_id"] = messages_out.apply(
+                    lambda r: state["move_map"].get(
+                        str(r.get("message_id")), str(r.get("event_id") or "")
+                    ),
+                    axis=1,
+                )
 
     # Refresh titles in messages after moves/merges.
-    if not events_out.empty and not messages_out.empty and "event_id" in messages_out.columns:
+    if (
+        not events_out.empty
+        and not messages_out.empty
+        and "event_id" in messages_out.columns
+    ):
         title_map = {
             str(row.get("event_id")): str(row.get("event_title") or "Без названия")
             for _, row in events_out.iterrows()
         }
-        messages_out["event_title"] = messages_out["event_id"].fillna("").astype(str).map(title_map).fillna(messages_out.get("event_title", ""))
+        messages_out["event_title"] = (
+            messages_out["event_id"]
+            .fillna("")
+            .astype(str)
+            .map(title_map)
+            .fillna(messages_out.get("event_title", ""))
+        )
 
     events_out = recompute_event_counts(events_out, messages_out)
 
     # Hide events after counts are recomputed.
     if not events_out.empty and "status" in events_out.columns:
-        events_out = events_out[~events_out["status"].fillna("").astype(str).str.lower().isin(["hidden", "deleted", "archived"])].copy()
+        events_out = events_out[
+            ~events_out["status"]
+            .fillna("")
+            .astype(str)
+            .str.lower()
+            .isin(["hidden", "deleted", "archived"])
+        ].copy()
 
     return events_out, messages_out, state
 
 
-def create_manual_event(project_id: str, title: str, description: str = "", tags: str = "", status: str = "active") -> str:
+def create_manual_event(
+    project_id: str,
+    title: str,
+    description: str = "",
+    tags: str = "",
+    status: str = "active",
+) -> str:
     event_id = "manual_" + uuid.uuid4().hex[:12]
-    save_manual(project_id, "manual_events", f"manual_event::{event_id}", {
-        "event_id": event_id,
-        "title": title.strip(),
-        "description": description.strip(),
-        "tags": tags.strip() or "Ручной инфоповод",
-        "status": status,
-    })
+    save_manual(
+        project_id,
+        "manual_events",
+        f"manual_event::{event_id}",
+        {
+            "event_id": event_id,
+            "title": title.strip(),
+            "description": description.strip(),
+            "tags": tags.strip() or "Ручной инфоповод",
+            "status": status,
+        },
+    )
     return event_id
 
 
-def event_select_options(events_agg: pd.DataFrame, exclude_event_ids: set[str] | None = None) -> list[tuple[str, str]]:
+def event_select_options(
+    events_agg: pd.DataFrame, exclude_event_ids: set[str] | None = None
+) -> list[tuple[str, str]]:
     exclude_event_ids = exclude_event_ids or set()
     options: list[tuple[str, str]] = []
     if events_agg is None or events_agg.empty:
@@ -3228,34 +4876,69 @@ def event_select_options(events_agg: pd.DataFrame, exclude_event_ids: set[str] |
     return options
 
 
-def build_auto_summary(messages: pd.DataFrame, events_agg: pd.DataFrame, periods: pd.DataFrame, selected_period_ids: list[str]) -> str:
+def build_auto_summary(
+    messages: pd.DataFrame,
+    events_agg: pd.DataFrame,
+    periods: pd.DataFrame,
+    selected_period_ids: list[str],
+) -> str:
     total = len(messages)
     chats = messages["chat_title"].nunique() if "chat_title" in messages.columns else 0
     authors = messages["author"].nunique() if "author" in messages.columns else 0
     neg = 0
     if "sentiment" in messages.columns:
-        neg = int(messages["sentiment"].fillna("").astype(str).str.lower().str.contains("нег").sum())
+        neg = int(
+            messages["sentiment"]
+            .fillna("")
+            .astype(str)
+            .str.lower()
+            .str.contains("нег")
+            .sum()
+        )
     neg_share = (neg / total * 100) if total else 0
     period_names = []
     if not periods.empty:
-        subset = periods[periods["period_id"].astype(str).isin([str(x) for x in selected_period_ids])]
-        period_names = [str(x) for x in subset.get("period_name", pd.Series(dtype=str)).tolist()]
+        subset = periods[
+            periods["period_id"].astype(str).isin([str(x) for x in selected_period_ids])
+        ]
+        period_names = [
+            str(x) for x in subset.get("period_name", pd.Series(dtype=str)).tolist()
+        ]
     top_events = events_agg.head(5)["title"].tolist() if not events_agg.empty else []
     top_chats = []
     if "chat_title" in messages.columns:
-        top_chats = messages["chat_title"].fillna("").astype(str).replace("", pd.NA).dropna().value_counts().head(5).index.tolist()
+        top_chats = (
+            messages["chat_title"]
+            .fillna("")
+            .astype(str)
+            .replace("", pd.NA)
+            .dropna()
+            .value_counts()
+            .head(5)
+            .index.tolist()
+        )
 
     lines = []
-    lines.append(f"За выбранный период обработано {total:,} сообщений из {chats:,} чатов; уникальных авторов — {authors:,}.".replace(",", " "))
+    lines.append(
+        f"За выбранный период обработано {total:,} сообщений из {chats:,} чатов; уникальных авторов — {authors:,}.".replace(
+            ",", " "
+        )
+    )
     lines.append(f"Негативных сообщений: {neg:,} ({neg_share:.1f}%).".replace(",", " "))
     if period_names:
-        lines.append("Периоды: " + "; ".join(period_names[:6]) + ("…" if len(period_names) > 6 else ""))
+        lines.append(
+            "Периоды: "
+            + "; ".join(period_names[:6])
+            + ("…" if len(period_names) > 6 else "")
+        )
     if top_events:
         lines.append("Основные инфоповоды: " + "; ".join(top_events) + ".")
     if top_chats:
         lines.append("Наиболее активные чаты: " + "; ".join(top_chats) + ".")
 
-    client_overview = build_client_insights_summary(messages, events_agg, periods, selected_period_ids)
+    client_overview = build_client_insights_summary(
+        messages, events_agg, periods, selected_period_ids
+    )
     if client_overview:
         lines.append(client_overview)
     return "\n\n".join(lines)
@@ -3265,7 +4948,11 @@ def summary_storage_key(period_ids: list[str], profile: str = "") -> str:
     prefix = "summary"
     if is_taxi_project_profile(profile):
         prefix = "summary::taxi"
-    return prefix + "::" + "__".join(sorted(str(x) for x in (period_ids or []) if str(x).strip()))
+    return (
+        prefix
+        + "::"
+        + "__".join(sorted(str(x) for x in (period_ids or []) if str(x).strip()))
+    )
 
 
 def render_period_summary(
@@ -3285,26 +4972,54 @@ def render_period_summary(
     st.subheader("Саммари периода")
     key = summary_storage_key(period_ids, profile)
     manual = get_manual(project_id, key)
-    auto_summary = build_taxi_auto_summary(messages, events_agg, periods, period_ids) if is_taxi_project_profile(profile) else build_auto_summary(messages, events_agg, periods, period_ids)
+    auto_summary = (
+        build_taxi_auto_summary(messages, events_agg, periods, period_ids)
+        if is_taxi_project_profile(profile)
+        else build_auto_summary(messages, events_agg, periods, period_ids)
+    )
     summary_text = str((manual or {}).get("summary") or "").strip() or auto_summary
     st.markdown(summary_text.replace("\n", "  \n"))
 
     metrics = metrics or overview_metrics(messages)
     metrics.setdefault("period_label", selected_period_label(periods, period_ids))
     metrics.setdefault("project_name", project_name)
-    period_label = str(metrics.get("period_label") or selected_period_label(periods, period_ids))
+    period_label = str(
+        metrics.get("period_label") or selected_period_label(periods, period_ids)
+    )
 
     with st.expander("Выгрузить саммари", expanded=False):
-        st.caption("Можно скачать Word, PDF или отдельную PNG-инфографику. В инфографику попадут метрики, тональность, топ-теги, топ-инфоповоды и ключевые тезисы саммари.")
-        render_summary_export_buttons(project_name, period_label, summary_text, metrics, key_prefix=f"summary_export_{abs(hash(key))}", messages=messages, events_agg=events_agg, branding=branding)
+        st.caption(
+            "Можно скачать Word, PDF или отдельную PNG-инфографику. В инфографику попадут метрики, тональность, топ-теги, топ-инфоповоды и ключевые тезисы саммари."
+        )
+        render_summary_export_buttons(
+            project_name,
+            period_label,
+            summary_text,
+            metrics,
+            key_prefix=f"summary_export_{abs(hash(key))}",
+            messages=messages,
+            events_agg=events_agg,
+            branding=branding,
+        )
 
     if role_rank(role) >= role_rank("editor"):
         with st.expander("Редактировать саммари", expanded=False):
-            edited = st.text_area("Текст саммари", value=summary_text, height=220, key=f"summary_{key}")
+            edited = st.text_area(
+                "Текст саммари", value=summary_text, height=220, key=f"summary_{key}"
+            )
             c1, c2 = st.columns(2)
             with c1:
                 if st.button("Сохранить саммари", key=f"save_{key}"):
-                    save_manual(project_id, "summaries", key, {"summary": edited, "period_ids": period_ids, "profile": profile})
+                    save_manual(
+                        project_id,
+                        "summaries",
+                        key,
+                        {
+                            "summary": edited,
+                            "period_ids": period_ids,
+                            "profile": profile,
+                        },
+                    )
                     st.success("Саммари сохранено.")
                     st.rerun()
             with c2:
@@ -3314,22 +5029,54 @@ def render_period_summary(
                     st.rerun()
 
 
-def render_summary(project_id: str, period_ids: list[str], messages: pd.DataFrame, events_agg: pd.DataFrame, periods: pd.DataFrame, role: str) -> None:
+def render_summary(
+    project_id: str,
+    period_ids: list[str],
+    messages: pd.DataFrame,
+    events_agg: pd.DataFrame,
+    periods: pd.DataFrame,
+    role: str,
+) -> None:
     """Backward-compatible wrapper for older calls."""
-    render_period_summary(project_id, "Проект", period_ids, messages, events_agg, periods, role)
+    render_period_summary(
+        project_id, "Проект", period_ids, messages, events_agg, periods, role
+    )
 
 
-def render_period_dynamics(messages: pd.DataFrame, periods: pd.DataFrame, period_ids: list[str]) -> None:
+def render_period_dynamics(
+    messages: pd.DataFrame, periods: pd.DataFrame, period_ids: list[str]
+) -> None:
     if len(period_ids) < 2 or messages.empty or "period_id" not in messages.columns:
         return
     rows = []
     for period_id, group in messages.groupby("period_id"):
         meta = periods[periods["period_id"].astype(str) == str(period_id)]
         name = str(meta.iloc[0].get("period_name") if not meta.empty else period_id)
-        sort_date = pd.to_datetime(meta.iloc[0].get("date_from") if not meta.empty else None, errors="coerce")
-        neg = int(group.get("sentiment", pd.Series(dtype=str)).fillna("").astype(str).str.lower().str.contains("нег").sum()) if "sentiment" in group.columns else 0
+        sort_date = pd.to_datetime(
+            meta.iloc[0].get("date_from") if not meta.empty else None, errors="coerce"
+        )
+        neg = (
+            int(
+                group.get("sentiment", pd.Series(dtype=str))
+                .fillna("")
+                .astype(str)
+                .str.lower()
+                .str.contains("нег")
+                .sum()
+            )
+            if "sentiment" in group.columns
+            else 0
+        )
         total = len(group)
-        rows.append({"period_name": name, "sort_date": sort_date, "Сообщения": total, "Негатив": neg, "Доля негатива, %": round(neg / total * 100, 1) if total else 0})
+        rows.append(
+            {
+                "period_name": name,
+                "sort_date": sort_date,
+                "Сообщения": total,
+                "Негатив": neg,
+                "Доля негатива, %": round(neg / total * 100, 1) if total else 0,
+            }
+        )
     summary = pd.DataFrame(rows)
     if summary.empty:
         return
@@ -3349,41 +5096,76 @@ def render_period_dynamics(messages: pd.DataFrame, periods: pd.DataFrame, period
             index=0,
             key=f"period_dynamics_pie_metric_{abs(hash(tuple(summary['period_name'].astype(str).tolist())))}",
         )
-        _render_value_distribution_donut(chart_df.rename(columns={"period_name": "Период"}), "Период", metric, metric)
+        _render_value_distribution_donut(
+            chart_df.rename(columns={"period_name": "Период"}), "Период", metric, metric
+        )
     elif chart_type == "Столбчатая":
         c1, c2 = st.columns(2)
         with c1:
-            bars = alt.Chart(chart_df).mark_bar(size=70).encode(
-                x=alt.X("period_name:N", sort=None, title="Период", axis=alt.Axis(labelAngle=-90)),
-                y=alt.Y("Сообщения:Q", title="Сообщения"),
-                tooltip=["period_name", alt.Tooltip("Сообщения:Q", format=",")],
+            bars = (
+                alt.Chart(chart_df)
+                .mark_bar(size=70)
+                .encode(
+                    x=alt.X(
+                        "period_name:N",
+                        sort=None,
+                        title="Период",
+                        axis=alt.Axis(labelAngle=-90),
+                    ),
+                    y=alt.Y("Сообщения:Q", title="Сообщения"),
+                    tooltip=["period_name", alt.Tooltip("Сообщения:Q", format=",")],
+                )
             )
             st.altair_chart(bars.properties(height=300), use_container_width=True)
         with c2:
-            neg_bars = alt.Chart(chart_df).mark_bar(size=70).encode(
-                x=alt.X("period_name:N", sort=None, title="Период", axis=alt.Axis(labelAngle=-90)),
-                y=alt.Y("Доля негатива, %:Q", title="Доля негатива, %"),
-                tooltip=["period_name", alt.Tooltip("Доля негатива, %:Q", format=".1f")],
+            neg_bars = (
+                alt.Chart(chart_df)
+                .mark_bar(size=70)
+                .encode(
+                    x=alt.X(
+                        "period_name:N",
+                        sort=None,
+                        title="Период",
+                        axis=alt.Axis(labelAngle=-90),
+                    ),
+                    y=alt.Y("Доля негатива, %:Q", title="Доля негатива, %"),
+                    tooltip=[
+                        "period_name",
+                        alt.Tooltip("Доля негатива, %:Q", format=".1f"),
+                    ],
+                )
             )
             st.altair_chart(neg_bars.properties(height=300), use_container_width=True)
     else:
         c1, c2 = st.columns(2)
         with c1:
-            line = alt.Chart(chart_df).mark_line(point=True).encode(
-                x=alt.X("period_name:N", sort=None, title="Период"),
-                y=alt.Y("Сообщения:Q", title="Сообщения"),
-                tooltip=["period_name", alt.Tooltip("Сообщения:Q", format=",")],
+            line = (
+                alt.Chart(chart_df)
+                .mark_line(point=True)
+                .encode(
+                    x=alt.X("period_name:N", sort=None, title="Период"),
+                    y=alt.Y("Сообщения:Q", title="Сообщения"),
+                    tooltip=["period_name", alt.Tooltip("Сообщения:Q", format=",")],
+                )
             )
             st.altair_chart(line.properties(height=300), use_container_width=True)
         with c2:
-            neg_line = alt.Chart(chart_df).mark_line(point=True).encode(
-                x=alt.X("period_name:N", sort=None, title="Период"),
-                y=alt.Y("Доля негатива, %:Q", title="Доля негатива, %"),
-                tooltip=["period_name", alt.Tooltip("Доля негатива, %:Q", format=".1f")],
+            neg_line = (
+                alt.Chart(chart_df)
+                .mark_line(point=True)
+                .encode(
+                    x=alt.X("period_name:N", sort=None, title="Период"),
+                    y=alt.Y("Доля негатива, %:Q", title="Доля негатива, %"),
+                    tooltip=[
+                        "period_name",
+                        alt.Tooltip("Доля негатива, %:Q", format=".1f"),
+                    ],
+                )
             )
             st.altair_chart(neg_line.properties(height=300), use_container_width=True)
-    st.dataframe(summary.drop(columns=["sort_date"]), hide_index=True, use_container_width=True)
-
+    st.dataframe(
+        summary.drop(columns=["sort_date"]), hide_index=True, use_container_width=True
+    )
 
 
 def selected_event_filter_key(project_id: str | None) -> str:
@@ -3391,11 +5173,17 @@ def selected_event_filter_key(project_id: str | None) -> str:
 
 
 def set_selected_event_filter(project_id: str | None, selected: pd.Series) -> None:
-    event_ids = [str(x) for x in (selected.get("event_ids", []) or []) if str(x).strip()]
+    event_ids = [
+        str(x) for x in (selected.get("event_ids", []) or []) if str(x).strip()
+    ]
     if not event_ids and "event_id" in selected.index:
         event_ids = [str(selected.get("event_id"))]
     st.session_state[selected_event_filter_key(project_id)] = {
-        "title": str(selected.get("title") or selected.get("event_title") or "Выбранный инфоповод"),
+        "title": str(
+            selected.get("title")
+            or selected.get("event_title")
+            or "Выбранный инфоповод"
+        ),
         "event_ids": event_ids,
         "group_key": str(selected.get("group_key") or ""),
     }
@@ -3410,14 +5198,21 @@ def clear_selected_event_filter(project_id: str | None) -> None:
     st.session_state.pop(selected_event_filter_key(project_id), None)
 
 
-def filter_messages_by_selected_event(messages: pd.DataFrame, event_filter: dict[str, Any] | None) -> pd.DataFrame:
+def filter_messages_by_selected_event(
+    messages: pd.DataFrame, event_filter: dict[str, Any] | None
+) -> pd.DataFrame:
     if messages is None or messages.empty or not event_filter:
         return messages
     event_ids = {str(x) for x in event_filter.get("event_ids", []) if str(x).strip()}
     if not event_ids:
         return messages
     mask = pd.Series(False, index=messages.index)
-    for col in ["event_id", "source_event_id", "final_event_id", "source_final_event_id"]:
+    for col in [
+        "event_id",
+        "source_event_id",
+        "final_event_id",
+        "source_final_event_id",
+    ]:
         if col in messages.columns:
             mask = mask | messages[col].fillna("").astype(str).isin(event_ids)
     if mask.any():
@@ -3428,20 +5223,38 @@ def filter_messages_by_selected_event(messages: pd.DataFrame, event_filter: dict
     if title:
         for col in ["event_title", "source_main_topic", "Сюжет"]:
             if col in messages.columns:
-                fallback_mask = messages[col].fillna("").astype(str).str.strip().str.lower().eq(title)
+                fallback_mask = (
+                    messages[col]
+                    .fillna("")
+                    .astype(str)
+                    .str.strip()
+                    .str.lower()
+                    .eq(title)
+                )
                 if fallback_mask.any():
                     return messages[fallback_mask].copy()
     return messages.iloc[0:0].copy()
 
 
 def _event_series_filter(selected: pd.Series) -> dict[str, Any]:
-    event_ids = [str(x) for x in (selected.get("event_ids", []) or []) if str(x).strip()]
+    event_ids = [
+        str(x) for x in (selected.get("event_ids", []) or []) if str(x).strip()
+    ]
     if not event_ids and "event_id" in selected.index:
         event_ids = [str(selected.get("event_id"))]
     return {
-        "title": str(selected.get("title") or selected.get("event_title") or "Выбранный инфоповод"),
+        "title": str(
+            selected.get("title")
+            or selected.get("event_title")
+            or "Выбранный инфоповод"
+        ),
         "event_ids": event_ids,
-        "group_key": str(selected.get("group_key") or selected.get("event_id") or selected.get("title") or "event"),
+        "group_key": str(
+            selected.get("group_key")
+            or selected.get("event_id")
+            or selected.get("title")
+            or "event"
+        ),
     }
 
 
@@ -3450,7 +5263,12 @@ def _event_tags_text(selected: pd.Series, event_messages: pd.DataFrame) -> str:
     for col in ["tags", "main_tags", "display_tags", "source_topics"]:
         if col in selected.index:
             values.extend(split_pipe_values(str(selected.get(col) or "")))
-    if not values and isinstance(event_messages, pd.DataFrame) and not event_messages.empty and "tags" in event_messages.columns:
+    if (
+        not values
+        and isinstance(event_messages, pd.DataFrame)
+        and not event_messages.empty
+        and "tags" in event_messages.columns
+    ):
         for item in event_messages["tags"].fillna("").astype(str).head(500).tolist():
             values.extend(split_pipe_values(item))
     seen: set[str] = set()
@@ -3464,11 +5282,22 @@ def _event_tags_text(selected: pd.Series, event_messages: pd.DataFrame) -> str:
 
 
 def _event_auto_summary(selected: pd.Series, event_messages: pd.DataFrame) -> str:
-    description = str(selected.get("description") or selected.get("display_description") or selected.get("summary") or "").strip()
+    description = str(
+        selected.get("description")
+        or selected.get("display_description")
+        or selected.get("summary")
+        or ""
+    ).strip()
     if description:
         return description
-    title = str(selected.get("title") or selected.get("event_title") or "инфоповод").strip()
-    count = int(len(event_messages)) if isinstance(event_messages, pd.DataFrame) else int(selected.get("message_count", 0) or 0)
+    title = str(
+        selected.get("title") or selected.get("event_title") or "инфоповод"
+    ).strip()
+    count = (
+        int(len(event_messages))
+        if isinstance(event_messages, pd.DataFrame)
+        else int(selected.get("message_count", 0) or 0)
+    )
     negative_count = 0
     if isinstance(event_messages, pd.DataFrame) and not event_messages.empty:
         sent = sentiment_counts(event_messages)
@@ -3476,11 +5305,15 @@ def _event_auto_summary(selected: pd.Series, event_messages: pd.DataFrame) -> st
     return f"В теме «{title}» собрано {format_int(count)} сообщений. Негативных сообщений: {format_int(negative_count)}."
 
 
-def render_selected_event_detail(project_id: str, selected: pd.Series, messages: pd.DataFrame) -> None:
+def render_selected_event_detail(
+    project_id: str, selected: pd.Series, messages: pd.DataFrame
+) -> None:
     """Render a unified selected-infopoint card across all project profiles."""
     event_filter = _event_series_filter(selected)
     event_messages = filter_messages_by_selected_event(messages, event_filter)
-    title = str(selected.get("title") or selected.get("event_title") or "Выбранный инфоповод")
+    title = str(
+        selected.get("title") or selected.get("event_title") or "Выбранный инфоповод"
+    )
     summary = _event_auto_summary(selected, event_messages)
     tags_text = _event_tags_text(selected, event_messages)
 
@@ -3488,20 +5321,40 @@ def render_selected_event_detail(project_id: str, selected: pd.Series, messages:
     if summary:
         st.info(summary)
 
-    metrics = overview_metrics(event_messages if isinstance(event_messages, pd.DataFrame) else pd.DataFrame())
+    metrics = overview_metrics(
+        event_messages if isinstance(event_messages, pd.DataFrame) else pd.DataFrame()
+    )
     sent = metrics.get("sentiment", {}) or {}
     total = int(sent.get("total", metrics.get("messages", 0)) or 0)
     chat_count = int(selected.get("chat_count", 0) or 0)
-    if not chat_count and isinstance(event_messages, pd.DataFrame) and not event_messages.empty:
+    if (
+        not chat_count
+        and isinstance(event_messages, pd.DataFrame)
+        and not event_messages.empty
+    ):
         for col in ["chat_title", "platform", "source", "Источник", "Место публикации"]:
             if col in event_messages.columns:
-                chat_count = int(event_messages[col].fillna("").astype(str).replace("", pd.NA).dropna().nunique())
+                chat_count = int(
+                    event_messages[col]
+                    .fillna("")
+                    .astype(str)
+                    .replace("", pd.NA)
+                    .dropna()
+                    .nunique()
+                )
                 break
     author_count = 0
     if isinstance(event_messages, pd.DataFrame) and not event_messages.empty:
         for col in ["author", "Автор"]:
             if col in event_messages.columns:
-                author_count = int(event_messages[col].fillna("").astype(str).replace("", pd.NA).dropna().nunique())
+                author_count = int(
+                    event_messages[col]
+                    .fillna("")
+                    .astype(str)
+                    .replace("", pd.NA)
+                    .dropna()
+                    .nunique()
+                )
                 break
 
     c1, c2, c3, c4, c5 = st.columns(5)
@@ -3509,7 +5362,9 @@ def render_selected_event_detail(project_id: str, selected: pd.Series, messages:
     c2.metric("Источников/чатов", format_int(chat_count))
     c3.metric("Авторов", format_int(author_count))
     c4.metric("Негатив", percent_text(int(sent.get("negative", 0) or 0), total))
-    c5.metric("Важность", str(round(float(selected.get("importance_score", 0) or 0), 2)))
+    c5.metric(
+        "Важность", str(round(float(selected.get("importance_score", 0) or 0), 2))
+    )
 
     m1, m2, m3 = st.columns(3)
     m1.metric("Аудитория", format_int(metrics.get("audience", 0)))
@@ -3519,7 +5374,9 @@ def render_selected_event_detail(project_id: str, selected: pd.Series, messages:
     if tags_text:
         st.caption(f"Теги: {tags_text}")
     if isinstance(event_messages, pd.DataFrame):
-        st.caption(f"В выбранном инфоповоде найдено сообщений: {format_int(len(event_messages))}.")
+        st.caption(
+            f"В выбранном инфоповоде найдено сообщений: {format_int(len(event_messages))}."
+        )
 
     mode = st.radio(
         "Сообщения инфоповода",
@@ -3536,35 +5393,62 @@ def render_selected_event_detail(project_id: str, selected: pd.Series, messages:
     text_col = message_text_column(work)
     link_col = message_link_column(work)
     work["_audience"] = numeric_series(work, ["audience", "Аудитория"]).astype(int)
-    work["_reach"] = numeric_series(work, ["views", "Просмотры", "Просмотров", "reach", "Охват"]).astype(int)
-    work["_engagement"] = numeric_series(work, ["engagement", "Вовлечённость", "Вовлеченность", "engagement_count"]).astype(int)
+    work["_reach"] = numeric_series(
+        work, ["views", "Просмотры", "Просмотров", "reach", "Охват"]
+    ).astype(int)
+    work["_engagement"] = numeric_series(
+        work, ["engagement", "Вовлечённость", "Вовлеченность", "engagement_count"]
+    ).astype(int)
 
     if mode == "Ключевые сообщения":
-        st.caption("Показаны топ-15 сообщений выбранного инфоповода по вовлеченности. Если вовлеченность равна 0, учитываются охват и аудитория.")
-        view = work.sort_values(["_engagement", "_reach", "_audience"], ascending=False).head(15).copy()
+        st.caption(
+            "Показаны топ-15 сообщений выбранного инфоповода по вовлеченности. Если вовлеченность равна 0, учитываются охват и аудитория."
+        )
+        view = (
+            work.sort_values(["_engagement", "_reach", "_audience"], ascending=False)
+            .head(15)
+            .copy()
+        )
     else:
         search_key = f"selected_event_feed_search_{project_id}_{abs(hash(str(event_filter.get('group_key'))))}"
-        search = st.text_input("Поиск по ленте инфоповода", placeholder="Введите слово или фразу", key=search_key)
+        search = st.text_input(
+            "Поиск по ленте инфоповода",
+            placeholder="Введите слово или фразу",
+            key=search_key,
+        )
         view = work.copy()
         if search.strip() and text_col:
-            view = view[view[text_col].fillna("").astype(str).str.contains(search.strip(), case=False, regex=False)]
-        view = view.sort_values("datetime", ascending=False) if "datetime" in view.columns else view
+            view = view[
+                view[text_col]
+                .fillna("")
+                .astype(str)
+                .str.contains(search.strip(), case=False, regex=False)
+            ]
+        view = (
+            view.sort_values("datetime", ascending=False)
+            if "datetime" in view.columns
+            else view
+        )
         total_found = int(len(view))
-        page_size = int(st.selectbox(
-            "Сообщений на странице",
-            [25, 50, 100, 200],
-            index=1,
-            key=f"selected_event_feed_page_size_{project_id}_{abs(hash(str(event_filter.get('group_key'))))}",
-        ))
+        page_size = int(
+            st.selectbox(
+                "Сообщений на странице",
+                [25, 50, 100, 200],
+                index=1,
+                key=f"selected_event_feed_page_size_{project_id}_{abs(hash(str(event_filter.get('group_key'))))}",
+            )
+        )
         total_pages = max(1, (total_found + page_size - 1) // page_size)
-        page = int(st.number_input(
-            "Страница",
-            min_value=1,
-            max_value=total_pages,
-            value=1,
-            step=1,
-            key=f"selected_event_feed_page_{project_id}_{abs(hash(str(event_filter.get('group_key'))))}",
-        ))
+        page = int(
+            st.number_input(
+                "Страница",
+                min_value=1,
+                max_value=total_pages,
+                value=1,
+                step=1,
+                key=f"selected_event_feed_page_{project_id}_{abs(hash(str(event_filter.get('group_key'))))}",
+            )
+        )
         start = (page - 1) * page_size
         end = start + page_size
         st.caption(
@@ -3588,10 +5472,14 @@ def render_events(
 
     if can_edit:
         with st.expander("Создать инфоповод вручную", expanded=False):
-            title = st.text_input("Название нового инфоповода", key="new_manual_event_title")
+            title = st.text_input(
+                "Название нового инфоповода", key="new_manual_event_title"
+            )
             description = st.text_area("Описание", key="new_manual_event_description")
             tags = st.text_input("Теги", key="new_manual_event_tags")
-            if st.button("Создать инфоповод", type="primary", key="create_manual_event"):
+            if st.button(
+                "Создать инфоповод", type="primary", key="create_manual_event"
+            ):
                 if not title.strip():
                     st.error("Укажите название инфоповода.")
                 else:
@@ -3603,32 +5491,63 @@ def render_events(
         st.info("Инфоповоды не найдены.")
         return
 
-    word = st.text_input("Фильтр по слову в сообщениях", placeholder="Например: доставка, качество, сертификат")
+    word = st.text_input(
+        "Фильтр по слову в сообщениях",
+        placeholder="Например: доставка, качество, сертификат",
+    )
     filtered_events = events_agg.copy()
     filtered_messages = messages.copy()
 
     text_col = message_text_column(filtered_messages)
     if word.strip() and text_col:
-        mask = filtered_messages[text_col].fillna("").astype(str).str.contains(word.strip(), case=False, regex=False)
+        mask = (
+            filtered_messages[text_col]
+            .fillna("")
+            .astype(str)
+            .str.contains(word.strip(), case=False, regex=False)
+        )
         filtered_messages = filtered_messages[mask]
         if "event_id" in filtered_messages.columns:
             allowed = set(filtered_messages["event_id"].dropna().astype(str))
-            filtered_events = filtered_events[filtered_events["event_ids"].apply(lambda ids: bool(set(map(str, ids)) & allowed))]
+            filtered_events = filtered_events[
+                filtered_events["event_ids"].apply(
+                    lambda ids: bool(set(map(str, ids)) & allowed)
+                )
+            ]
         st.caption(f"Найдено сообщений: {len(filtered_messages):,}".replace(",", " "))
         msg_view = filtered_messages.copy()
         if not msg_view.empty:
             msg_view["Дата"] = msg_view.get("datetime", "").apply(fmt_date)
             if text_col:
-                msg_view["Текст"] = msg_view[text_col].fillna("").astype(str).str.slice(0, 700)
+                msg_view["Текст"] = (
+                    msg_view[text_col].fillna("").astype(str).str.slice(0, 700)
+                )
             link_col = message_link_column(msg_view)
-            msg_view["Ссылка"] = msg_view[link_col].fillna("").astype(str) if link_col else ""
-            columns = [c for c in ["Дата", "chat_title", "author", "event_title", "Текст", "Ссылка"] if c in msg_view.columns]
+            msg_view["Ссылка"] = (
+                msg_view[link_col].fillna("").astype(str) if link_col else ""
+            )
+            columns = [
+                c
+                for c in [
+                    "Дата",
+                    "chat_title",
+                    "author",
+                    "event_title",
+                    "Текст",
+                    "Ссылка",
+                ]
+                if c in msg_view.columns
+            ]
             st.dataframe(
-                msg_view[columns].rename(columns={
-                    "chat_title": "Источник/площадка",
-                    "author": "Автор",
-                    "event_title": "Инфоповод",
-                }).head(500),
+                msg_view[columns]
+                .rename(
+                    columns={
+                        "chat_title": "Источник/площадка",
+                        "author": "Автор",
+                        "event_title": "Инфоповод",
+                    }
+                )
+                .head(500),
                 hide_index=True,
                 use_container_width=True,
                 column_config={"Ссылка": st.column_config.LinkColumn("Ссылка")},
@@ -3636,20 +5555,40 @@ def render_events(
 
     table = filtered_events.copy()
     table["Период"] = table.apply(
-        lambda r: f"{fmt_date(r.get('start_date'))}–{fmt_date(r.get('end_date'))}"
-        if fmt_date(r.get("start_date")) != fmt_date(r.get("end_date"))
-        else fmt_date(r.get("start_date")),
+        lambda r: (
+            f"{fmt_date(r.get('start_date'))}–{fmt_date(r.get('end_date'))}"
+            if fmt_date(r.get("start_date")) != fmt_date(r.get("end_date"))
+            else fmt_date(r.get("start_date"))
+        ),
         axis=1,
     )
     table["Негатив"] = (table["negative_share"] * 100).round(1).astype(str) + "%"
-    show = table[["title", "description", "Период", "message_count", "chat_count", "Негатив", "importance_score"]].rename(columns={
-        "title": "Сюжет / инфоповод",
-        "description": "Описание",
-        "message_count": "Сообщений",
-        "chat_count": "Источников",
-        "importance_score": "Важность",
-    })
-    event = st.dataframe(show, hide_index=True, use_container_width=True, selection_mode="single-row", on_select="rerun")
+    show = table[
+        [
+            "title",
+            "description",
+            "Период",
+            "message_count",
+            "chat_count",
+            "Негатив",
+            "importance_score",
+        ]
+    ].rename(
+        columns={
+            "title": "Сюжет / инфоповод",
+            "description": "Описание",
+            "message_count": "Сообщений",
+            "chat_count": "Источников",
+            "importance_score": "Важность",
+        }
+    )
+    event = st.dataframe(
+        show,
+        hide_index=True,
+        use_container_width=True,
+        selection_mode="single-row",
+        on_select="rerun",
+    )
 
     rows = getattr(event, "selection", {}).get("rows", []) if event is not None else []
     if not rows:
@@ -3662,51 +5601,94 @@ def render_events(
 
     if can_edit:
         with st.expander("Правка выбранного инфоповода", expanded=False):
-            new_title = st.text_input("Название", value=str(selected.get("title") or ""), key=f"edit_title_{selected.get('group_key')}")
-            new_desc = st.text_area("Описание", value=str(selected.get("description") or ""), height=160, key=f"edit_desc_{selected.get('group_key')}")
-            new_tags = st.text_input("Теги", value=str(selected.get("tags") or ""), key=f"edit_tags_{selected.get('group_key')}")
+            new_title = st.text_input(
+                "Название",
+                value=str(selected.get("title") or ""),
+                key=f"edit_title_{selected.get('group_key')}",
+            )
+            new_desc = st.text_area(
+                "Описание",
+                value=str(selected.get("description") or ""),
+                height=160,
+                key=f"edit_desc_{selected.get('group_key')}",
+            )
+            new_tags = st.text_input(
+                "Теги",
+                value=str(selected.get("tags") or ""),
+                key=f"edit_tags_{selected.get('group_key')}",
+            )
             c1, c2, c3 = st.columns(3)
             with c1:
-                if st.button("Сохранить правки", key=f"save_event_edit_{selected.get('group_key')}"):
+                if st.button(
+                    "Сохранить правки",
+                    key=f"save_event_edit_{selected.get('group_key')}",
+                ):
                     for event_id in selected_ids:
-                        save_manual(project_id, "event_edits", f"event_edit::{event_id}", {
-                            "event_id": event_id,
-                            "title": new_title,
-                            "description": new_desc,
-                            "tags": new_tags,
-                            "status": "active",
-                        })
+                        save_manual(
+                            project_id,
+                            "event_edits",
+                            f"event_edit::{event_id}",
+                            {
+                                "event_id": event_id,
+                                "title": new_title,
+                                "description": new_desc,
+                                "tags": new_tags,
+                                "status": "active",
+                            },
+                        )
                     st.success("Правки сохранены.")
                     st.rerun()
             with c2:
-                if st.button("Скрыть инфоповод", key=f"hide_event_{selected.get('group_key')}"):
+                if st.button(
+                    "Скрыть инфоповод", key=f"hide_event_{selected.get('group_key')}"
+                ):
                     for event_id in selected_ids:
-                        save_manual(project_id, "event_edits", f"event_edit::{event_id}", {
-                            "event_id": event_id,
-                            "title": new_title,
-                            "description": new_desc,
-                            "tags": new_tags,
-                            "status": "hidden",
-                        })
+                        save_manual(
+                            project_id,
+                            "event_edits",
+                            f"event_edit::{event_id}",
+                            {
+                                "event_id": event_id,
+                                "title": new_title,
+                                "description": new_desc,
+                                "tags": new_tags,
+                                "status": "hidden",
+                            },
+                        )
                     st.success("Инфоповод скрыт.")
                     st.rerun()
             with c3:
-                options = event_select_options(events_agg, exclude_event_ids=selected_ids)
+                options = event_select_options(
+                    events_agg, exclude_event_ids=selected_ids
+                )
                 if options:
-                    target = st.selectbox("Объединить с темой", options, format_func=lambda x: x[1], key=f"merge_target_{selected.get('group_key')}")
-                    if st.button("Объединить", key=f"merge_event_{selected.get('group_key')}"):
+                    target = st.selectbox(
+                        "Объединить с темой",
+                        options,
+                        format_func=lambda x: x[1],
+                        key=f"merge_target_{selected.get('group_key')}",
+                    )
+                    if st.button(
+                        "Объединить", key=f"merge_event_{selected.get('group_key')}"
+                    ):
                         target_event_id = target[0]
                         for source_event_id in selected_ids:
                             if source_event_id != target_event_id:
-                                save_manual(project_id, "event_merges", f"event_merge::{source_event_id}", {
-                                    "source_event_id": source_event_id,
-                                    "target_event_id": target_event_id,
-                                })
+                                save_manual(
+                                    project_id,
+                                    "event_merges",
+                                    f"event_merge::{source_event_id}",
+                                    {
+                                        "source_event_id": source_event_id,
+                                        "target_event_id": target_event_id,
+                                    },
+                                )
                         st.success("Инфоповоды объединены.")
                         st.rerun()
 
-    st.caption("Этот же инфоповод сохранен как фильтр для общего раздела «Ключевые сообщения / Вся лента».")
-
+    st.caption(
+        "Этот же инфоповод сохранен как фильтр для общего раздела «Ключевые сообщения / Вся лента»."
+    )
 
 
 def _value_from_row(row: pd.Series, *columns: str) -> str:
@@ -3719,7 +5701,9 @@ def _value_from_row(row: pd.Series, *columns: str) -> str:
     return ""
 
 
-def _render_message_list(view: pd.DataFrame, *, text_col: str | None, link_col: str | None) -> None:
+def _render_message_list(
+    view: pd.DataFrame, *, text_col: str | None, link_col: str | None
+) -> None:
     """Render messages as readable cards instead of a dataframe."""
     if view is None or view.empty:
         st.info("Сообщений для показа нет.")
@@ -3727,7 +5711,9 @@ def _render_message_list(view: pd.DataFrame, *, text_col: str | None, link_col: 
 
     for _, row in view.iterrows():
         date_text = fmt_date(row.get("datetime")) if "datetime" in row.index else ""
-        source = _value_from_row(row, "chat_title", "platform", "source", "Источник", "Место публикации")
+        source = _value_from_row(
+            row, "chat_title", "platform", "source", "Источник", "Место публикации"
+        )
         author = _value_from_row(row, "author", "Автор")
         sentiment = _value_from_row(row, "sentiment", "Тональность")
         event_title = _value_from_row(row, "event_title", "source_main_topic", "Сюжет")
@@ -3739,7 +5725,11 @@ def _render_message_list(view: pd.DataFrame, *, text_col: str | None, link_col: 
         link = str(row.get(link_col, "") or "").strip() if link_col else ""
 
         meta_parts = [part for part in [date_text, source, author, sentiment] if part]
-        metrics_parts = [f"аудитория: {format_int(audience)}", f"охват: {format_int(reach)}", f"вовлеченность: {format_int(engagement)}"]
+        metrics_parts = [
+            f"аудитория: {format_int(audience)}",
+            f"охват: {format_int(reach)}",
+            f"вовлеченность: {format_int(engagement)}",
+        ]
 
         st.markdown("---")
         if meta_parts:
@@ -3754,7 +5744,9 @@ def _render_message_list(view: pd.DataFrame, *, text_col: str | None, link_col: 
             st.markdown(f"[Открыть сообщение]({link})")
 
 
-def render_messages_block(messages: pd.DataFrame, *, project_id: str | None = None) -> None:
+def render_messages_block(
+    messages: pd.DataFrame, *, project_id: str | None = None
+) -> None:
     """Render key messages and full feed as a readable list.
 
     If an event was selected in the «Инфоповоды» section, both modes are
@@ -3770,9 +5762,15 @@ def render_messages_block(messages: pd.DataFrame, *, project_id: str | None = No
     if event_filter:
         c1, c2 = st.columns([4, 1])
         with c1:
-            st.info(f"Выбран инфоповод: {event_filter.get('title')}. В топе и общей ленте показаны только сообщения этого инфоповода.")
+            st.info(
+                f"Выбран инфоповод: {event_filter.get('title')}. В топе и общей ленте показаны только сообщения этого инфоповода."
+            )
         with c2:
-            if st.button("Сбросить фильтр", key=f"clear_event_message_filter_{project_id or 'global'}", use_container_width=True):
+            if st.button(
+                "Сбросить фильтр",
+                key=f"clear_event_message_filter_{project_id or 'global'}",
+                use_container_width=True,
+            ):
                 clear_selected_event_filter(project_id)
                 st.rerun()
 
@@ -3787,29 +5785,70 @@ def render_messages_block(messages: pd.DataFrame, *, project_id: str | None = No
     if event_filter:
         work = filter_messages_by_selected_event(work, event_filter)
         if work.empty:
-            st.warning("По выбранному инфоповоду сообщения не найдены. Возможно, данные были пересобраны или связи инфоповодов изменились.")
+            st.warning(
+                "По выбранному инфоповоду сообщения не найдены. Возможно, данные были пересобраны или связи инфоповодов изменились."
+            )
             return
     text_col = message_text_column(work)
     link_col = message_link_column(work)
     work["_audience"] = numeric_series(work, ["audience", "Аудитория"]).astype(int)
-    work["_reach"] = numeric_series(work, ["views", "Просмотры", "Просмотров", "reach", "Охват"]).astype(int)
-    work["_engagement"] = numeric_series(work, ["engagement", "Вовлечённость", "Вовлеченность", "engagement_count"]).astype(int)
+    work["_reach"] = numeric_series(
+        work, ["views", "Просмотры", "Просмотров", "reach", "Охват"]
+    ).astype(int)
+    work["_engagement"] = numeric_series(
+        work, ["engagement", "Вовлечённость", "Вовлеченность", "engagement_count"]
+    ).astype(int)
 
     if mode == "Ключевые сообщения":
         scope = "выбранного инфоповода" if event_filter else "всей выборки"
-        st.caption(f"Показаны 15 сообщений с максимальной вовлеченностью для {scope}. Если вовлеченность равна 0, дополнительными критериями выступают охват и аудитория.")
-        view = work.sort_values(["_engagement", "_reach", "_audience"], ascending=False).head(15).copy()
+        st.caption(
+            f"Показаны 15 сообщений с максимальной вовлеченностью для {scope}. Если вовлеченность равна 0, дополнительными критериями выступают охват и аудитория."
+        )
+        view = (
+            work.sort_values(["_engagement", "_reach", "_audience"], ascending=False)
+            .head(15)
+            .copy()
+        )
     else:
-        search = st.text_input("Поиск по всей ленте", placeholder="Введите слово или фразу", key="full_feed_search")
+        search = st.text_input(
+            "Поиск по всей ленте",
+            placeholder="Введите слово или фразу",
+            key="full_feed_search",
+        )
         view = work.copy()
         if search.strip() and text_col:
-            view = view[view[text_col].fillna("").astype(str).str.contains(search.strip(), case=False, regex=False)]
-        view = view.sort_values("datetime", ascending=False) if "datetime" in view.columns else view
+            view = view[
+                view[text_col]
+                .fillna("")
+                .astype(str)
+                .str.contains(search.strip(), case=False, regex=False)
+            ]
+        view = (
+            view.sort_values("datetime", ascending=False)
+            if "datetime" in view.columns
+            else view
+        )
 
         total_found = int(len(view))
-        page_size = int(st.selectbox("Сообщений на странице", [25, 50, 100, 200], index=1, key="full_feed_page_size"))
+        page_size = int(
+            st.selectbox(
+                "Сообщений на странице",
+                [25, 50, 100, 200],
+                index=1,
+                key="full_feed_page_size",
+            )
+        )
         total_pages = max(1, (total_found + page_size - 1) // page_size)
-        page = int(st.number_input("Страница", min_value=1, max_value=total_pages, value=min(int(st.session_state.get("full_feed_page", 1)), total_pages), step=1, key="full_feed_page"))
+        page = int(
+            st.number_input(
+                "Страница",
+                min_value=1,
+                max_value=total_pages,
+                value=min(int(st.session_state.get("full_feed_page", 1)), total_pages),
+                step=1,
+                key="full_feed_page",
+            )
+        )
         start = (page - 1) * page_size
         end = start + page_size
         st.caption(
@@ -3821,7 +5860,6 @@ def render_messages_block(messages: pd.DataFrame, *, project_id: str | None = No
     _render_message_list(view, text_col=text_col, link_col=link_col)
 
 
-
 # -----------------------------------------------------------------------------
 # Driver chats dashboard profile
 # -----------------------------------------------------------------------------
@@ -3831,9 +5869,20 @@ def taxi_bool_negative(messages: pd.DataFrame) -> pd.Series:
     if messages is None or messages.empty:
         return pd.Series(dtype=bool)
     if "is_negative" in messages.columns:
-        return messages["is_negative"].astype(str).str.lower().isin(["true", "1", "yes", "да", "негатив", "negative"])
+        return (
+            messages["is_negative"]
+            .astype(str)
+            .str.lower()
+            .isin(["true", "1", "yes", "да", "негатив", "negative"])
+        )
     if "sentiment" in messages.columns:
-        return messages["sentiment"].fillna("").astype(str).str.lower().str.contains("нег|negative|отриц", regex=True, na=False)
+        return (
+            messages["sentiment"]
+            .fillna("")
+            .astype(str)
+            .str.lower()
+            .str.contains("нег|negative|отриц", regex=True, na=False)
+        )
     return pd.Series([False] * len(messages), index=messages.index)
 
 
@@ -3841,29 +5890,87 @@ def taxi_bool_positive(messages: pd.DataFrame) -> pd.Series:
     if messages is None or messages.empty:
         return pd.Series(dtype=bool)
     if "sentiment" in messages.columns:
-        return messages["sentiment"].fillna("").astype(str).str.lower().str.contains("позит|positive|полож", regex=True, na=False)
+        return (
+            messages["sentiment"]
+            .fillna("")
+            .astype(str)
+            .str.lower()
+            .str.contains("позит|positive|полож", regex=True, na=False)
+        )
     return pd.Series([False] * len(messages), index=messages.index)
 
 
-def render_taxi_overview_statistics(events_agg: pd.DataFrame, messages: pd.DataFrame) -> None:
+def render_taxi_overview_statistics(
+    events_agg: pd.DataFrame, messages: pd.DataFrame
+) -> None:
     """Top-level metrics for the driver-chat profile."""
     st.subheader("Статистика")
     total_messages = int(len(messages)) if isinstance(messages, pd.DataFrame) else 0
-    chat_col = "chat_title" if isinstance(messages, pd.DataFrame) and "chat_title" in messages.columns else "chat_id" if isinstance(messages, pd.DataFrame) and "chat_id" in messages.columns else None
-    author_col = "author" if isinstance(messages, pd.DataFrame) and "author" in messages.columns else "author_id" if isinstance(messages, pd.DataFrame) and "author_id" in messages.columns else None
-    chat_count = int(messages[chat_col].fillna("").astype(str).replace("", pd.NA).dropna().nunique()) if chat_col and total_messages else 0
-    author_count = int(messages[author_col].fillna("").astype(str).replace("", pd.NA).dropna().nunique()) if author_col and total_messages else 0
+    chat_col = (
+        "chat_title"
+        if isinstance(messages, pd.DataFrame) and "chat_title" in messages.columns
+        else (
+            "chat_id"
+            if isinstance(messages, pd.DataFrame) and "chat_id" in messages.columns
+            else None
+        )
+    )
+    author_col = (
+        "author"
+        if isinstance(messages, pd.DataFrame) and "author" in messages.columns
+        else (
+            "author_id"
+            if isinstance(messages, pd.DataFrame) and "author_id" in messages.columns
+            else None
+        )
+    )
+    chat_count = (
+        int(
+            messages[chat_col]
+            .fillna("")
+            .astype(str)
+            .replace("", pd.NA)
+            .dropna()
+            .nunique()
+        )
+        if chat_col and total_messages
+        else 0
+    )
+    author_count = (
+        int(
+            messages[author_col]
+            .fillna("")
+            .astype(str)
+            .replace("", pd.NA)
+            .dropna()
+            .nunique()
+        )
+        if author_col and total_messages
+        else 0
+    )
     neg_count = int(taxi_bool_negative(messages).sum()) if total_messages else 0
     high_count = 0
-    if isinstance(events_agg, pd.DataFrame) and not events_agg.empty and "importance_score" in events_agg.columns:
-        importance = pd.to_numeric(events_agg["importance_score"], errors="coerce").fillna(0)
+    if (
+        isinstance(events_agg, pd.DataFrame)
+        and not events_agg.empty
+        and "importance_score" in events_agg.columns
+    ):
+        importance = pd.to_numeric(
+            events_agg["importance_score"], errors="coerce"
+        ).fillna(0)
         threshold = float(importance.quantile(0.75)) if len(importance) else 0
         high_count = int((importance >= threshold).sum()) if threshold else 0
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Инфоповодов", format_int(len(events_agg) if isinstance(events_agg, pd.DataFrame) else 0))
+    c1.metric(
+        "Инфоповодов",
+        format_int(len(events_agg) if isinstance(events_agg, pd.DataFrame) else 0),
+    )
     c2.metric("Сообщений", format_int(total_messages))
     c3.metric("Чатов", format_int(chat_count))
-    c4.metric("Негатив", f"{(neg_count / total_messages * 100):.0f}%" if total_messages else "0%")
+    c4.metric(
+        "Негатив",
+        f"{(neg_count / total_messages * 100):.0f}%" if total_messages else "0%",
+    )
     c5.metric("Высокая важность", format_int(high_count))
     if author_count:
         st.caption(f"Уникальных авторов: {format_int(author_count)}")
@@ -3875,26 +5982,85 @@ def normalize_taxi_text(value: Any) -> str:
 
 def taxi_macro_title(row: pd.Series) -> str:
     """Map detailed taxi events to report-level topics."""
-    text = normalize_taxi_text(" ".join([
-        str(row.get("event_title") or ""),
-        str(row.get("event_summary") or ""),
-        str(row.get("display_description") or ""),
-        str(row.get("main_tags") or ""),
-        str(row.get("microtopic") or ""),
-    ]))
+    text = normalize_taxi_text(
+        " ".join(
+            [
+                str(row.get("event_title") or ""),
+                str(row.get("event_summary") or ""),
+                str(row.get("display_description") or ""),
+                str(row.get("main_tags") or ""),
+                str(row.get("microtopic") or ""),
+            ]
+        )
+    )
     rules = [
-        ("Забастовка, бойкот и коллективные действия", ["strike", "забаст", "бойкот", "стачк", "митинг", "коллективн"]),
-        ("Законы, налоги и регулирование такси", ["tax_law", "налог", "патент", "самозан", "минтранс", "реестр", "закон", "разрешен", "лиценз"]),
-        ("Коэффициенты, приоритет и тарифы", ["coeff_priority", "коэфф", "коэф", "кэф", "приоритет", "тариф", "подач"]),
-        ("Сбои и ошибки в приложении", ["app_bug", "сбой", "ошиб", "завис", "не работает", "яндекс про", "обновлен", "приложен"]),
-        ("Проблемы с заказами в приложении", ["app_orders", "заказ", "назнач", "раздач", "цепоч", "не приход"]),
-        ("Оплата, выплаты и удержания", ["payments", "оплат", "выплат", "деньг", "баланс", "удерж", "комисс"]),
-        ("Блокировки и доступ к аккаунту", ["account_block", "блок", "аккаунт", "доступ", "вериф", "фотоконтроль"]),
-        ("Детские кресла и требования к заказам", ["child_seat", "кресл", "детск", "ребен", "ребён"]),
-        ("Карты, адреса и навигация", ["gps_map", "карт", "адрес", "навиг", "геолока", "gps", "маршрут"]),
-        ("Заказы и правила в аэропортах", ["airport", "аэропорт", "шереметьево", "домодедово", "внуково", "пулково"]),
-        ("Поддержка, парк и диспетчерские вопросы", ["support", "поддерж", "таксопарк", "диспетчер", "парк"]),
-        ("Запуск и обсуждение WB Такси", ["wb_launch", "wb такси", "wildberries", "вайлдбер", "вб такси"]),
+        (
+            "Забастовка, бойкот и коллективные действия",
+            ["strike", "забаст", "бойкот", "стачк", "митинг", "коллективн"],
+        ),
+        (
+            "Законы, налоги и регулирование такси",
+            [
+                "tax_law",
+                "налог",
+                "патент",
+                "самозан",
+                "минтранс",
+                "реестр",
+                "закон",
+                "разрешен",
+                "лиценз",
+            ],
+        ),
+        (
+            "Коэффициенты, приоритет и тарифы",
+            ["coeff_priority", "коэфф", "коэф", "кэф", "приоритет", "тариф", "подач"],
+        ),
+        (
+            "Сбои и ошибки в приложении",
+            [
+                "app_bug",
+                "сбой",
+                "ошиб",
+                "завис",
+                "не работает",
+                "яндекс про",
+                "обновлен",
+                "приложен",
+            ],
+        ),
+        (
+            "Проблемы с заказами в приложении",
+            ["app_orders", "заказ", "назнач", "раздач", "цепоч", "не приход"],
+        ),
+        (
+            "Оплата, выплаты и удержания",
+            ["payments", "оплат", "выплат", "деньг", "баланс", "удерж", "комисс"],
+        ),
+        (
+            "Блокировки и доступ к аккаунту",
+            ["account_block", "блок", "аккаунт", "доступ", "вериф", "фотоконтроль"],
+        ),
+        (
+            "Детские кресла и требования к заказам",
+            ["child_seat", "кресл", "детск", "ребен", "ребён"],
+        ),
+        (
+            "Карты, адреса и навигация",
+            ["gps_map", "карт", "адрес", "навиг", "геолока", "gps", "маршрут"],
+        ),
+        (
+            "Заказы и правила в аэропортах",
+            ["airport", "аэропорт", "шереметьево", "домодедово", "внуково", "пулково"],
+        ),
+        (
+            "Поддержка, парк и диспетчерские вопросы",
+            ["support", "поддерж", "таксопарк", "диспетчер", "парк"],
+        ),
+        (
+            "Запуск и обсуждение WB Такси",
+            ["wb_launch", "wb такси", "wildberries", "вайлдбер", "вб такси"],
+        ),
         ("Обсуждение сервиса Фастен", ["fasten", "фастен", "fasten_service"]),
         ("Общее обсуждение Яндекса", ["general_yandex", "яндекс", "yandex", "яша"]),
     ]
@@ -3905,7 +6071,9 @@ def taxi_macro_title(row: pd.Series) -> str:
     return raw_title or "Прочие обсуждения"
 
 
-def aggregate_taxi_events(events: pd.DataFrame, level: str = "balanced") -> pd.DataFrame:
+def aggregate_taxi_events(
+    events: pd.DataFrame, level: str = "balanced"
+) -> pd.DataFrame:
     """Aggregate taxi events for three levels of detail."""
     if events is None or events.empty:
         return pd.DataFrame()
@@ -3915,43 +6083,100 @@ def aggregate_taxi_events(events: pd.DataFrame, level: str = "balanced") -> pd.D
     if "event_title" not in df.columns:
         df["event_title"] = "Без названия"
     if level == "detailed":
-        df["__group_title"] = df["event_title"].fillna("Без названия").astype(str).replace("", "Без названия")
+        df["__group_title"] = (
+            df["event_title"]
+            .fillna("Без названия")
+            .astype(str)
+            .replace("", "Без названия")
+        )
         df["__group_key"] = df["event_id"].astype(str)
     elif level == "macro":
         df["__group_title"] = df.apply(taxi_macro_title, axis=1)
         df["__group_key"] = df["__group_title"].map(normalize_taxi_text)
     else:
-        df["__group_title"] = df["event_title"].fillna("Без названия").astype(str).replace("", "Без названия")
+        df["__group_title"] = (
+            df["event_title"]
+            .fillna("Без названия")
+            .astype(str)
+            .replace("", "Без названия")
+        )
         df["__group_key"] = df["__group_title"].map(normalize_taxi_text)
 
     rows: list[dict[str, Any]] = []
     for key, group in df.groupby("__group_key", dropna=False):
         title = str(group["__group_title"].iloc[0] or "Без названия")
-        tags = " | ".join(sorted(set("|".join(group.get("main_tags", pd.Series(dtype=str)).fillna("").astype(str)).split("|")) - {""}))
-        msg_count = int(pd.to_numeric(group.get("message_count", 0), errors="coerce").fillna(0).sum())
-        neg_count = int(pd.to_numeric(group.get("negative_count", 0), errors="coerce").fillna(0).sum())
-        rows.append({
-            "group_key": str(key),
-            "title": title,
-            "description": pick_event_description(group),
-            "tags": tags,
-            "start_date": pd.to_datetime(group.get("start_date"), errors="coerce").min(),
-            "end_date": pd.to_datetime(group.get("end_date"), errors="coerce").max(),
-            "message_count": msg_count,
-            "chat_count": int(pd.to_numeric(group.get("chat_count", 0), errors="coerce").fillna(0).sum()),
-            "negative_count": neg_count,
-            "importance_score": float(pd.to_numeric(group.get("importance_score", 0), errors="coerce").fillna(0).max()),
-            "event_ids": list(group["event_id"].astype(str)),
-            "source_event_count": int(group["event_id"].astype(str).nunique()),
-        })
+        tags = " | ".join(
+            sorted(
+                set(
+                    "|".join(
+                        group.get("main_tags", pd.Series(dtype=str))
+                        .fillna("")
+                        .astype(str)
+                    ).split("|")
+                )
+                - {""}
+            )
+        )
+        msg_count = int(
+            pd.to_numeric(group.get("message_count", 0), errors="coerce")
+            .fillna(0)
+            .sum()
+        )
+        neg_count = int(
+            pd.to_numeric(group.get("negative_count", 0), errors="coerce")
+            .fillna(0)
+            .sum()
+        )
+        rows.append(
+            {
+                "group_key": str(key),
+                "title": title,
+                "description": pick_event_description(group),
+                "tags": tags,
+                "start_date": pd.to_datetime(
+                    group.get("start_date"), errors="coerce"
+                ).min(),
+                "end_date": pd.to_datetime(
+                    group.get("end_date"), errors="coerce"
+                ).max(),
+                "message_count": msg_count,
+                "chat_count": int(
+                    pd.to_numeric(group.get("chat_count", 0), errors="coerce")
+                    .fillna(0)
+                    .sum()
+                ),
+                "negative_count": neg_count,
+                "importance_score": float(
+                    pd.to_numeric(group.get("importance_score", 0), errors="coerce")
+                    .fillna(0)
+                    .max()
+                ),
+                "event_ids": list(group["event_id"].astype(str)),
+                "source_event_count": int(group["event_id"].astype(str).nunique()),
+            }
+        )
     out = pd.DataFrame(rows)
     if out.empty:
         return out
-    out["negative_share"] = out.apply(lambda r: float(r["negative_count"]) / float(r["message_count"]) if float(r.get("message_count") or 0) else 0.0, axis=1)
-    return out.sort_values(["importance_score", "message_count"], ascending=False).reset_index(drop=True)
+    out["negative_share"] = out.apply(
+        lambda r: (
+            float(r["negative_count"]) / float(r["message_count"])
+            if float(r.get("message_count") or 0)
+            else 0.0
+        ),
+        axis=1,
+    )
+    return out.sort_values(
+        ["importance_score", "message_count"], ascending=False
+    ).reset_index(drop=True)
 
 
-def build_taxi_auto_summary(messages: pd.DataFrame, events_agg: pd.DataFrame, periods: pd.DataFrame, selected_period_ids: list[str]) -> str:
+def build_taxi_auto_summary(
+    messages: pd.DataFrame,
+    events_agg: pd.DataFrame,
+    periods: pd.DataFrame,
+    selected_period_ids: list[str],
+) -> str:
     """Readable summary for driver-chat projects."""
     total = int(len(messages)) if isinstance(messages, pd.DataFrame) else 0
     if not total:
@@ -3962,26 +6187,52 @@ def build_taxi_auto_summary(messages: pd.DataFrame, events_agg: pd.DataFrame, pe
     top_events = "нет выраженных тем"
     if isinstance(events_agg, pd.DataFrame) and not events_agg.empty:
         top = events_agg.sort_values("message_count", ascending=False).head(6)
-        top_events = "; ".join(f"{r['title']} — {format_int(r['message_count'])}" for _, r in top.iterrows())
-    chat_col = "chat_title" if "chat_title" in messages.columns else "chat_id" if "chat_id" in messages.columns else None
+        top_events = "; ".join(
+            f"{r['title']} — {format_int(r['message_count'])}"
+            for _, r in top.iterrows()
+        )
+    chat_col = (
+        "chat_title"
+        if "chat_title" in messages.columns
+        else "chat_id" if "chat_id" in messages.columns else None
+    )
     top_chats = "нет данных"
     if chat_col:
-        vc = messages[chat_col].fillna("").astype(str).replace("", pd.NA).dropna().value_counts().head(5)
+        vc = (
+            messages[chat_col]
+            .fillna("")
+            .astype(str)
+            .replace("", pd.NA)
+            .dropna()
+            .value_counts()
+            .head(5)
+        )
         if not vc.empty:
-            top_chats = "; ".join(f"{name} — {format_int(count)}" for name, count in vc.items())
+            top_chats = "; ".join(
+                f"{name} — {format_int(count)}" for name, count in vc.items()
+            )
     lines = [
         f"За выбранный период собрано {format_int(total)} сообщений. Тональность: {neutral_count / total * 100:.0f}% нейтрал, {neg_count / total * 100:.0f}% негатив, {pos_count / total * 100:.0f}% позитив.",
         f"Основные обсуждения: {top_events}.",
         f"Наиболее активные чаты: {top_chats}.",
     ]
     summary_text = "\n".join("• " + line for line in lines)
-    client_overview = build_client_insights_summary(messages, events_agg, periods, selected_period_ids, profile="driver_chats")
+    client_overview = build_client_insights_summary(
+        messages, events_agg, periods, selected_period_ids, profile="driver_chats"
+    )
     if client_overview:
         summary_text += "\n\n" + client_overview
     return summary_text
 
 
-def render_taxi_summary(project_id: str, period_ids: list[str], messages: pd.DataFrame, events_agg: pd.DataFrame, periods: pd.DataFrame, role: str) -> None:
+def render_taxi_summary(
+    project_id: str,
+    period_ids: list[str],
+    messages: pd.DataFrame,
+    events_agg: pd.DataFrame,
+    periods: pd.DataFrame,
+    role: str,
+) -> None:
     key = "summary::taxi::" + "|".join(sorted(map(str, period_ids)))
     saved = get_manual(project_id, "summaries", key)
     auto = build_taxi_auto_summary(messages, events_agg, periods, period_ids)
@@ -3990,9 +6241,20 @@ def render_taxi_summary(project_id: str, period_ids: list[str], messages: pd.Dat
     st.markdown(text.replace("\n", "  \n"))
     if role_rank(role) >= role_rank("editor"):
         with st.expander("Редактировать саммари", expanded=False):
-            edited = st.text_area("Саммари", value=text, height=220, key=f"taxi_summary_{key}")
+            edited = st.text_area(
+                "Саммари", value=text, height=220, key=f"taxi_summary_{key}"
+            )
             if st.button("Сохранить саммари", key=f"save_taxi_summary_{key}"):
-                save_manual(project_id, "summaries", key, {"summary": edited, "period_ids": period_ids, "profile": "driver_chats"})
+                save_manual(
+                    project_id,
+                    "summaries",
+                    key,
+                    {
+                        "summary": edited,
+                        "period_ids": period_ids,
+                        "profile": "driver_chats",
+                    },
+                )
                 st.success("Саммари сохранено.")
                 st.rerun()
 
@@ -4012,7 +6274,9 @@ def render_taxi_dashboard(
     client_view: bool = False,
 ) -> None:
     """Dedicated UI for driver-chat digest projects inside the platform namespace."""
-    dashboard_view_settings = dashboard_view_settings or dict(DEFAULT_DASHBOARD_VIEW_SETTINGS)
+    dashboard_view_settings = dashboard_view_settings or dict(
+        DEFAULT_DASHBOARD_VIEW_SETTINGS
+    )
     if client_view and bool(dashboard_view_settings.get("client_hide_technical", True)):
         level = "balanced"
     else:
@@ -4029,10 +6293,16 @@ def render_taxi_dashboard(
         )
     raw_events_agg = aggregate_taxi_events(events, level=level)
     if client_view and bool(dashboard_view_settings.get("client_hide_technical", True)):
-        min_event_messages = int(default_min_event_messages("driver_chats", raw_events_agg))
+        min_event_messages = int(
+            default_min_event_messages("driver_chats", raw_events_agg)
+        )
     else:
-        min_event_messages = render_min_event_messages_control("driver_chats", raw_events_agg, key="taxi_min_event_messages")
-    events_agg, hidden_events, hidden_messages = filter_small_events(raw_events_agg, min_event_messages)
+        min_event_messages = render_min_event_messages_control(
+            "driver_chats", raw_events_agg, key="taxi_min_event_messages"
+        )
+    events_agg, hidden_events, hidden_messages = filter_small_events(
+        raw_events_agg, min_event_messages
+    )
     metrics = render_project_intro(
         project_name,
         messages,
@@ -4040,7 +6310,9 @@ def render_taxi_dashboard(
         selected_period_ids,
         profile_label="Дайджест водительских чатов",
         chart_label_settings=chart_label_settings,
-        comparison_visible_charts=dashboard_view_settings.get("comparison_visible_charts"),
+        comparison_visible_charts=dashboard_view_settings.get(
+            "comparison_visible_charts"
+        ),
     )
     render_period_summary(
         project_id,
@@ -4057,7 +6329,9 @@ def render_taxi_dashboard(
     section_options = ["Клиентский обзор", "Инфоповоды", "Ключевые сообщения"]
     if len(selected_period_ids) >= 2:
         section_options.append("Динамика")
-    default_section = str(dashboard_view_settings.get("taxi_start_section") or "Клиентский обзор")
+    default_section = str(
+        dashboard_view_settings.get("taxi_start_section") or "Клиентский обзор"
+    )
     if default_section not in section_options:
         default_section = section_options[0]
     section = st.radio(
@@ -4069,7 +6343,9 @@ def render_taxi_dashboard(
     )
 
     if section == "Клиентский обзор":
-        render_client_insights(messages, events_agg, periods, selected_period_ids, profile="driver_chats")
+        render_client_insights(
+            messages, events_agg, periods, selected_period_ids, profile="driver_chats"
+        )
     elif section == "Инфоповоды":
         render_small_events_notice(hidden_events, hidden_messages, min_event_messages)
         render_events(project_id, role, events_agg, messages, manual_state)
@@ -4087,7 +6363,9 @@ def main() -> None:
     st.caption(APP_VERSION)
 
     if not supabase_configured():
-        st.error("Supabase не настроен. Добавьте SUPABASE_URL и SUPABASE_SERVICE_ROLE_KEY в Secrets.")
+        st.error(
+            "Supabase не настроен. Добавьте SUPABASE_URL и SUPABASE_SERVICE_ROLE_KEY в Secrets."
+        )
         st.stop()
 
     is_admin = is_platform_admin()
@@ -4108,7 +6386,16 @@ def main() -> None:
         if is_admin:
             render_project_manager(projects)
         return
-    page = st.sidebar.radio("Раздел", page_options, index=page_options.index("Проекты") if st.session_state.get("platform_page") == "projects" and "Проекты" in page_options else 0)
+    page = st.sidebar.radio(
+        "Раздел",
+        page_options,
+        index=(
+            page_options.index("Проекты")
+            if st.session_state.get("platform_page") == "projects"
+            and "Проекты" in page_options
+            else 0
+        ),
+    )
 
     if page == "Проекты":
         render_project_manager(projects)
@@ -4120,18 +6407,36 @@ def main() -> None:
 
     project_row = projects[projects["project_id"].astype(str) == str(project_id)]
     current_project_row = project_row.iloc[0] if not project_row.empty else None
-    project_name = str(current_project_row.get("project_name") if current_project_row is not None else project_id)
+    project_name = str(
+        current_project_row.get("project_name")
+        if current_project_row is not None
+        else project_id
+    )
     project_profile = project_topic_profile(current_project_row)
-    current_project_settings = project_settings_from_row(current_project_row) if current_project_row is not None else {}
-    chart_label_settings = chart_label_settings_from_project_settings(current_project_settings)
-    report_branding = report_branding_from_project_settings(current_project_settings, project_name=project_name)
-    dashboard_view_settings = dashboard_view_settings_from_project_settings(current_project_settings)
+    current_project_settings = (
+        project_settings_from_row(current_project_row)
+        if current_project_row is not None
+        else {}
+    )
+    chart_label_settings = chart_label_settings_from_project_settings(
+        current_project_settings
+    )
+    report_branding = report_branding_from_project_settings(
+        current_project_settings, project_name=project_name
+    )
+    dashboard_view_settings = dashboard_view_settings_from_project_settings(
+        current_project_settings
+    )
     dashboard_view_mode = dashboard_view_mode_for_session(role, dashboard_view_settings)
     client_view = dashboard_view_mode == "client"
     st.sidebar.markdown(f"**Текущий проект:**  \n{project_name}")
-    st.sidebar.caption(f"Профиль: {ALGORITHM_PROFILE_OPTIONS.get(project_profile, project_profile)}")
+    st.sidebar.caption(
+        f"Профиль: {ALGORITHM_PROFILE_OPTIONS.get(project_profile, project_profile)}"
+    )
     if role == "admin":
-        st.sidebar.checkbox("Диагностика скорости", value=False, key="platform_perf_debug")
+        st.sidebar.checkbox(
+            "Диагностика скорости", value=False, key="platform_perf_debug"
+        )
 
     if page == "Загрузка файла":
         render_upload_page(project_id, role, args.work_dir)
@@ -4146,12 +6451,22 @@ def main() -> None:
         return
 
     with st.spinner("Загружаю данные проекта..."):
-        with perf_block("dashboard.load_generated_tables", project_id=project_id, periods=len(selected_period_ids)):
-            events, discussions, messages, discussion_messages, event_discussions = load_generated_tables(project_id, selected_period_ids)
+        with perf_block(
+            "dashboard.load_generated_tables",
+            project_id=project_id,
+            periods=len(selected_period_ids),
+        ):
+            events, discussions, messages, discussion_messages, event_discussions = (
+                load_generated_tables(project_id, selected_period_ids)
+            )
     with perf_block("dashboard.enrich_messages", project_id=project_id):
-        enriched_messages = enrich_messages(messages, event_discussions, discussion_messages, events)
+        enriched_messages = enrich_messages(
+            messages, event_discussions, discussion_messages, events
+        )
     with perf_block("dashboard.apply_manual_overrides", project_id=project_id):
-        events, enriched_messages, manual_state = apply_manual_overrides(project_id, events, enriched_messages)
+        events, enriched_messages, manual_state = apply_manual_overrides(
+            project_id, events, enriched_messages
+        )
     with perf_block("dashboard.prepare_messages", project_id=project_id):
         enriched_messages = prepare_dashboard_messages(enriched_messages)
     render_perf_sidebar()
@@ -4177,8 +6492,12 @@ def main() -> None:
     if client_view and bool(dashboard_view_settings.get("client_hide_technical", True)):
         min_event_messages = int(default_min_event_messages(project_profile, events))
     else:
-        min_event_messages = render_min_event_messages_control(project_profile, events, key="main_min_event_messages")
-    events_agg, hidden_events, hidden_messages = filter_small_events(raw_events_agg, min_event_messages)
+        min_event_messages = render_min_event_messages_control(
+            project_profile, events, key="main_min_event_messages"
+        )
+    events_agg, hidden_events, hidden_messages = filter_small_events(
+        raw_events_agg, min_event_messages
+    )
 
     # Brand Analytics projects must show only system tags from columns after
     # `Обработано`. This prevents legacy taxi/generic labels from appearing
@@ -4193,7 +6512,9 @@ def main() -> None:
         selected_period_ids,
         profile_label=ALGORITHM_PROFILE_OPTIONS.get(project_profile, project_profile),
         chart_label_settings=chart_label_settings,
-        comparison_visible_charts=dashboard_view_settings.get("comparison_visible_charts"),
+        comparison_visible_charts=dashboard_view_settings.get(
+            "comparison_visible_charts"
+        ),
     )
     render_period_summary(
         project_id,
@@ -4210,7 +6531,9 @@ def main() -> None:
     section_options = ["Клиентский обзор", "Теги", "Инфоповоды", "Ключевые сообщения"]
     if len(selected_period_ids) >= 2:
         section_options.append("Динамика")
-    default_section = str(dashboard_view_settings.get("start_section") or "Клиентский обзор")
+    default_section = str(
+        dashboard_view_settings.get("start_section") or "Клиентский обзор"
+    )
     if default_section not in section_options:
         default_section = section_options[0]
     section = st.radio(
@@ -4222,7 +6545,13 @@ def main() -> None:
     )
 
     if section == "Клиентский обзор":
-        render_client_insights(enriched_messages, events_agg, periods, selected_period_ids, profile=project_profile)
+        render_client_insights(
+            enriched_messages,
+            events_agg,
+            periods,
+            selected_period_ids,
+            profile=project_profile,
+        )
     elif section == "Теги":
         render_tag_statistics(enriched_messages, project_id=project_id)
     elif section == "Инфоповоды":
