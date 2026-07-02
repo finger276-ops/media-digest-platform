@@ -55,7 +55,7 @@ from services.tag_compute import (
     build_tag_statistics_compute,
 )
 from services.message_compute import message_text_column, message_link_column
-from noise_filter_ui_debug import render_noise_filter_block
+from noise_filter_ui import render_noise_filter_block
 from services.perf import perf_block, render_perf_sidebar, reset_perf_events
 
 APP_TITLE = "Платформа дайджестов"
