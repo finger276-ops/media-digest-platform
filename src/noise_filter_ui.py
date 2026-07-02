@@ -7,6 +7,8 @@ UI-блок фильтра шума для экрана загрузки.
 
 Защищён мягкой деградацией: если что-то пойдёт не так, блок просто
 не отобразится, а загрузка данных продолжится штатно.
+
+Колонка текста в canonical платформы называется «Сообщение».
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ import streamlit as st
 from services.noise_filter import filter_dataframe
 
 
-def render_noise_filter_block(canonical: pd.DataFrame, text_column: str = "Текст") -> None:
+def render_noise_filter_block(canonical: pd.DataFrame, text_column: str = "Сообщение") -> None:
     """
     Показать блок статистики фильтра шума.
 
@@ -31,7 +33,7 @@ def render_noise_filter_block(canonical: pd.DataFrame, text_column: str = "Те�
         if stats.get("error") or stats.get("noise_total", 0) == 0:
             return  # нечего показывать
 
-        with st.expander("🧹 Фильтр шума (ответы продавцов, пустые отзывы)", expanded=False):
+        with st.expander("🧹 Фильтр шума (ответы продавцов, пустые отзывы)", expanded=True):
             c1, c2, c3 = st.columns(3)
             c1.metric(
                 "Помечено шумом",
@@ -47,7 +49,7 @@ def render_noise_filter_block(canonical: pd.DataFrame, text_column: str = "Те�
                 rows = []
                 for _, row in noise.head(30).iterrows():
                     text = str(row.get(text_column, ""))
-                    text = " ".join(text.split())  # схлопнуть пробелы
+                    text = " ".join(text.split())
                     rows.append({
                         "Тип": (
                             "ответ продавца"
@@ -64,5 +66,4 @@ def render_noise_filter_block(canonical: pd.DataFrame, text_column: str = "Те�
                 "сообщения. Данные сохраняются полностью."
             )
     except Exception:
-        # Мягкая деградация: не мешаем загрузке, если что-то пошло не так
         return

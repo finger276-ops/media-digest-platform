@@ -83,7 +83,7 @@ def classify_noise(text: str, cfg: NoiseFilterConfig | None = None) -> NoiseResu
     return NoiseResult(is_noise=False)
 
 
-def filter_dataframe(df, text_column: str = "Текст", cfg: NoiseFilterConfig | None = None):
+def filter_dataframe(df, text_column: str = "Сообщение", cfg: NoiseFilterConfig | None = None):
     """
     Пометить шум в DataFrame выгрузки.
 
