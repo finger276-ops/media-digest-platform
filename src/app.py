@@ -55,6 +55,7 @@ from services.tag_compute import (
     build_tag_statistics_compute,
 )
 from services.message_compute import message_text_column, message_link_column
+from noise_filter_ui import render_noise_filter_block
 from services.perf import perf_block, render_perf_sidebar, reset_perf_events
 
 APP_TITLE = "Платформа дайджестов"
@@ -4001,6 +4002,7 @@ def render_upload_page(project_id: str, role: str, work_dir: str) -> None:
     st.success(f"Файл прочитан: {len(canonical):,} строк".replace(",", " "))
     with st.expander("Предпросмотр распознанных колонок", expanded=False):
         st.dataframe(canonical.head(20), use_container_width=True)
+        render_noise_filter_block(canonical)
 
     period_id = make_period_id(project_id, period_name, uploaded.name)
     output_dir = Path(work_dir) / project_id / period_id
