@@ -57,6 +57,7 @@ from services.tag_compute import (
 from services.message_compute import message_text_column, message_link_column
 from noise_filter_ui import render_noise_filter_block
 from tag_hierarchy_ui import render_tag_hierarchy_block
+from tag_tier_analytics_ui import render_tier_analytics_block
 from services.perf import perf_block, render_perf_sidebar, reset_perf_events
 
 APP_TITLE = "Платформа дайджестов"
@@ -6559,6 +6560,7 @@ def main() -> None:
         )
     elif section == "Теги":
         render_tag_statistics(enriched_messages, project_id=project_id)
+        render_tier_analytics_block(enriched_messages, project_id=project_id)
     elif section == "Инфоповоды":
         render_small_events_notice(hidden_events, hidden_messages, min_event_messages)
         render_events(project_id, role, events_agg, enriched_messages, manual_state)
