@@ -128,6 +128,7 @@ DEFAULT_DASHBOARD_VIEW_SETTINGS = {
     "taxi_start_section": "Клиентский обзор",
     "comparison_visible_charts": ["Динамика основных метрик", "Динамика тональности"],
     "client_hide_technical": True,
+    "main_visible_blocks": ["metrics", "comparison", "summary", "threshold"],
 }
 
 DASHBOARD_SECTION_OPTIONS = [
@@ -185,6 +186,11 @@ def dashboard_view_settings_from_project_settings(
     result["client_hide_technical"] = bool(
         raw.get("client_hide_technical", result["client_hide_technical"])
     )
+    raw_blocks = raw.get("main_visible_blocks")
+    known_blocks = {"metrics", "comparison", "summary", "threshold"}
+    if isinstance(raw_blocks, list):
+        blocks = [str(x) for x in raw_blocks if str(x) in known_blocks]
+        result["main_visible_blocks"] = blocks
     return result
 
 
@@ -6505,35 +6511,64 @@ def main() -> None:
         min_event_messages = None  # решится ниже, после панели вида
 
     # --- Панель «Вид страницы»: что показывать на главной ---
+    saved_blocks = set(
+        dashboard_view_settings.get("main_visible_blocks")
+        or ["metrics", "comparison", "summary", "threshold"]
+    )
     view_container = getattr(st, "popover", st.expander)
     with view_container("⚙️ Вид страницы"):
         show_metrics = st.checkbox(
             "Метрики периода",
-            value=True,
+            value=("metrics" in saved_blocks),
             key="view_show_metrics",
             help="Карточки с основными показателями выбранных периодов.",
         )
         show_comparison = st.checkbox(
             "Сравнение периодов",
-            value=True,
+            value=("comparison" in saved_blocks),
             key="view_show_comparison",
             help="Последовательное сравнение (при выборе двух и более периодов).",
         )
         show_summary = st.checkbox(
             "Саммари периода",
-            value=True,
+            value=("summary" in saved_blocks),
             key="view_show_summary",
             help="Текстовое саммари с кнопками экспорта отчётов.",
         )
         if show_threshold_default:
             show_threshold = st.checkbox(
                 "Порог инфоповодов (техническое)",
-                value=True,
+                value=("threshold" in saved_blocks),
                 key="view_show_threshold",
                 help="Ручная настройка минимального размера инфоповода.",
             )
         else:
             show_threshold = False
+        if role_rank(role) >= role_rank("editor"):
+            if st.button(
+                "💾 Запомнить для проекта",
+                key="view_save_blocks",
+                help="Сохранить текущий набор блоков как вид по умолчанию для всех, кто открывает проект.",
+            ):
+                chosen = []
+                if show_metrics:
+                    chosen.append("metrics")
+                if show_comparison:
+                    chosen.append("comparison")
+                if show_summary:
+                    chosen.append("summary")
+                if show_threshold:
+                    chosen.append("threshold")
+                updated = dict(current_project_settings or {})
+                dvs_raw = dict(updated.get("dashboard_view_settings") or {})
+                dvs_raw["main_visible_blocks"] = chosen
+                updated["dashboard_view_settings"] = dvs_raw
+                try:
+                    update_project(project_id, settings=updated)
+                    st.success("Вид страницы сохранён для проекта.")
+                    st.rerun()
+                except Exception as exc:
+                    st.warning(f"Не удалось сохранить: {exc}")
 
     if min_event_messages is None:
         if show_threshold:
