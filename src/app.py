@@ -56,6 +56,7 @@ from services.tag_compute import (
 )
 from services.message_compute import message_text_column, message_link_column
 from noise_filter_ui import render_noise_filter_block
+from tag_hierarchy_ui import render_tag_hierarchy_block
 from services.perf import perf_block, render_perf_sidebar, reset_perf_events
 
 APP_TITLE = "Платформа дайджестов"
@@ -3938,6 +3939,8 @@ def render_upload_page(project_id: str, role: str, work_dir: str) -> None:
     if role_rank(role) < role_rank("editor"):
         st.info("Для загрузки файлов нужен доступ редактора или владельца.")
         return
+
+    render_tag_hierarchy_block(project_id)
 
     with st.form("upload_form"):
         period_name = st.text_input(
