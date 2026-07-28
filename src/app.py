@@ -1486,6 +1486,7 @@ def render_project_intro(
     profile_label: str = "",
     chart_label_settings: dict[str, Any] | None = None,
     comparison_visible_charts: list[str] | None = None,
+    show_comparison: bool = True,
 ) -> dict[str, Any]:
     """Unified top block for all project profiles.
 
@@ -1538,7 +1539,8 @@ def render_project_intro(
     metrics["project_name"] = project_name
 
     if (
-        len(selected_ids) >= 2
+        show_comparison
+        and len(selected_ids) >= 2
         and isinstance(messages, pd.DataFrame)
         and "period_id" in messages.columns
     ):
@@ -6497,10 +6499,51 @@ def main() -> None:
     raw_events_agg = aggregate_events(events)
     if client_view and bool(dashboard_view_settings.get("client_hide_technical", True)):
         min_event_messages = int(default_min_event_messages(project_profile, events))
+        show_threshold_default = False
     else:
-        min_event_messages = render_min_event_messages_control(
-            project_profile, events, key="main_min_event_messages"
+        show_threshold_default = True
+        min_event_messages = None  # решится ниже, после панели вида
+
+    # --- Панель «Вид страницы»: что показывать на главной ---
+    view_container = getattr(st, "popover", st.expander)
+    with view_container("⚙️ Вид страницы"):
+        show_metrics = st.checkbox(
+            "Метрики периода",
+            value=True,
+            key="view_show_metrics",
+            help="Карточки с основными показателями выбранных периодов.",
         )
+        show_comparison = st.checkbox(
+            "Сравнение периодов",
+            value=True,
+            key="view_show_comparison",
+            help="Последовательное сравнение (при выборе двух и более периодов).",
+        )
+        show_summary = st.checkbox(
+            "Саммари периода",
+            value=True,
+            key="view_show_summary",
+            help="Текстовое саммари с кнопками экспорта отчётов.",
+        )
+        if show_threshold_default:
+            show_threshold = st.checkbox(
+                "Порог инфоповодов (техническое)",
+                value=True,
+                key="view_show_threshold",
+                help="Ручная настройка минимального размера инфоповода.",
+            )
+        else:
+            show_threshold = False
+
+    if min_event_messages is None:
+        if show_threshold:
+            min_event_messages = render_min_event_messages_control(
+                project_profile, events, key="main_min_event_messages"
+            )
+        else:
+            min_event_messages = int(
+                default_min_event_messages(project_profile, events)
+            )
     events_agg, hidden_events, hidden_messages = filter_small_events(
         raw_events_agg, min_event_messages
     )
@@ -6511,29 +6554,37 @@ def main() -> None:
     enriched_messages = clean_brand_analytics_tags(enriched_messages)
     enriched_messages = prepare_dashboard_messages(enriched_messages)
 
-    metrics = render_project_intro(
-        project_name,
-        enriched_messages,
-        periods,
-        selected_period_ids,
-        profile_label=ALGORITHM_PROFILE_OPTIONS.get(project_profile, project_profile),
-        chart_label_settings=chart_label_settings,
-        comparison_visible_charts=dashboard_view_settings.get(
-            "comparison_visible_charts"
-        ),
-    )
-    render_period_summary(
-        project_id,
-        project_name,
-        selected_period_ids,
-        enriched_messages,
-        events_agg,
-        periods,
-        role,
-        profile=project_profile,
-        metrics=metrics,
-        branding=report_branding,
-    )
+    if show_metrics:
+        metrics = render_project_intro(
+            project_name,
+            enriched_messages,
+            periods,
+            selected_period_ids,
+            profile_label=ALGORITHM_PROFILE_OPTIONS.get(
+                project_profile, project_profile
+            ),
+            chart_label_settings=chart_label_settings,
+            comparison_visible_charts=dashboard_view_settings.get(
+                "comparison_visible_charts"
+            ),
+            show_comparison=show_comparison,
+        )
+    else:
+        st.header(project_name)
+        metrics = None
+    if show_summary:
+        render_period_summary(
+            project_id,
+            project_name,
+            selected_period_ids,
+            enriched_messages,
+            events_agg,
+            periods,
+            role,
+            profile=project_profile,
+            metrics=metrics,
+            branding=report_branding,
+        )
     section_options = ["Клиентский обзор", "Теги", "Инфоповоды", "Ключевые сообщения"]
     if len(selected_period_ids) >= 2:
         section_options.append("Динамика")
