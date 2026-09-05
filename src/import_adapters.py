@@ -9,10 +9,91 @@ from __future__ import annotations
 
 import csv
 import re
+import tempfile
+import zipfile
 from pathlib import Path
 from typing import Iterable
 
 import pandas as pd
+
+MINIMAL_XLSX_STYLES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="1"><font><sz val="11"/><color theme="1"/><name val="Calibri"/><family val="2"/><scheme val="minor"/></font></fonts>
+  <fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>
+  <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
+  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+  <cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>
+  <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
+  <dxfs count="0"/>
+  <tableStyles count="0" defaultTableStyle="TableStyleMedium9" defaultPivotStyle="PivotStyleLight16"/>
+</styleSheet>"""
+
+
+def _excel_error_mentions_styles(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return (
+        "stylesheet" in message
+        or "styles.xml" in message
+        or "could not read stylesheet" in message
+    )
+
+
+def _repair_xlsx_styles(path: Path) -> Path:
+    """Return a temporary XLSX copy with a minimal valid styles.xml.
+
+    Some monitoring-system exports contain broken style XML. The worksheet data
+    is still valid, but openpyxl refuses to open the workbook before pandas can
+    read it. Replacing only xl/styles.xml keeps cell values intact and lets the
+    import continue. If the file is not a valid XLSX zip, the original exception
+    will be raised by the caller.
+    """
+    if path.suffix.lower() not in {".xlsx", ".xlsm"}:
+        raise ValueError(
+            "Автовосстановление стилей поддерживается только для .xlsx/.xlsm файлов."
+        )
+
+    tmp = tempfile.NamedTemporaryFile(
+        prefix="xlsx_styles_repaired_", suffix=path.suffix.lower(), delete=False
+    )
+    tmp_path = Path(tmp.name)
+    tmp.close()
+
+    with zipfile.ZipFile(path, "r") as zin, zipfile.ZipFile(
+        tmp_path, "w", compression=zipfile.ZIP_DEFLATED
+    ) as zout:
+        wrote_styles = False
+        for item in zin.infolist():
+            if item.filename == "xl/styles.xml":
+                zout.writestr(item, MINIMAL_XLSX_STYLES)
+                wrote_styles = True
+            else:
+                zout.writestr(item, zin.read(item.filename))
+        if not wrote_styles:
+            zout.writestr("xl/styles.xml", MINIMAL_XLSX_STYLES)
+    return tmp_path
+
+
+def _open_excel_file_resilient(path: Path) -> tuple[pd.ExcelFile, Path]:
+    try:
+        return pd.ExcelFile(path), path
+    except Exception as exc:
+        # openpyxl may raise either a friendly "could not read stylesheet"
+        # ValueError or a raw XMLSyntaxError while parsing xl/styles.xml. For
+        # XLSX/XLSM files it is safe to try one repaired copy before failing.
+        if path.suffix.lower() not in {".xlsx", ".xlsm"}:
+            raise
+        try:
+            repaired = _repair_xlsx_styles(path)
+            return pd.ExcelFile(repaired), repaired
+        except Exception as repair_exc:
+            if _excel_error_mentions_styles(exc):
+                raise ValueError(
+                    "Excel-файл не удалось прочитать из-за поврежденных стилей книги. "
+                    "Попробуйте открыть файл в Excel/LibreOffice и сохранить заново как .xlsx или .csv. "
+                    "Если это выгрузка Brand Analytics, лучше сохранить лист «Сообщения» отдельным CSV."
+                ) from repair_exc
+            raise exc
+
 
 CANONICAL_COLUMNS = [
     "№",
@@ -83,7 +164,9 @@ def _clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df = df.dropna(how="all")
     for col in df.columns:
         df[col] = df[col].fillna("").astype(str)
-    df = df.loc[~df.apply(lambda r: all(str(v).strip() == "" for v in r), axis=1)].reset_index(drop=True)
+    df = df.loc[
+        ~df.apply(lambda r: all(str(v).strip() == "" for v in r), axis=1)
+    ].reset_index(drop=True)
     return df
 
 
@@ -191,9 +274,10 @@ def _read_excel_any(path: Path, sheet_name: str | int | None = None) -> pd.DataF
 
     Monitoring exports often contain cover sheets, empty technical sheets or
     analytical tabs. We prefer the raw-message sheet named "Сообщения" and
-    skip empty sheets instead of crashing on preview.iloc[0].
+    skip empty sheets instead of crashing on preview.iloc[0]. If the workbook
+    has broken styles.xml, we automatically read a temporary repaired copy.
     """
-    xls = pd.ExcelFile(path)
+    xls, read_path = _open_excel_file_resilient(path)
     sheets = xls.sheet_names
     if not sheets:
         raise ValueError("В Excel-файле не найдено листов.")
@@ -201,7 +285,7 @@ def _read_excel_any(path: Path, sheet_name: str | int | None = None) -> pd.DataF
     def safe_preview(sheet):
         try:
             preview_df = pd.read_excel(
-                path,
+                read_path,
                 sheet_name=sheet,
                 header=None,
                 dtype=str,
@@ -230,11 +314,28 @@ def _read_excel_any(path: Path, sheet_name: str | int | None = None) -> pd.DataF
         row_idx = _find_excel_header(preview)
         if row_idx < 0 or row_idx >= len(preview):
             row_idx = 0
-        row_values = [_clean_col_name(v).lower() for v in preview.iloc[row_idx].fillna("").astype(str).tolist()]
+        row_values = [
+            _clean_col_name(v).lower()
+            for v in preview.iloc[row_idx].fillna("").astype(str).tolist()
+        ]
         tokens = [
-            "текст", "сообщ", "дата", "время", "ссылка", "url", "автор",
-            "источник", "тональность", "сюжет", "hash сообщения", "id сообщения",
-            "место публикации", "тип источника", "основная тема", "все темы", "релевантное",
+            "текст",
+            "сообщ",
+            "дата",
+            "время",
+            "ссылка",
+            "url",
+            "автор",
+            "источник",
+            "тональность",
+            "сюжет",
+            "hash сообщения",
+            "id сообщения",
+            "место публикации",
+            "тип источника",
+            "основная тема",
+            "все темы",
+            "релевантное",
         ]
         score = sum(any(token in value for value in row_values) for token in tokens)
         sheet_key = str(candidate).strip().lower().replace("ё", "е")
@@ -251,15 +352,27 @@ def _read_excel_any(path: Path, sheet_name: str | int | None = None) -> pd.DataF
             "Проверьте, что в Excel есть лист с колонками: дата, текст/сообщение, url/ссылка, автор или источник."
         )
 
-    df = pd.read_excel(path, sheet_name=selected_sheet, header=selected_header_idx, dtype=str, keep_default_na=False)
+    df = pd.read_excel(
+        read_path,
+        sheet_name=selected_sheet,
+        header=selected_header_idx,
+        dtype=str,
+        keep_default_na=False,
+    )
     df = _clean_dataframe(df)
     if df.empty:
         raise ValueError(f"На листе Excel «{selected_sheet}» не найдено данных.")
     return df
 
+
 def detect_source_system(df: pd.DataFrame) -> str:
     cols = {str(c).strip().lower() for c in df.columns}
-    if {"hash сообщения", "источник", "url", "тип источника"} & cols and "id сообщения" in cols:
+    if {
+        "hash сообщения",
+        "источник",
+        "url",
+        "тип источника",
+    } & cols and "id сообщения" in cols:
         return "brand_analytics"
     if "кто пишет" in cols or "где пишет" in cols or "время публикации" in cols:
         return "mediologia_excel"
@@ -278,9 +391,16 @@ def first_existing(df: pd.DataFrame, candidates: Iterable[str]) -> pd.Series:
 
 
 def _join_text_parts(*parts: pd.Series) -> pd.Series:
-    result = pd.Series([""] * len(parts[0]), index=parts[0].index, dtype="object") if parts else pd.Series(dtype="object")
+    result = (
+        pd.Series([""] * len(parts[0]), index=parts[0].index, dtype="object")
+        if parts
+        else pd.Series(dtype="object")
+    )
     for part in parts:
-        result = ["\n".join([x for x in [str(a).strip(), str(b).strip()] if x]) for a, b in zip(result, part.fillna("").astype(str))]
+        result = [
+            "\n".join([x for x in [str(a).strip(), str(b).strip()] if x])
+            for a, b in zip(result, part.fillna("").astype(str))
+        ]
         result = pd.Series(result, index=part.index, dtype="object")
     return result
 
@@ -297,8 +417,8 @@ def _normalize_sentiment(series: pd.Series) -> pd.Series:
         if "нейтр" in s or s in {"neutral", "0"}:
             return "нейтральная"
         return str(value).strip()
-    return series.apply(convert)
 
+    return series.apply(convert)
 
 
 def _normalize_topics_list(value: object) -> str:
@@ -323,7 +443,18 @@ def _normalize_bool_text(value: object) -> str:
     s = "" if value is None else str(value).strip().lower().replace("ё", "е")
     if s in {"true", "1", "да", "yes", "+", "истина", "верно"}:
         return "True"
-    if s in {"false", "0", "нет", "no", "-", "ложь", "неверно", "нерелевантно", "не релевантно", "irrelevant"}:
+    if s in {
+        "false",
+        "0",
+        "нет",
+        "no",
+        "-",
+        "ложь",
+        "неверно",
+        "нерелевантно",
+        "не релевантно",
+        "irrelevant",
+    }:
         return "False"
     return str(value).strip() if value is not None else ""
 
@@ -350,35 +481,74 @@ def _brand_analytics_tag_columns(df: pd.DataFrame) -> list[str]:
 
     result: list[str] = []
     seen: set[str] = set()
-    for col in columns[marker_idx + 1:]:
+    for col in columns[marker_idx + 1 :]:
         label = _clean_col_name(col)
         key = label.lower().replace("ё", "е")
         if not label or key in seen or key.startswith("unnamed"):
             continue
-        values = df[col].fillna("").astype(str).str.strip() if col in df.columns else pd.Series(dtype=str)
+        values = (
+            df[col].fillna("").astype(str).str.strip()
+            if col in df.columns
+            else pd.Series(dtype=str)
+        )
         if values.empty or values.eq("").all():
             continue
         seen.add(key)
         result.append(col)
     return result
 
-def canonicalize_table(raw: pd.DataFrame, source_file: str = "", source_system: str = "auto") -> pd.DataFrame:
+
+def canonicalize_table(
+    raw: pd.DataFrame, source_file: str = "", source_system: str = "auto"
+) -> pd.DataFrame:
     df = _clean_dataframe(raw)
-    detected = detect_source_system(df) if source_system in {"", "auto", None} else str(source_system)
+    detected = (
+        detect_source_system(df)
+        if source_system in {"", "auto", None}
+        else str(source_system)
+    )
     out = pd.DataFrame(index=df.index)
 
     out["№"] = first_existing(df, ["№", "N", "ID", "ID сообщения"])
-    out["Дата"] = first_existing(df, ["Дата", "Время публикации", "Дата публикации", "Дата сообщения", "Date", "Published"])
+    out["Дата"] = first_existing(
+        df,
+        [
+            "Дата",
+            "Время публикации",
+            "Дата публикации",
+            "Дата сообщения",
+            "Date",
+            "Published",
+        ],
+    )
     time_part = first_existing(df, ["Время", "Time", "Published time"])
     # Some exports, for example Knauf/Brand Analytics Excel, split date and time.
     if time_part.str.strip().ne("").any() and out["Дата"].str.strip().ne("").any():
         out["Дата"] = [
-            f"{str(d).strip()} {str(t).strip()}".strip() if str(t).strip() else str(d).strip()
+            (
+                f"{str(d).strip()} {str(t).strip()}".strip()
+                if str(t).strip()
+                else str(d).strip()
+            )
             for d, t in zip(out["Дата"], time_part)
         ]
 
-    message = first_existing(df, ["Сообщение", "Текст сообщения", "Текст", "Message", "Text", "Содержание", "Описание", "Content"])
-    recognized = first_existing(df, ["Автораспознанный текст", "Распознанный текст", "OCR", "Расшифровка"])
+    message = first_existing(
+        df,
+        [
+            "Сообщение",
+            "Текст сообщения",
+            "Текст",
+            "Message",
+            "Text",
+            "Содержание",
+            "Описание",
+            "Content",
+        ],
+    )
+    recognized = first_existing(
+        df, ["Автораспознанный текст", "Распознанный текст", "OCR", "Расшифровка"]
+    )
     title = first_existing(df, ["Заголовок", "Title"])
     if detected == "brand_analytics":
         out["Сообщение"] = _join_text_parts(title, message)
@@ -386,47 +556,110 @@ def canonicalize_table(raw: pd.DataFrame, source_file: str = "", source_system: 
         out["Сообщение"] = message
     out["Автораспознанный текст"] = recognized
 
-    out["Ссылка"] = first_existing(df, ["Ссылка", "Ссылка на сообщение", "Url", "URL", "url", "Link"])
+    out["Ссылка"] = first_existing(
+        df, ["Ссылка", "Ссылка на сообщение", "Url", "URL", "url", "Link"]
+    )
     out["Площадка"] = first_existing(df, ["Площадка", "Источник", "Система", "Source"])
-    out["Автор"] = first_existing(df, ["Автор", "Кто пишет", "Author", "Пользователь", "User"])
-    out["Профиль автора"] = first_existing(df, ["Профиль автора", "Ссылка на автора", "Url автора", "URL автора", "Author URL"])
+    out["Автор"] = first_existing(
+        df, ["Автор", "Кто пишет", "Author", "Пользователь", "User"]
+    )
+    out["Профиль автора"] = first_existing(
+        df,
+        [
+            "Профиль автора",
+            "Ссылка на автора",
+            "Url автора",
+            "URL автора",
+            "Author URL",
+        ],
+    )
 
-    blog = first_existing(df, ["Блог", "Где пишет", "Место публикации", "Источник", "Канал", "Группа", "Чат"])
-    blog_profile = first_existing(df, ["Профиль блога", "Ссылка на блог", "Url места публикации", "URL места публикации", "Url источника"])
+    blog = first_existing(
+        df,
+        ["Блог", "Где пишет", "Место публикации", "Источник", "Канал", "Группа", "Чат"],
+    )
+    blog_profile = first_existing(
+        df,
+        [
+            "Профиль блога",
+            "Ссылка на блог",
+            "Url места публикации",
+            "URL места публикации",
+            "Url источника",
+        ],
+    )
     out["Блог"] = blog
     out["Профиль блога"] = blog_profile
 
-    out["Тип"] = first_existing(df, ["Тип", "Тип сообщения", "Тип источника", "Message type", "Source type"])
-    out["Тональность"] = _normalize_sentiment(first_existing(df, ["Тональность", "Sentiment", "Окраска", "Тон"] ))
-    out["Токсичность"] = first_existing(df, ["Токсичность", "Агрессия", "Toxicity", "Aggression"])
+    out["Тип"] = first_existing(
+        df, ["Тип", "Тип сообщения", "Тип источника", "Message type", "Source type"]
+    )
+    out["Тональность"] = _normalize_sentiment(
+        first_existing(df, ["Тональность", "Sentiment", "Окраска", "Тон"])
+    )
+    out["Токсичность"] = first_existing(
+        df, ["Токсичность", "Агрессия", "Toxicity", "Aggression"]
+    )
     out["WOM"] = first_existing(df, ["WOM", "Мнения"])
     out["Страна"] = first_existing(df, ["Страна", "Country"])
     out["Регион"] = first_existing(df, ["Регион", "Region"])
     out["Город"] = first_existing(df, ["Город", "City"])
-    out["Количество дублей"] = first_existing(df, ["Количество дублей", "Дублей", "Duplicates"])
+    out["Количество дублей"] = first_existing(
+        df, ["Количество дублей", "Дублей", "Duplicates"]
+    )
     out["Аудитория"] = first_existing(df, ["Аудитория", "Audience", "audience"])
-    out["Просмотры"] = first_existing(df, ["Просмотры", "Просмотров", "Views", "views", "Охват", "Reach", "reach"])
-    out["Вовлечённость"] = first_existing(df, ["Вовлечённость", "Вовлеченность", "Engagement", "engagement"])
+    out["Просмотры"] = first_existing(
+        df, ["Просмотры", "Просмотров", "Views", "views", "Охват", "Reach", "reach"]
+    )
+    out["Вовлечённость"] = first_existing(
+        df, ["Вовлечённость", "Вовлеченность", "Engagement", "engagement"]
+    )
     out["Лайки"] = first_existing(df, ["Лайки", "Likes"])
     out["Комментарии"] = first_existing(df, ["Комментарии", "Комментариев", "Comments"])
     out["Репосты"] = first_existing(df, ["Репосты", "Reposts", "Shares"])
-    out["Текст родительского поста"] = first_existing(df, ["Текст родительского поста", "Родительский пост", "Parent text"])
-    out["Ссылка на родительский пост"] = first_existing(df, ["Ссылка на родительский пост", "Parent URL", "Parent link"])
-    out["Дата публикации родительского поста"] = first_existing(df, ["Дата публикации родительского поста", "Parent date"])
+    out["Текст родительского поста"] = first_existing(
+        df, ["Текст родительского поста", "Родительский пост", "Parent text"]
+    )
+    out["Ссылка на родительский пост"] = first_existing(
+        df, ["Ссылка на родительский пост", "Parent URL", "Parent link"]
+    )
+    out["Дата публикации родительского поста"] = first_existing(
+        df, ["Дата публикации родительского поста", "Parent date"]
+    )
 
     out["Теги"] = first_existing(df, ["Теги", "Tags", "Метки", "Tag"])
     out["Категории"] = first_existing(df, ["Категории", "Category", "Categories"])
     out["Сюжет"] = first_existing(df, ["Сюжет", "Topic", "Theme", "Тема"])
-    out["Id сообщения"] = first_existing(df, ["Id сообщения", "ID сообщения", "message_id", "id", "Hash сообщения"])
+    out["Id сообщения"] = first_existing(
+        df, ["Id сообщения", "ID сообщения", "message_id", "id", "Hash сообщения"]
+    )
 
     # Optional human/topic markup columns. If present, they become a top-level
     # boundary for clustering, but do not replace information events.
-    main_topic = first_existing(df, ["Основная тема", "Главная тема", "Main topic", "Primary topic", "Topic main", "Сюжет", "Topic", "Theme"])
+    main_topic = first_existing(
+        df,
+        [
+            "Основная тема",
+            "Главная тема",
+            "Main topic",
+            "Primary topic",
+            "Topic main",
+            "Сюжет",
+            "Topic",
+            "Theme",
+        ],
+    )
     all_topics_raw = first_existing(df, ["Все темы", "Темы", "Topics", "All topics"])
-    all_topics_list = first_existing(df, ["Все темы (список)", "Список тем", "Topics list", "All topics list"])
-    relevant = first_existing(df, ["Релевантное", "Релевантность", "Relevant", "Is relevant"])
+    all_topics_list = first_existing(
+        df, ["Все темы (список)", "Список тем", "Topics list", "All topics list"]
+    )
+    relevant = first_existing(
+        df, ["Релевантное", "Релевантность", "Relevant", "Is relevant"]
+    )
 
-    out["Основная тема"] = main_topic.apply(lambda x: re.sub(r"\s+", " ", str(x).strip()))
+    out["Основная тема"] = main_topic.apply(
+        lambda x: re.sub(r"\s+", " ", str(x).strip())
+    )
     out["Все темы"] = all_topics_raw.apply(_normalize_topics_list)
     out["Все темы (список)"] = all_topics_list.apply(_normalize_topics_list)
     out.loc[out["Все темы (список)"].str.strip() == "", "Все темы (список)"] = out.loc[
@@ -437,7 +670,9 @@ def canonicalize_table(raw: pd.DataFrame, source_file: str = "", source_system: 
     # Brand Analytics specificity: all non-empty columns after `Обработано`
     # are tag columns. Keep them in the canonical table so preprocess can use
     # them as first-class topic signals instead of falling back to generic words.
-    ba_tag_columns = _brand_analytics_tag_columns(df) if detected == "brand_analytics" else []
+    ba_tag_columns = (
+        _brand_analytics_tag_columns(df) if detected == "brand_analytics" else []
+    )
     for tag_col in ba_tag_columns:
         if tag_col not in out.columns and tag_col in df.columns:
             out[tag_col] = df[tag_col].fillna("").astype(str)
@@ -454,12 +689,17 @@ def canonicalize_table(raw: pd.DataFrame, source_file: str = "", source_system: 
         if col not in out.columns:
             out[col] = ""
 
-    out = out[[c for c in CANONICAL_COLUMNS if c in out.columns] + [c for c in out.columns if c not in CANONICAL_COLUMNS]]
+    out = out[
+        [c for c in CANONICAL_COLUMNS if c in out.columns]
+        + [c for c in out.columns if c not in CANONICAL_COLUMNS]
+    ]
     out = _clean_dataframe(out)
     return out
 
 
-def read_source_table(path: str | Path, source_system: str = "auto", sheet_name: str | int | None = None) -> pd.DataFrame:
+def read_source_table(
+    path: str | Path, source_system: str = "auto", sheet_name: str | int | None = None
+) -> pd.DataFrame:
     path = Path(path)
     suffix = path.suffix.lower()
     if suffix in {".xlsx", ".xls", ".xlsm"}:
@@ -474,6 +714,7 @@ def get_excel_sheet_names(path: str | Path) -> list[str]:
     if path.suffix.lower() not in {".xlsx", ".xls", ".xlsm"}:
         return []
     try:
-        return pd.ExcelFile(path).sheet_names
+        xls, _ = _open_excel_file_resilient(path)
+        return xls.sheet_names
     except Exception:
         return []

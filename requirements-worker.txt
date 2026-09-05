@@ -1,0 +1,8 @@
+# Зависимости воркера автозагрузки (scripts/ingest_worker.py).
+# Streamlit и библиотеки отчетов не нужны: воркер работает без интерфейса.
+numpy>=1.24
+openpyxl>=3.1
+pandas>=2.0
+pyarrow>=14.0
+scikit-learn>=1.3
+supabase>=2.0

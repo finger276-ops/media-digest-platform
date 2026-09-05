@@ -30,7 +30,13 @@ except Exception:  # pragma: no cover
     Client = Any  # type: ignore
     create_client = None  # type: ignore
 
-TABLES = ["events", "discussions", "messages", "discussion_messages", "event_discussions"]
+TABLES = [
+    "events",
+    "discussions",
+    "messages",
+    "discussion_messages",
+    "event_discussions",
+]
 ROW_KEY_COLUMNS = {
     "events": ["event_id"],
     "discussions": ["discussion_id"],
@@ -53,8 +59,13 @@ def _secret_value(*names: str) -> str:
                 pass
             # Also support [supabase] url/key sections.
             try:
-                if "supabase" in st.secrets and name.lower().replace("supabase_", "") in st.secrets["supabase"]:
-                    return str(st.secrets["supabase"][name.lower().replace("supabase_", "")])
+                if (
+                    "supabase" in st.secrets
+                    and name.lower().replace("supabase_", "") in st.secrets["supabase"]
+                ):
+                    return str(
+                        st.secrets["supabase"][name.lower().replace("supabase_", "")]
+                    )
             except Exception:
                 pass
         value = os.getenv(name)
@@ -64,16 +75,27 @@ def _secret_value(*names: str) -> str:
 
 
 def supabase_configured() -> bool:
-    return bool(_secret_value("SUPABASE_URL") and _secret_value("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_KEY", "SUPABASE_ANON_KEY"))
+    return bool(
+        _secret_value("SUPABASE_URL")
+        and _secret_value(
+            "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_KEY", "SUPABASE_ANON_KEY"
+        )
+    )
 
 
 def get_supabase_client() -> Client:
     if create_client is None:
-        raise RuntimeError("Пакет supabase не установлен. Добавьте supabase>=2 в requirements.txt")
+        raise RuntimeError(
+            "Пакет supabase не установлен. Добавьте supabase>=2 в requirements.txt"
+        )
     url = _secret_value("SUPABASE_URL")
-    key = _secret_value("SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_KEY", "SUPABASE_ANON_KEY")
+    key = _secret_value(
+        "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_KEY", "SUPABASE_ANON_KEY"
+    )
     if not url or not key:
-        raise RuntimeError("Не заданы SUPABASE_URL и SUPABASE_SERVICE_ROLE_KEY/SUPABASE_KEY в secrets.")
+        raise RuntimeError(
+            "Не заданы SUPABASE_URL и SUPABASE_SERVICE_ROLE_KEY/SUPABASE_KEY в secrets."
+        )
     return create_client(url, key)
 
 
@@ -87,7 +109,9 @@ def safe_slug(value: str, fallback: str = "period") -> str:
 def ascii_storage_component(value: str, fallback: str = "file") -> str:
     """Return a Supabase Storage-safe ASCII path component."""
     value = str(value or "").strip()
-    value = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
+    value = (
+        unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
+    )
     value = re.sub(r"[^0-9A-Za-z._-]+", "_", value)
     value = re.sub(r"_+", "_", value).strip("._-")
     return value or fallback
@@ -115,7 +139,9 @@ def content_type_for_filename(filename: str) -> str:
 
 def make_period_id(period_name: str, source_filename: str = "") -> str:
     base = safe_slug(period_name, "period")[:70]
-    digest = hashlib.md5(f"{period_name}|{source_filename}".encode("utf-8", errors="ignore")).hexdigest()[:8]
+    digest = hashlib.md5(
+        f"{period_name}|{source_filename}".encode("utf-8", errors="ignore")
+    ).hexdigest()[:8]
     return f"{base}_{digest}"
 
 
@@ -134,7 +160,9 @@ def normalize_json_value(value: Any) -> Any:
     return value
 
 
-def dataframe_to_payload_records(df: pd.DataFrame, table_name: str, period_id: str) -> list[dict[str, Any]]:
+def dataframe_to_payload_records(
+    df: pd.DataFrame, table_name: str, period_id: str
+) -> list[dict[str, Any]]:
     if df is None or df.empty:
         return []
     records: list[dict[str, Any]] = []
@@ -146,27 +174,38 @@ def dataframe_to_payload_records(df: pd.DataFrame, table_name: str, period_id: s
 
     for idx, row in work.iterrows():
         payload = {str(k): normalize_json_value(v) for k, v in row.to_dict().items()}
-        if key_cols and all(col in payload and str(payload.get(col) or "").strip() for col in key_cols):
+        if key_cols and all(
+            col in payload and str(payload.get(col) or "").strip() for col in key_cols
+        ):
             row_id = "::".join(str(payload[col]) for col in key_cols)
         else:
             raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
             row_id = f"row_{idx}_{hashlib.md5(raw.encode('utf-8')).hexdigest()[:10]}"
-        records.append({
-            "period_id": period_id,
-            "table_name": table_name,
-            "row_id": str(row_id),
-            "payload": payload,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        })
+        records.append(
+            {
+                "period_id": period_id,
+                "table_name": table_name,
+                "row_id": str(row_id),
+                "payload": payload,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
     return records
 
 
 def chunked(items: list[Any], size: int = CHUNK_SIZE) -> Iterable[list[Any]]:
     for i in range(0, len(items), size):
-        yield items[i:i + size]
+        yield items[i : i + size]
 
 
-def _fetch_all(client: Client, table: str, *, filters: dict[str, Any] | None = None, order: str | None = None, select: str = "*") -> list[dict[str, Any]]:
+def _fetch_all(
+    client: Client,
+    table: str,
+    *,
+    filters: dict[str, Any] | None = None,
+    order: str | None = None,
+    select: str = "*",
+) -> list[dict[str, Any]]:
     """Paginated select. Supabase defaults to 1000 rows per request."""
     rows: list[dict[str, Any]] = []
     start = 0
@@ -254,7 +293,9 @@ def _prefix_generated_ids(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     return df
 
 
-def load_generated_tables_from_supabase(period_ids: list[str]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def load_generated_tables_from_supabase(
+    period_ids: list[str],
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     if not period_ids:
         return tuple(pd.DataFrame() for _ in TABLES)  # type: ignore[return-value]
     loaded = [load_table_from_supabase(period_ids, table_name) for table_name in TABLES]
@@ -263,9 +304,15 @@ def load_generated_tables_from_supabase(period_ids: list[str]) -> tuple[pd.DataF
     events = _prefix_generated_ids(events, ["event_id"])
     discussions = _prefix_generated_ids(discussions, ["discussion_id"])
     discussion_messages = _prefix_generated_ids(discussion_messages, ["discussion_id"])
-    event_discussions = _prefix_generated_ids(event_discussions, ["event_id", "discussion_id"])
+    event_discussions = _prefix_generated_ids(
+        event_discussions, ["event_id", "discussion_id"]
+    )
 
-    for df, cols in [(events, ["start_date", "end_date"]), (discussions, ["start_date", "end_date"]), (messages, ["datetime"]),]:
+    for df, cols in [
+        (events, ["start_date", "end_date"]),
+        (discussions, ["start_date", "end_date"]),
+        (messages, ["datetime"]),
+    ]:
         for col in cols:
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors="coerce")
@@ -274,6 +321,7 @@ def load_generated_tables_from_supabase(period_ids: list[str]) -> tuple[pd.DataF
 
 def read_generated_tables_from_dir(data_dir: str | Path) -> dict[str, pd.DataFrame]:
     from io_utils import read_table
+
     return {table: read_table(str(data_dir), table) for table in TABLES}
 
 
@@ -308,15 +356,23 @@ def save_processed_tables(
         "manifest": manifest or {},
         "uploaded_at": datetime.now(timezone.utc).isoformat(),
     }
-    client.table("dashboard_periods").upsert(period_payload, on_conflict="period_id").execute()
+    client.table("dashboard_periods").upsert(
+        period_payload, on_conflict="period_id"
+    ).execute()
 
     if replace:
-        client.table("dashboard_table_rows").delete().eq("period_id", period_id).execute()
+        client.table("dashboard_table_rows").delete().eq(
+            "period_id", period_id
+        ).execute()
 
     for table_name in TABLES:
-        records = dataframe_to_payload_records(tables.get(table_name, pd.DataFrame()), table_name, period_id)
+        records = dataframe_to_payload_records(
+            tables.get(table_name, pd.DataFrame()), table_name, period_id
+        )
         for batch in chunked(records):
-            client.table("dashboard_table_rows").upsert(batch, on_conflict="period_id,table_name,row_id").execute()
+            client.table("dashboard_table_rows").upsert(
+                batch, on_conflict="period_id,table_name,row_id"
+            ).execute()
 
 
 def save_processed_tables_from_dir(
@@ -359,7 +415,11 @@ def _normalize_date_for_db(value: Any) -> str | None:
     iso_match = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})", text)
     if iso_match:
         try:
-            return date(int(iso_match.group(1)), int(iso_match.group(2)), int(iso_match.group(3))).isoformat()
+            return date(
+                int(iso_match.group(1)),
+                int(iso_match.group(2)),
+                int(iso_match.group(3)),
+            ).isoformat()
         except ValueError:
             return None
 
@@ -381,7 +441,13 @@ def _normalize_date_for_db(value: Any) -> str | None:
 
 def get_period(period_id: str) -> dict[str, Any] | None:
     client = get_supabase_client()
-    response = client.table("dashboard_periods").select("*").eq("period_id", period_id).limit(1).execute()
+    response = (
+        client.table("dashboard_periods")
+        .select("*")
+        .eq("period_id", period_id)
+        .limit(1)
+        .execute()
+    )
     data = response.data or []
     return data[0] if data else None
 
@@ -420,7 +486,9 @@ def update_period_metadata(
     if not payload:
         return
     client = get_supabase_client()
-    client.table("dashboard_periods").update(payload).eq("period_id", period_id).execute()
+    client.table("dashboard_periods").update(payload).eq(
+        "period_id", period_id
+    ).execute()
 
 
 def set_period_status(period_id: str, status: str) -> None:
@@ -441,7 +509,9 @@ def delete_period(period_id: str, *, hard: bool = False) -> None:
         set_period_status(period_id, "hidden")
 
 
-def save_uploaded_csv_to_storage(period_id: str, filename: str, file_bytes: bytes) -> str:
+def save_uploaded_csv_to_storage(
+    period_id: str, filename: str, file_bytes: bytes
+) -> str:
     """Optionally save raw CSV to Supabase Storage.
 
     Requires a bucket named by SUPABASE_STORAGE_BUCKET, default dashboard-csv.
@@ -456,7 +526,11 @@ def save_uploaded_csv_to_storage(period_id: str, filename: str, file_bytes: byte
     digest = hashlib.md5(file_bytes or b"").hexdigest()[:8]
     path = f"{safe_period}/{digest}_{safe_name}"
     try:
-        client.storage.from_(bucket).upload(path, file_bytes, {"content-type": content_type_for_filename(filename), "upsert": "true"})
+        client.storage.from_(bucket).upload(
+            path,
+            file_bytes,
+            {"content-type": content_type_for_filename(filename), "upsert": "true"},
+        )
     except TypeError:
         client.storage.from_(bucket).upload(path, file_bytes)
     return path

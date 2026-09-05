@@ -1,0 +1,57 @@
+name: Автозагрузка выгрузок
+
+# Воркер разбирает очередь platform_ingest_queue: берет файлы, которые положил
+# n8n, обрабатывает их штатным пайплайном платформы и создает периоды проектов.
+#
+# Запускается по расписанию, вручную (кнопка Run workflow) и по внешнему сигналу
+# repository_dispatch — n8n может дернуть его сразу после загрузки файла,
+# чтобы не ждать следующего слота расписания.
+
+on:
+  schedule:
+    # Каждые 15 минут. GitHub может задерживать запуск в часы пиковой нагрузки.
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      max_tasks:
+        description: "Сколько задач обработать за запуск"
+        required: false
+        default: "10"
+  repository_dispatch:
+    types: [ingest]
+
+concurrency:
+  # Два воркера одновременно не нужны: очередь и так защищена от гонок,
+  # но параллельные запуски тратят лимиты Actions.
+  group: ingest-worker
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Забрать код
+        uses: actions/checkout@v4
+
+      - name: Поставить Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-worker.txt
+
+      - name: Установить зависимости
+        run: pip install -r requirements-worker.txt
+
+      - name: Обработать очередь
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_STORAGE_BUCKET: ${{ secrets.SUPABASE_STORAGE_BUCKET }}
+          INGEST_NOTIFY_WEBHOOK: ${{ secrets.INGEST_NOTIFY_WEBHOOK }}
+          INGEST_WORKER_ID: github-actions-${{ github.run_id }}
+        run: |
+          python scripts/ingest_worker.py \
+            --max-tasks "${{ github.event.inputs.max_tasks || '10' }}" \
+            --verbose
