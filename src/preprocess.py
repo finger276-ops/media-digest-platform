@@ -417,22 +417,6 @@ def infer_display_tags(text: str, microtopic: str, source_tags: list[str]) -> li
             break
 
     micro_map = {
-        # Taxi profile.
-        "strike": ["Забастовка"],
-        "wb_launch": ["WB Такси"],
-        "fasten_service": ["Фастен"],
-        "tax_law": ["Законы и налоги"],
-        "app_bug": ["Приложение и сбои"],
-        "app_orders": ["Приложение и сбои"],
-        "payments": ["Оплата, выплаты и деньги"],
-        "account_block": ["Блокировки и доступ"],
-        "child_seat": ["Детские кресла"],
-        "coeff_priority": ["Коэффициент"],
-        "airport": ["Аэропорты"],
-        "gps_map": ["Карты и навигация"],
-        "support": ["Поддержка и клиентский сервис"],
-        "general_yandex": ["яндекс"],
-        # Generic profile.
         "issue_problem": ["Проблемы, жалобы и негативный опыт"],
         "price_terms": ["Цены, стоимость и условия"],
         "product_quality": ["Качество продукта или услуги"],
@@ -818,10 +802,9 @@ def classify_microtopic(text: str, tags: str | Iterable[str] = "") -> str:
     """
     Rule-based microtopic layer.
 
-    The first block keeps the old taxi profile. The second block is universal
-    and works for any monitoring export. If the source file already contains
-    topics/tags, the most specific source label becomes a stable technical
-    microtopic bucket, so the platform no longer depends on taxi keywords.
+    Правила универсальные и работают для любой выгрузки мониторинга. Если в
+    исходном файле уже есть темы или теги, самая конкретная метка источника
+    становится устойчивой технической микротемой.
     """
     t = normalize_spaces(text).lower().replace("ё", "е")
     if isinstance(tags, str):
@@ -830,170 +813,7 @@ def classify_microtopic(text: str, tags: str | Iterable[str] = "") -> str:
         tag_values = {str(x).strip() for x in tags if str(x).strip()}
     tag_values_clean = {normalize_label(x) for x in tag_values}
     tag_values_clean = {x for x in tag_values_clean if x}
-    taxi_context = regex_any(
-        t,
-        [
-            r"\bтакси\b",
-            r"водител\w*",
-            r"таксопарк\w*",
-            r"яндекс\s+про",
-            r"таксометр",
-            r"агрегатор\w*",
-            r"самозанят\w*",
-            r"минтранс",
-        ],
-    )
-
-    # Taxi profile: preserved for existing taxi chat projects.
-    if "Забастовка" in tag_values_clean or regex_any(
-        t,
-        [
-            r"\bзабастов\w*",
-            r"\bбойкот\w*",
-            r"\bстачк\w*",
-            r"\bмитинг\w*",
-            r"коллективн\w+\s+акци",
-        ],
-    ):
-        return "strike"
-    if "WB Такси" in tag_values_clean or regex_any(
-        t,
-        [r"wb\s*такси", r"вб\s*такси", r"wildberries\s*такси", r"вайлдбер\w*\s*такси"],
-    ):
-        return "wb_launch"
-    if "Фастен" in tag_values_clean or regex_any(
-        t, [r"fasten", r"фаст[еэо]н", r"фастон"]
-    ):
-        return "fasten_service"
-    if "Законы и налоги" in tag_values_clean or (
-        taxi_context
-        and regex_any(
-            t,
-            [
-                r"налог\w*",
-                r"патент\w*",
-                r"самозанят\w*",
-                r"минтранс",
-                r"реестр\w*",
-                r"закон\w*",
-                r"разрешени\w*",
-                r"лиценз\w*",
-                r"штраф\w*",
-                r"провер\w*",
-            ],
-        )
-    ):
-        return "tax_law"
-    if regex_any(
-        t,
-        [
-            r"не\s+работа\w*",
-            r"не\s+открыва\w*",
-            r"не\s+груз\w*",
-            r"не\s+заход\w*",
-            r"завис\w*",
-            r"висит",
-            r"\bсбой\w*",
-            r"\bошибк\w*",
-            r"глюк\w*",
-            r"вылета\w*",
-            r"приложени\w*",
-            r"яндекс\s+про",
-        ],
-    ):
-        if regex_any(
-            t,
-            [
-                r"нет\s+заказ\w*",
-                r"заказ\w*\s+не\s+приход",
-                r"пропал\w*\s+заказ",
-                r"заказ\w*\s+пропал",
-                r"распределени\w*\s+заказ",
-            ],
-        ):
-            return "app_orders"
-        return "app_bug"
-    if taxi_context and regex_any(
-        t,
-        [
-            r"\bоплат\w*",
-            r"выплат\w*",
-            r"деньг\w*",
-            r"перевод\w*",
-            r"задолж\w*",
-            r"баланс\w*",
-            r"комисс\w*",
-        ],
-    ):
-        return "payments"
-    if regex_any(
-        t,
-        [
-            r"блокир\w*",
-            r"заблок\w*",
-            r"\bбан\b",
-            r"аккаунт\w*",
-            r"доступ\s+(?:к\s+)?(?:аккаунт\w*|профил\w*|яндекс\w*)",
-            r"деактив\w*",
-            r"профил\w*\s+(?:заблок|не\s+работ|отключ)",
-            r"самозанят\w*\s+не\s+подтверж",
-        ],
-    ):
-        return "account_block"
-    if regex_any(
-        t,
-        [
-            r"детск\w*\s+кресл\w*",
-            r"кресл\w*.{0,40}ребен\w*",
-            r"ребен\w*.{0,40}кресл\w*",
-            r"ребенк\w*.{0,40}кресл\w*",
-            r"бустер\w*",
-        ],
-    ):
-        return "child_seat"
-    if "Коэффициент" in tag_values_clean or (
-        taxi_context
-        and regex_any(
-            t,
-            [
-                r"коэф\w*",
-                r"коэффициент\w*",
-                r"\bкэф\w*",
-                r"приоритет\w*",
-                r"тариф\w*",
-                r"ценник\w*",
-                r"подач\w*",
-            ],
-        )
-    ):
-        return "coeff_priority"
-    if regex_any(
-        t, [r"аэропорт\w*", r"пулково", r"шереметьево", r"внуково", r"домодедово"]
-    ):
-        return "airport"
-    if taxi_context and regex_any(
-        t,
-        [
-            r"карт\w*",
-            r"навигатор\w*",
-            r"адрес\w*",
-            r"геолокац\w*",
-            r"gps",
-            r"маршрут\w*",
-        ],
-    ):
-        return "gps_map"
-    if taxi_context and regex_any(
-        t,
-        [r"поддержк\w*", r"диспетчер\w*", r"парк\w*", r"таксопарк\w*", r"оператор\w*"],
-    ):
-        return "support"
-    if "яндекс" in {x.lower() for x in tag_values_clean} or regex_any(
-        t, [r"яндекс", r"\bяши\b", r"\bяше\b", r"\bяшу\b", r"yandex"]
-    ):
-        return "general_yandex"
-
-    # Universal profile for non-taxi projects.
+    # Универсальные правила: работают для любой выгрузки мониторинга.
     if regex_any(
         t,
         [
@@ -1466,29 +1286,7 @@ def build_title(
         ):
             return rule["title"]
 
-    # Keep old taxi titles stable.
-    if tag == "Забастовка":
-        return "Призывы к забастовке или бойкоту"
-    if tag == "Приложение и сбои":
-        return "Сбои и проблемы в приложении"
-    if tag == "Яндекс Про":
-        return "Проблемы с Яндекс Про"
-    if tag == "Законы и налоги":
-        return "Законы, налоги и регулирование такси"
-    if tag == "Коэффициент":
-        return "Коэффициенты, приоритет и тарифы"
-    if tag == "WB Такси":
-        return "Запуск и обсуждение WB Такси"
-    if tag == "Фастен":
-        return "Обсуждение сервиса Фастен"
-    if tag == "яндекс":
-        if any(k in kw for k in ["дивиденды", "акции", "акционеры"]):
-            return "Финансовые новости и обсуждение Яндекса"
-        if any(k in kw for k in ["кресло", "кресла", "детским"]):
-            return "Детские кресла и требования к заказам"
-        return "Общее обсуждение Яндекса"
-
-    # Generic microtopics are useful when the file has no human markup.
+    # Микротемы выручают, когда в файле нет человеческой разметки.
     if microtopic in MICROTOPIC_TITLES and microtopic not in {"other", "general"}:
         title = MICROTOPIC_TITLES[microtopic]
         if (

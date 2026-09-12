@@ -70,14 +70,17 @@ def clear_platform_caches(project_id: str | None = None) -> None:
     bump_cache(project_id, namespaces=("data", "manual", "periods", "projects"))
 
 
+# Кеши ограничены по числу записей: приложение живёт в контейнере примерно на
+# гигабайт памяти, а одна выгрузка за период — это десятки мегабайт таблиц.
+# Без ограничения старые наборы периодов копились в памяти до перезапуска.
 if st is not None:
 
-    @st.cache_data(ttl=120, show_spinner=False)
+    @st.cache_data(ttl=120, show_spinner=False, max_entries=4)
     def _cached_list_projects(include_inactive: bool, version: int) -> pd.DataFrame:
         with perf_block("store.list_projects", include_inactive=include_inactive):
             return store.list_projects(include_inactive=include_inactive)
 
-    @st.cache_data(ttl=120, show_spinner=False)
+    @st.cache_data(ttl=120, show_spinner=False, max_entries=8)
     def _cached_list_periods(
         project_id: str, include_inactive: bool, version: int
     ) -> pd.DataFrame:
@@ -88,7 +91,7 @@ if st is not None:
         ):
             return store.list_periods(project_id, include_inactive=include_inactive)
 
-    @st.cache_data(ttl=300, show_spinner=False)
+    @st.cache_data(ttl=600, show_spinner=False, max_entries=3)
     def _cached_load_generated_tables(
         project_id: str, period_ids_tuple: tuple[str, ...], version: int
     ):
@@ -99,7 +102,16 @@ if st is not None:
         ):
             return store.load_generated_tables(project_id, list(period_ids_tuple))
 
-    @st.cache_data(ttl=120, show_spinner=False)
+    @st.cache_data(ttl=900, show_spinner=False, max_entries=6)
+    def _cached_load_table(
+        project_id: str, period_ids_tuple: tuple[str, ...], table_name: str, version: int
+    ) -> pd.DataFrame:
+        with perf_block(
+            "store.load_table", project_id=project_id, table=table_name
+        ):
+            return store.load_table(project_id, list(period_ids_tuple), table_name)
+
+    @st.cache_data(ttl=120, show_spinner=False, max_entries=8)
     def _cached_list_manual(
         project_id: str, table_name: str | None, version: int
     ) -> pd.DataFrame:
@@ -108,7 +120,7 @@ if st is not None:
         ):
             return store.list_manual(project_id, table_name=table_name)
 
-    @st.cache_data(ttl=120, show_spinner=False)
+    @st.cache_data(ttl=120, show_spinner=False, max_entries=16)
     def _cached_get_manual(
         project_id: str, row_key: str, version: int
     ) -> dict[str, Any] | None:
@@ -116,6 +128,11 @@ if st is not None:
             return store.get_manual(project_id, row_key)
 
 else:  # pragma: no cover
+
+    def _cached_load_table(
+        project_id: str, period_ids_tuple: tuple[str, ...], table_name: str, version: int
+    ) -> pd.DataFrame:
+        return store.load_table(project_id, list(period_ids_tuple), table_name)
 
     def _cached_list_projects(include_inactive: bool, version: int) -> pd.DataFrame:
         return store.list_projects(include_inactive=include_inactive)
@@ -139,6 +156,20 @@ else:  # pragma: no cover
         project_id: str, row_key: str, version: int
     ) -> dict[str, Any] | None:
         return store.get_manual(project_id, row_key)
+
+
+def load_table(project_id: str, period_ids: list[str], table_name: str) -> pd.DataFrame:
+    """Загрузить одну таблицу периода.
+
+    Нужна там, где не требуется вся подготовка дашборда: например, чтобы
+    посчитать метрики прошлого периода для дельт в шапке.
+    """
+    key = tuple(sorted(str(pid) for pid in (period_ids or []) if str(pid).strip()))
+    if not key:
+        return pd.DataFrame()
+    return _cached_load_table(
+        str(project_id), key, str(table_name), cache_version(project_id, "data")
+    )
 
 
 def list_projects(include_inactive: bool = False) -> pd.DataFrame:
