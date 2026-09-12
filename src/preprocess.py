@@ -722,6 +722,11 @@ def normalize_messages(
     df["engagement"] = as_int(
         "Вовлечённость", "Вовлеченность", "Engagement", "engagement"
     )
+    # Составляющие вовлечённости нужны метрикам ER и ERR: если выгрузка отдаёт
+    # их отдельно, реакции считаются точнее, чем по сводной колонке.
+    df["likes"] = as_int("Лайки", "Likes", "likes")
+    df["comments"] = as_int("Комментарии", "Комментариев", "Comments", "comments")
+    df["reposts"] = as_int("Репосты", "Reposts", "Shares", "reposts")
 
     sentiment_series = get_text_series(
         df, "Тональность", aliases=["sentiment", "Окраска", "Тон"]
@@ -765,6 +770,9 @@ def normalize_messages(
         "audience": "audience",
         "views": "views",
         "engagement": "engagement",
+        "likes": "likes",
+        "comments": "comments",
+        "reposts": "reposts",
         "tags": "tags",
         "tag_count": "tag_count",
         "microtopic": "microtopic",

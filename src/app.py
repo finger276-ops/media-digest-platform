@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import tempfile
 import uuid
 import re
 import textwrap
@@ -15,8 +14,6 @@ import pandas as pd
 import streamlit as st
 import altair as alt
 
-from import_adapters import read_source_table
-from io_utils import read_table
 from services.cached_store import (
     supabase_configured,
     list_projects,
@@ -24,13 +21,10 @@ from services.cached_store import (
     update_project,
     resolve_project_access,
     list_periods,
-    make_period_id,
-    save_processed_tables,
     load_generated_tables,
     update_period_metadata,
     delete_period,
     delete_project,
-    save_uploaded_file_to_storage,
     save_report_logo_to_storage,
     download_storage_file,
     delete_storage_file,
@@ -40,7 +34,6 @@ from services.cached_store import (
     delete_manual,
     clear_platform_caches,
 )
-from preprocess import run_preprocess_from_dataframe
 from services.metrics_compute import (
     numeric_series,
     prepare_dashboard_messages,
@@ -55,13 +48,16 @@ from services.tag_compute import (
     build_tag_statistics_compute,
 )
 from services.message_compute import message_text_column, message_link_column
+from services.ingest import IngestError, process_canonical, read_canonical_bytes
 from noise_filter_ui import render_noise_filter_block
+from ingest_admin_ui import render_ingest_admin_page
+from brand_metrics_ui import render_brand_metrics_page
 from tag_hierarchy_ui import render_tag_hierarchy_block
 from tag_tier_analytics_ui import render_tier_analytics_block
 from services.perf import perf_block, render_perf_sidebar, reset_perf_events
 
 APP_TITLE = "Платформа дайджестов"
-APP_VERSION = "4.5.2: report logo upload"
+APP_VERSION = "4.7.0: индексы бренда (BPI, NSS, SES, SOV, ER)"
 
 ALGORITHM_PROFILE_OPTIONS = {
     "universal": "Универсальный",
@@ -133,6 +129,7 @@ DEFAULT_DASHBOARD_VIEW_SETTINGS = {
 
 DASHBOARD_SECTION_OPTIONS = [
     "Клиентский обзор",
+    "Индексы бренда",
     "Теги",
     "Инфоповоды",
     "Ключевые сообщения",
@@ -140,6 +137,7 @@ DASHBOARD_SECTION_OPTIONS = [
 ]
 TAXI_DASHBOARD_SECTION_OPTIONS = [
     "Клиентский обзор",
+    "Индексы бренда",
     "Инфоповоды",
     "Ключевые сообщения",
     "Динамика",
@@ -3917,30 +3915,10 @@ def render_period_selector(project_id: str) -> tuple[list[str], pd.DataFrame]:
 
 
 def read_uploaded_to_canonical(uploaded_file, source_system: str) -> pd.DataFrame:
-    suffix = Path(uploaded_file.name).suffix.lower() or ".csv"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(uploaded_file.getvalue())
-        tmp_path = tmp.name
-    try:
-        return read_source_table(tmp_path, source_system=source_system)
-    finally:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-
-
-def read_generated_tables_from_dir(output_dir: Path) -> dict[str, pd.DataFrame]:
-    return {
-        name: read_table(str(output_dir), name)
-        for name in [
-            "events",
-            "discussions",
-            "messages",
-            "discussion_messages",
-            "event_discussions",
-        ]
-    }
+    """Чтение загруженного файла тем же кодом, что использует автозагрузка."""
+    return read_canonical_bytes(
+        uploaded_file.getvalue(), uploaded_file.name, source_system
+    )
 
 
 def render_upload_page(project_id: str, role: str, work_dir: str) -> None:
@@ -4016,45 +3994,38 @@ def render_upload_page(project_id: str, role: str, work_dir: str) -> None:
         st.dataframe(canonical.head(20), use_container_width=True)
     render_noise_filter_block(canonical)
 
-    period_id = make_period_id(project_id, period_name, uploaded.name)
-    output_dir = Path(work_dir) / project_id / period_id
-    output_dir.mkdir(parents=True, exist_ok=True)
     with st.spinner("Собираю сообщения, обсуждения и инфоповоды..."):
-        manifest = run_preprocess_from_dataframe(
-            canonical,
-            output=output_dir,
-            source_file=uploaded.name,
-            similarity_threshold=float(threshold),
-            event_gap_hours=float(event_gap_hours),
-            event_window_hours=float(event_window_hours),
-        )
-        tables = read_generated_tables_from_dir(output_dir)
+        try:
+            result = process_canonical(
+                canonical,
+                project_id=project_id,
+                source_filename=uploaded.name,
+                file_bytes=uploaded.getvalue(),
+                period_name=period_name,
+                source_system=source_system,
+                date_from=date_from,
+                date_to=date_to,
+                params={
+                    "similarity_threshold": float(threshold),
+                    "event_gap_hours": float(event_gap_hours),
+                    "event_window_hours": float(event_window_hours),
+                },
+                work_dir=work_dir,
+                extra_manifest={"ingest": {"mode": "manual", "role": role}},
+            )
+        except IngestError as exc:
+            st.error(str(exc))
+            return
 
-    storage_path = ""
-    try:
-        storage_path = save_uploaded_file_to_storage(
-            project_id, period_id, uploaded.name, uploaded.getvalue()
-        )
-    except Exception as exc:
+    if result.get("storage_error"):
         st.warning(
-            f"Обработанные данные сохраню в БД, но сырой файл не удалось сохранить в Storage: {exc}"
+            "Обработанные данные сохранены в БД, но сырой файл не удалось положить "
+            f"в Storage: {result['storage_error']}"
         )
-
-    with st.spinner("Сохраняю данные проекта в Supabase..."):
-        manifest = dict(manifest or {})
-        manifest.update({"storage_path": storage_path, "source_system": source_system})
-        save_processed_tables(
-            project_id=project_id,
-            period_id=period_id,
-            period_name=period_name,
-            source_filename=uploaded.name,
-            tables=tables,
-            manifest=manifest,
-            date_from=date_from,
-            date_to=date_to,
-            replace=True,
-        )
-    st.success("Период сохранен в платформенной базе.")
+    st.success(
+        f"Период «{result['period_name']}» сохранен: сообщений {result['messages']}, "
+        f"инфоповодов {result['events']}."
+    )
     clear_platform_caches(project_id)
 
 
@@ -6286,6 +6257,7 @@ def render_taxi_dashboard(
     report_branding: dict[str, Any] | None = None,
     dashboard_view_settings: dict[str, Any] | None = None,
     client_view: bool = False,
+    project_settings: dict[str, Any] | None = None,
 ) -> None:
     """Dedicated UI for driver-chat digest projects inside the platform namespace."""
     dashboard_view_settings = dashboard_view_settings or dict(
@@ -6340,7 +6312,12 @@ def render_taxi_dashboard(
         metrics=metrics,
         branding=report_branding,
     )
-    section_options = ["Клиентский обзор", "Инфоповоды", "Ключевые сообщения"]
+    section_options = [
+        "Клиентский обзор",
+        "Индексы бренда",
+        "Инфоповоды",
+        "Ключевые сообщения",
+    ]
     if len(selected_period_ids) >= 2:
         section_options.append("Динамика")
     default_section = str(
@@ -6359,6 +6336,15 @@ def render_taxi_dashboard(
     if section == "Клиентский обзор":
         render_client_insights(
             messages, events_agg, periods, selected_period_ids, profile="driver_chats"
+        )
+    elif section == "Индексы бренда":
+        render_brand_metrics_page(
+            project_id,
+            project_settings or {},
+            messages,
+            periods,
+            selected_period_ids,
+            role_can_edit=role_rank(role) >= role_rank("editor"),
         )
     elif section == "Инфоповоды":
         render_small_events_notice(hidden_events, hidden_messages, min_event_messages)
@@ -6391,6 +6377,8 @@ def main() -> None:
                 st.session_state["platform_page"] = "projects"
     if project_id:
         page_options = ["Дашборд", "Загрузка файла", "История периодов"]
+        if role_rank(role) >= role_rank("editor"):
+            page_options.append("Автозагрузка")
     else:
         page_options = []
     if is_admin:
@@ -6458,6 +6446,9 @@ def main() -> None:
     if page == "История периодов":
         render_period_history(project_id, role)
         return
+    if page == "Автозагрузка":
+        render_ingest_admin_page(project_id, project_name, args.work_dir)
+        return
 
     selected_period_ids, periods = render_period_selector(project_id)
     if not selected_period_ids:
@@ -6499,6 +6490,7 @@ def main() -> None:
             report_branding=report_branding,
             dashboard_view_settings=dashboard_view_settings,
             client_view=client_view,
+            project_settings=current_project_settings,
         )
         return
 
@@ -6620,7 +6612,13 @@ def main() -> None:
             metrics=metrics,
             branding=report_branding,
         )
-    section_options = ["Клиентский обзор", "Теги", "Инфоповоды", "Ключевые сообщения"]
+    section_options = [
+        "Клиентский обзор",
+        "Индексы бренда",
+        "Теги",
+        "Инфоповоды",
+        "Ключевые сообщения",
+    ]
     if len(selected_period_ids) >= 2:
         section_options.append("Динамика")
     default_section = str(
@@ -6643,6 +6641,15 @@ def main() -> None:
             periods,
             selected_period_ids,
             profile=project_profile,
+        )
+    elif section == "Индексы бренда":
+        render_brand_metrics_page(
+            project_id,
+            current_project_settings,
+            enriched_messages,
+            periods,
+            selected_period_ids,
+            role_can_edit=role_rank(role) >= role_rank("editor"),
         )
     elif section == "Теги":
         render_tag_statistics(enriched_messages, project_id=project_id)

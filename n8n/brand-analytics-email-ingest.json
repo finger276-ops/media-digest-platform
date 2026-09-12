@@ -1,0 +1,267 @@
+{
+  "name": "Brand Analytics → Аналитическая платформа",
+  "nodes": [
+    {
+      "parameters": {
+        "postProcessAction": "read",
+        "downloadAttachments": true,
+        "format": "resolved",
+        "options": {
+          "customEmailConfig": "[\"UNSEEN\"]"
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000001",
+      "name": "Почта: новое письмо",
+      "type": "n8n-nodes-base.emailReadImap",
+      "typeVersion": 2,
+      "position": [
+        -460,
+        0
+      ],
+      "notes": "Подключите IMAP-учетку почтового ящика, куда Brand Analytics присылает отчеты."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Подготовка задачи автозагрузки.\n// Здесь задаются все настройки, которые не являются секретами.\n// Секреты (service-ключ Supabase) хранятся в учетных данных n8n, а не тут.\n\nconst CONFIG = {\n  supabaseUrl: 'https://ВАШ-ПРОЕКТ.supabase.co',   // без слэша на конце\n  bucket: 'dashboard-csv',                          // SUPABASE_STORAGE_BUCKET\n  projectId: '',                                    // можно оставить пустым и резолвить по sourceKey\n  sourceKey: 'brand-analytics-weekly',              // ключ источника в платформе\n  sourceSystem: 'brand_analytics',                  // auto | brand_analytics | mediologia | mediologia_excel | generic\n  // Письмо берется в работу, только если отправитель содержит одну из строк.\n  allowedSenders: ['br-analytics.ru', 'brandanalytics.ru'],\n  // И тема письма содержит эту строку (пустая строка = не проверять тему).\n  subjectContains: '',\n  allowedExtensions: ['.xlsx', '.xls', '.xlsm', '.csv'],\n};\n\nconst out = [];\n\nfor (const item of $input.all()) {\n  const json = item.json || {};\n  const binary = item.binary || {};\n\n  const from = String(json.from || json.fromEmail || '').toLowerCase();\n  const subject = String(json.subject || '');\n\n  const senderOk =\n    CONFIG.allowedSenders.length === 0 ||\n    CONFIG.allowedSenders.some((s) => from.includes(String(s).toLowerCase()));\n  const subjectOk =\n    !CONFIG.subjectContains || subject.toLowerCase().includes(CONFIG.subjectContains.toLowerCase());\n\n  if (!senderOk || !subjectOk) continue;\n\n  for (const [property, meta] of Object.entries(binary)) {\n    const fileName = String(meta.fileName || 'upload.xlsx');\n    const lower = fileName.toLowerCase();\n    const extOk = CONFIG.allowedExtensions.some((ext) => lower.endsWith(ext));\n    if (!extOk) continue;\n\n    // Латинизируем имя для пути в Storage: кириллица в ключах объектов ломает ссылки.\n    const safeName = fileName\n      .normalize('NFKD')\n      .replace(/[^\\w.\\-]+/g, '_')\n      .replace(/_+/g, '_')\n      .slice(-120) || 'upload.xlsx';\n\n    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');\n    const folder = CONFIG.projectId || CONFIG.sourceKey || 'inbox';\n\n    out.push({\n      json: {\n        supabaseUrl: CONFIG.supabaseUrl.replace(/\\/+$/, ''),\n        bucket: CONFIG.bucket,\n        projectId: CONFIG.projectId || null,\n        sourceKey: CONFIG.sourceKey,\n        sourceSystem: CONFIG.sourceSystem,\n        originalFilename: fileName,\n        storagePath: `inbox/${folder}/${stamp}_${safeName}`,\n        binaryProperty: property,\n        fileSize: Number(meta.fileSize || 0),\n        emailSubject: subject,\n        emailFrom: from,\n        emailDate: json.date || '',\n        executionId: $execution.id,\n      },\n      binary: { attachment: meta },\n    });\n  }\n}\n\nif (out.length === 0) {\n  // Ни одного подходящего вложения — дальше по цепочке идти незачем.\n  return [];\n}\n\nreturn out;\n"
+      },
+      "id": "a1000000-0000-4000-8000-000000000002",
+      "name": "Подготовка задачи",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -240,
+        0
+      ],
+      "notes": "Все настройки интеграции — в блоке CONFIG в начале кода."
+    },
+    {
+      "parameters": {
+        "action": "hash",
+        "type": "SHA256",
+        "binaryData": true,
+        "binaryPropertyName": "attachment",
+        "dataPropertyName": "file_sha256",
+        "encoding": "hex"
+      },
+      "id": "a1000000-0000-4000-8000-000000000003",
+      "name": "SHA-256 файла",
+      "type": "n8n-nodes-base.crypto",
+      "typeVersion": 1,
+      "position": [
+        -20,
+        0
+      ],
+      "notes": "Хеш нужен платформе, чтобы одно и то же письмо не создало две выгрузки."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.supabaseUrl }}/storage/v1/object/{{ $json.bucket }}/{{ $json.storagePath }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-upsert",
+              "value": "true"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "binaryData",
+        "inputDataFieldName": "attachment",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": false
+            }
+          }
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000004",
+      "name": "Файл в Supabase Storage",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        200,
+        0
+      ],
+      "notes": "Учетные данные: Supabase API (host + service_role key)."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Подготовка задачи').item.json.supabaseUrl }}/rest/v1/platform_ingest_queue?on_conflict=project_id,file_sha256",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Prefer",
+              "value": "resolution=ignore-duplicates,return=representation"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  task_id: 'ing_' + $json.executionId + '_' + $itemIndex,\n  project_id: $json.projectId,\n  source_key: $json.sourceKey,\n  storage_path: $json.storagePath,\n  original_filename: $json.originalFilename,\n  file_sha256: $json.file_sha256,\n  file_size: $json.fileSize,\n  source_system: $json.sourceSystem,\n  context: {\n    email_subject: $json.emailSubject,\n    email_from: $json.emailFrom,\n    email_date: $json.emailDate,\n    n8n_execution: $json.executionId\n  }\n}) }}",
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000005",
+      "name": "Задача в очередь платформы",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        420,
+        0
+      ],
+      "notes": "Prefer: resolution=ignore-duplicates — повторное письмо не создаст дубль выгрузки."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.github.com/repos/ВАШ-АККАУНТ/ВАШ-РЕПОЗИТОРИЙ/dispatches",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/vnd.github+json"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer ВАШ_GITHUB_TOKEN"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ event_type: 'ingest' }) }}",
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000006",
+      "name": "Запустить воркер сразу (необязательно)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        640,
+        0
+      ],
+      "disabled": true,
+      "notes": "Включите, если не хотите ждать планового запуска GitHub Actions. Токен — с правом repo."
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ingest-status",
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000007",
+      "name": "Webhook: итоги обработки",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -240,
+        260
+      ],
+      "webhookId": "b2000000-0000-4000-8000-000000000007",
+      "notes": "URL этого вебхука пропишите воркеру в переменную INGEST_NOTIFY_WEBHOOK."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Форматирование уведомления об итогах обработки.\n// Воркер шлет сюда JSON: сколько периодов загружено и какие задачи упали.\nconst data = $json.body || $json;\nconst periods = data.periods || [];\nconst errors = data.errors || [];\n\nconst lines = [];\nlines.push(periods.length ? `Загружено периодов: ${periods.length}` : 'Новых периодов нет');\nfor (const p of periods) {\n  lines.push(`• ${p.period_name} — сообщений ${p.messages}, инфоповодов ${p.events}`);\n}\nif (errors.length) {\n  lines.push('');\n  lines.push(`Ошибки: ${errors.length}`);\n  for (const e of errors) {\n    lines.push(`• ${e.task_id}: ${String(e.error).slice(0, 200)}`);\n  }\n}\n\nreturn [{ json: { text: lines.join('\\n'), hasErrors: errors.length > 0, raw: data } }];\n"
+      },
+      "id": "a1000000-0000-4000-8000-000000000008",
+      "name": "Текст уведомления",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -20,
+        260
+      ],
+      "notes": "Дальше подключите свой канал: Telegram, почта, Slack — поле text уже готово."
+    }
+  ],
+  "connections": {
+    "Почта: новое письмо": {
+      "main": [
+        [
+          {
+            "node": "Подготовка задачи",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Подготовка задачи": {
+      "main": [
+        [
+          {
+            "node": "SHA-256 файла",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SHA-256 файла": {
+      "main": [
+        [
+          {
+            "node": "Файл в Supabase Storage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Файл в Supabase Storage": {
+      "main": [
+        [
+          {
+            "node": "Задача в очередь платформы",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Задача в очередь платформы": {
+      "main": [
+        [
+          {
+            "node": "Запустить воркер сразу (необязательно)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook: итоги обработки": {
+      "main": [
+        [
+          {
+            "node": "Текст уведомления",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "media-digest-platform"
+  },
+  "tags": []
+}

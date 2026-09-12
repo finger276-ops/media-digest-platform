@@ -1,0 +1,36 @@
+# Минимальный self-hosted n8n для автозагрузки выгрузок.
+# Запуск на VPS: docker compose up -d
+#
+# Перед запуском создайте рядом файл .env:
+#   N8N_HOST=n8n.example.ru
+#   N8N_BASIC_AUTH_USER=analyst
+#   N8N_BASIC_AUTH_PASSWORD=длинный_пароль
+#   N8N_ENCRYPTION_KEY=случайная_строка_32_символа
+#   GENERIC_TIMEZONE=Europe/Moscow
+
+services:
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:latest
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_HOST=${N8N_HOST}
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=https
+      - WEBHOOK_URL=https://${N8N_HOST}/
+      - GENERIC_TIMEZONE=${GENERIC_TIMEZONE:-Europe/Moscow}
+      - TZ=${GENERIC_TIMEZONE:-Europe/Moscow}
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+      # Базовая авторизация в интерфейсе n8n.
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=${N8N_BASIC_AUTH_USER}
+      - N8N_BASIC_AUTH_PASSWORD=${N8N_BASIC_AUTH_PASSWORD}
+      # Хранить историю выполнений 14 дней, чтобы диск не рос бесконечно.
+      - EXECUTIONS_DATA_PRUNE=true
+      - EXECUTIONS_DATA_MAX_AGE=336
+    volumes:
+      - n8n_data:/home/node/.n8n
+
+volumes:
+  n8n_data:
