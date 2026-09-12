@@ -29,6 +29,7 @@ from settings import (
     MICROTOPIC_TITLES,
 )
 from io_utils import read_source_csv, write_table, write_manifest
+from services.event_titles import normalize_event_title
 
 
 def stable_hash(value: str, prefix: str = "") -> str:
@@ -1604,12 +1605,23 @@ def make_events_from_source_stories(
         d["source_main_topic"] = ""
     d["__story"] = d["source_main_topic"].fillna("").astype(str).map(normalize_spaces)
     d["__story"] = d["__story"].replace("", "Без сюжета")
-    d["event_id"] = d["__story"].apply(lambda x: stable_hash(x, prefix="e_story_"))
+    # Идентификатор сюжета считаем по нормализованной форме: кавычки, ё/е,
+    # регистр и многоточие в конце — это тот же сюжет, а не новый. Название
+    # при этом остаётся исходным, в формулировке Brand Analytics.
+    d["__story_key"] = d["__story"].map(normalize_event_title).replace("", "без сюжета")
+    d["event_id"] = d["__story_key"].apply(lambda x: stable_hash(x, prefix="e_story_"))
     event_discussions = d[["event_id", "discussion_id"]].copy()
 
     rows = []
     for event_id, group in d.groupby("event_id", sort=False):
-        story = str(group["__story"].iloc[0] or "Без сюжета")
+        # В группе могут оказаться несколько написаний одного сюжета —
+        # показываем то, за которым стоит больше сообщений.
+        story_counts = (
+            group.groupby("__story")["message_count"].sum().sort_values(ascending=False)
+            if "message_count" in group.columns
+            else group["__story"].value_counts()
+        )
+        story = str(story_counts.index[0] if len(story_counts) else "Без сюжета")
         keywords = top_keywords(
             group["discussion_text"].fillna("").astype(str), top_n=7
         )

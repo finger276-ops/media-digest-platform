@@ -108,6 +108,35 @@ CLIENT.db["platform_table_rows"] = [
     for i, (sentiment, theme) in enumerate(_THEMES)
 ]
 
+# Две формулировки одного сюжета: Brand Analytics переименовывает сюжеты между
+# периодами, и платформа должна собирать их в один инфоповод.
+_SAME_STORY = [
+    "ТЕХНОНИКОЛЬ запустила линию по производству кровельных материалов в Рязани",
+    "Запуск линии кровельных материалов ТЕХНОНИКОЛЬ в Рязани",
+]
+CLIENT.db["platform_table_rows"] += [
+    {
+        "project_id": "tn_project",
+        "period_id": PERIOD_ID,
+        "table_name": "events",
+        "row_id": f"e_story{i}",
+        "payload": {
+            "event_id": f"e_story{i}",
+            "period_id": PERIOD_ID,
+            "event_title": title,
+            "event_summary": title,
+            "message_count": 6 - i,
+            "negative_count": 0,
+            "chat_count": 2,
+            "importance_score": 20 - i,
+            "start_date": "2026-04-24",
+            "end_date": "2026-04-30",
+            "main_tags": "Производство",
+        },
+    }
+    for i, title in enumerate(_SAME_STORY)
+]
+
 CLIENT.db["platform_ingest_queue"] = [
     {
         "task_id": "ing_demo_1",
@@ -210,6 +239,26 @@ labels = {str(m.label): m.value for m in at.metric}
 check("карточка BPI с расшифровкой названия", any("BPI · Индекс восприятия" in k for k in labels), str(list(labels))[:200])
 check("карточка NSS с названием", any(k.startswith("NSS · ") for k in labels), str(list(labels))[:200])
 check("саммари не примешивается к разделу", not any("Саммари периода" in str(t) for t in texts))
+
+print("3.5. Раздел «Инфоповоды»: склейка похожих заголовков видна аналитику")
+open_section("Инфоповоды")
+check("раздел открылся без исключений", not at.exception, str(at.exception))
+expanders = [str(e.label) for e in at.expander]
+check(
+    "блок со склейкой заголовков на месте",
+    any("Склеено похожих заголовков" in label for label in expanders),
+    str(expanders),
+)
+view_mode = [r for r in at.sidebar.radio if str(r.label) == "Вид дашборда"]
+if view_mode:
+    view_mode[0].set_value("analyst").run()
+merge_control = [str(s.label) for s in at.selectbox]
+check(
+    "в аналитическом виде есть переключатель силы склейки",
+    any("Склейка похожих заголовков" in label for label in merge_control),
+    str(merge_control),
+)
+check("аналитический вид не уронил раздел", not at.exception, str(at.exception))
 
 print("4. Раздел «Отчёт» держит саммари и выгрузки")
 open_section("Отчёт")

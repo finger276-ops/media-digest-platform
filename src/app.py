@@ -50,6 +50,12 @@ from services.tag_compute import (
     build_tag_statistics_compute,
 )
 from services.message_compute import message_text_column, message_link_column
+from services.event_titles import (
+    DEFAULT_SIMILARITY,
+    merge_similar_events,
+    normalize_event_title,
+    preview_merge_levels,
+)
 from services.ingest import IngestError, process_canonical, read_canonical_bytes
 from noise_filter_ui import render_noise_filter_block
 from ingest_admin_ui import render_ingest_admin_page
@@ -59,7 +65,7 @@ from tag_tier_analytics_ui import render_tier_analytics_block
 from services.perf import perf_block, render_perf_sidebar, reset_perf_events
 
 APP_TITLE = "Платформа дайджестов"
-APP_VERSION = "4.10.0: без такси-профиля, раздел «Динамика» без дублей"
+APP_VERSION = "4.11.0: инфоповоды собираются по смыслу, а не по точной строке"
 
 ALGORITHM_PROFILE_OPTIONS = {
     "universal": "Универсальный",
@@ -129,6 +135,9 @@ DEFAULT_DASHBOARD_VIEW_SETTINGS = {
     "comparison_visible_charts": ["Динамика основных метрик", "Динамика тональности"],
     "client_hide_technical": True,
     "main_visible_blocks": ["metrics", "comparison", "summary", "threshold"],
+    # Порог склейки инфоповодов с близкими заголовками. 0 — склейка выключена,
+    # остаётся только точное совпадение нормализованного заголовка.
+    "event_title_merge": DEFAULT_SIMILARITY,
 }
 
 # Разделы аналитики. Они же — пункты бокового меню: до содержимого
@@ -190,6 +199,15 @@ def dashboard_view_settings_from_project_settings(
     if isinstance(raw_blocks, list):
         blocks = [str(x) for x in raw_blocks if str(x) in known_blocks]
         result["main_visible_blocks"] = blocks
+    try:
+        merge_value = float(raw.get("event_title_merge", result["event_title_merge"]))
+    except (TypeError, ValueError):
+        merge_value = float(result["event_title_merge"])
+    # 0 — выключено; всё, что ниже 0.4, слишком рискованно и трактуется как 0.4.
+    if merge_value <= 0:
+        result["event_title_merge"] = 0.0
+    else:
+        result["event_title_merge"] = min(0.95, max(0.4, merge_value))
     return result
 
 
@@ -291,7 +309,11 @@ def default_min_event_messages(profile: str, events: pd.DataFrame | None = None)
 
 
 def render_min_event_messages_control(
-    profile: str, events: pd.DataFrame | None = None, *, key: str = "min_event_messages"
+    profile: str,
+    events: pd.DataFrame | None = None,
+    *,
+    key: str = "min_event_messages",
+    container: Any = None,
 ) -> int:
     default_value = int(default_min_event_messages(profile, events))
     max_value = 50
@@ -299,8 +321,9 @@ def render_min_event_messages_control(
         "Инфоповоды с меньшим числом сообщений скрываются из таблицы и саммари. "
         "Сообщения при этом остаются в общей статистике и полной ленте."
     )
+    target = container if container is not None else st.sidebar
     return int(
-        st.sidebar.number_input(
+        target.number_input(
             "Мин. сообщений в инфоповоде",
             min_value=1,
             max_value=max_value,
@@ -310,6 +333,80 @@ def render_min_event_messages_control(
             key=key,
         )
     )
+
+
+@st.cache_data(show_spinner=False, max_entries=6, ttl=900)
+def _cached_merge_similar_events(
+    _events_agg: pd.DataFrame,
+    project_id: str,
+    period_ids_key: tuple[str, ...],
+    threshold: float,
+    blocked_key: tuple[str, ...],
+    data_version: int,
+    manual_version: int,
+):
+    with perf_block("dashboard.merge_titles", project_id=project_id):
+        return merge_similar_events(
+            _events_agg, threshold=threshold, blocked=set(blocked_key)
+        )
+
+
+def cached_merge_similar_events(
+    events_agg: pd.DataFrame,
+    project_id: str,
+    period_ids: tuple[str, ...],
+    threshold: float,
+    blocked: tuple[str, ...],
+):
+    """Склейка заголовков с кэшем по дешёвым ключам.
+
+    Сам кадр в ключ кэша не попадает (аргумент с подчёркиванием) — вместо него
+    версии данных проекта. Хеширование DataFrame однажды уже стоило платформе
+    секунд на каждом перерисовывании.
+    """
+    return _cached_merge_similar_events(
+        events_agg,
+        project_id,
+        tuple(period_ids),
+        float(threshold),
+        tuple(blocked),
+        cache_version(project_id, "data"),
+        cache_version(project_id, "manual"),
+    )
+
+
+TITLE_MERGE_OPTIONS: dict[str, float] = {
+    "Выключено": 0.0,
+    "Осторожно": 0.75,
+    "Обычно": DEFAULT_SIMILARITY,
+    "Агрессивно": 0.5,
+}
+
+
+def render_title_merge_control(
+    saved: float, *, key: str = "title_merge", container: Any = None
+) -> float:
+    """Переключатель силы склейки инфоповодов с близкими заголовками."""
+    labels = list(TITLE_MERGE_OPTIONS)
+    values = [TITLE_MERGE_OPTIONS[label] for label in labels]
+    current = float(saved or 0.0)
+    # Ближайший пресет к сохранённому значению.
+    index = min(range(len(values)), key=lambda i: abs(values[i] - current))
+    if current <= 0:
+        index = labels.index("Выключено")
+    target = container if container is not None else st.sidebar
+    choice = target.selectbox(
+        "Склейка похожих заголовков",
+        labels,
+        index=index,
+        key=key,
+        help=(
+            "Brand Analytics переформулирует один и тот же сюжет от периода к "
+            "периоду, поэтому инфоповоды с почти одинаковыми заголовками "
+            "объединяются. Что именно склеилось, видно в разделе «Инфоповоды»."
+        ),
+    )
+    return float(TITLE_MERGE_OPTIONS[choice])
 
 
 def filter_small_events(
@@ -4657,12 +4754,19 @@ def aggregate_events(events: pd.DataFrame) -> pd.DataFrame:
         .astype(str)
         .replace("", "Без названия")
     )
-    df["group_key"] = df["title"].str.lower().str.strip()
+    # Нормализация вместо простого lower(): регистр, ё/е, кавычки, тире,
+    # многоточия и пробелы внутри чисел не должны разводить один сюжет по
+    # разным инфоповодам. Смысловая склейка близких заголовков идёт отдельным
+    # шагом (merge_similar_events), чтобы её можно было выключить и проверить.
+    df["group_key"] = df["title"].map(normalize_event_title)
     rows = []
     for key, group in df.groupby("group_key", dropna=False):
+        variants = list(dict.fromkeys(group["title"].astype(str).tolist()))
         row = {
             "group_key": key,
-            "title": group["title"].iloc[0],
+            "title": variants[0] if variants else "Без названия",
+            "title_variants": variants,
+            "merged_titles": max(0, len(variants) - 1),
             "description": pick_event_description(group),
             "tags": " | ".join(
                 sorted(
@@ -4899,6 +5003,17 @@ def get_manual_state(project_id: str) -> dict[str, Any]:
 
     manual_events = manual_payloads(manual_df, "manual_events")
 
+    # Заголовки, которые аналитик запретил склеивать автоматически: страховка
+    # на случай, когда алгоритм счёл две разные темы одной.
+    title_merge_blocks: set[str] = set()
+    for payload in manual_payloads(manual_df, "title_merge_blocks"):
+        title = str(
+            payload.get("title")
+            or payload.get("_row_key", "").replace("title_merge_block::", "")
+        ).strip()
+        if title:
+            title_merge_blocks.add(title)
+
     return {
         "manual_df": manual_df,
         "hidden_messages": hidden_messages,
@@ -4909,7 +5024,14 @@ def get_manual_state(project_id: str) -> dict[str, Any]:
         "event_edits": event_edits,
         "event_merges": event_merges,
         "manual_events": manual_events,
+        "title_merge_blocks": title_merge_blocks,
     }
+
+
+def blocked_title_merges(manual_state: dict[str, Any] | None) -> set[str]:
+    """Нормализованные заголовки, которые нельзя склеивать автоматически."""
+    raw = (manual_state or {}).get("title_merge_blocks") or set()
+    return {normalize_event_title(x) for x in raw if str(x).strip()}
 
 
 def append_manual_events(
@@ -5618,6 +5740,124 @@ def render_selected_event_detail(
     _render_message_list(view, text_col=text_col, link_col=link_col)
 
 
+def render_title_merge_diagnostics(
+    project_id: str, events_agg: pd.DataFrame, threshold: float
+) -> None:
+    """Померить, сколько инфоповодов схлопывается при разных порогах.
+
+    Вопрос «дробит ли источник одну тему на несколько» решается измерением на
+    своих данных, а не на глаз. Расчёт запускается по кнопке: он перебирает
+    четыре порога и на больших проектах заметен.
+    """
+    source = st.session_state.get(f"title_merge_source_{project_id}")
+    if source is None or not isinstance(source, pd.DataFrame) or source.empty:
+        source = events_agg
+    if source is None or source.empty:
+        return
+    state_key = f"title_merge_preview_{project_id}"
+    if st.button(
+        "Проверить, сколько заголовков дублируется",
+        key=f"title_merge_diag_{project_id}",
+        help=(
+            "Сравнить число инфоповодов при разных порогах склейки на текущих "
+            "данных. Настройки не меняются."
+        ),
+    ):
+        st.session_state[state_key] = preview_merge_levels(
+            source, levels=(0.9, 0.75, DEFAULT_SIMILARITY, 0.5)
+        )
+    preview = st.session_state.get(state_key)
+    if preview is None or getattr(preview, "empty", True):
+        return
+    st.caption(
+        f"Без склейки инфоповодов: {len(source)}. "
+        f"Текущий порог: {threshold if threshold > 0 else 'выключено'}. "
+        "Строки ниже показывают, что было бы при других порогах."
+    )
+    st.dataframe(preview, hide_index=True, use_container_width=True)
+
+
+def render_title_merge_report(
+    project_id: str,
+    events_agg: pd.DataFrame,
+    can_edit: bool,
+    manual_state: dict[str, Any] | None = None,
+) -> None:
+    """Показать, какие заголовки платформа объединила автоматически.
+
+    Автоматическая склейка полезна ровно до тех пор, пока её видно: аналитик
+    должен уметь проверить каждое решение и отменить неверное.
+    """
+    report = st.session_state.get(f"title_merge_report_{project_id}") or []
+    threshold = float(
+        st.session_state.get(f"title_merge_threshold_{project_id}") or 0.0
+    )
+    blocked = sorted((manual_state or {}).get("title_merge_blocks") or set())
+    if blocked and can_edit:
+        with st.expander(f"Заголовки без автосклейки: {len(blocked)}", expanded=False):
+            for title in blocked:
+                cols = st.columns([8, 2])
+                with cols[0]:
+                    st.caption(title)
+                with cols[1]:
+                    if st.button(
+                        "Вернуть",
+                        key=f"reallow_title_{project_id}_{abs(hash(title))}",
+                        use_container_width=True,
+                    ):
+                        delete_manual(
+                            project_id,
+                            f"title_merge_block::{normalize_event_title(title)}",
+                        )
+                        st.rerun()
+    if can_edit:
+        render_title_merge_diagnostics(project_id, events_agg, threshold)
+    if threshold <= 0:
+        return
+    if not report:
+        st.caption(
+            "Похожих заголовков не найдено — каждый инфоповод собран по точному "
+            "совпадению заголовка."
+        )
+        return
+
+    merged_titles = sum(len(item.get("variants") or []) - 1 for item in report)
+    with st.expander(
+        f"Склеено похожих заголовков: {merged_titles} "
+        f"в {len(report)} инфоповодах",
+        expanded=False,
+    ):
+        st.caption(
+            "Заголовки ниже платформа сочла разными формулировками одного сюжета. "
+            "Если склейка неверна, нажмите «Не склеивать» — заголовок вернётся в "
+            "отдельный инфоповод и больше не будет объединяться."
+        )
+        for index, item in enumerate(report[:40]):
+            variants = list(item.get("variants") or [])
+            st.markdown(f"**{item.get('title')}** — {item.get('message_count', 0)} сообщ.")
+            for variant in variants[1:]:
+                cols = st.columns([8, 2]) if can_edit else [st.container()]
+                with cols[0]:
+                    st.caption(f"↳ {variant}")
+                if can_edit:
+                    with cols[1]:
+                        if st.button(
+                            "Не склеивать",
+                            key=f"unmerge_title_{project_id}_{index}_{abs(hash(variant))}",
+                            use_container_width=True,
+                        ):
+                            save_manual(
+                                project_id,
+                                "title_merge_blocks",
+                                f"title_merge_block::{normalize_event_title(variant)}",
+                                {"title": variant},
+                            )
+                            st.success("Заголовок больше не объединяется.")
+                            st.rerun()
+        if len(report) > 40:
+            st.caption(f"…и ещё {len(report) - 40} инфоповодов со склейкой.")
+
+
 def render_events(
     project_id: str,
     role: str,
@@ -5648,6 +5888,8 @@ def render_events(
     if events_agg.empty:
         st.info("Инфоповоды не найдены.")
         return
+
+    render_title_merge_report(project_id, events_agg, can_edit, manual_state)
 
     word = st.text_input(
         "Фильтр по слову в сообщениях",
@@ -5721,6 +5963,16 @@ def render_events(
         axis=1,
     )
     table["Негатив"] = (table["negative_share"] * 100).round(1).astype(str) + "%"
+    if "merged_titles" in table.columns:
+        # «+2» рядом с сюжетом означает, что под ним лежат ещё две формулировки
+        # заголовка. Подробности — в блоке склейки над таблицей.
+        merged_counts = (
+            pd.to_numeric(table["merged_titles"], errors="coerce").fillna(0).astype(int)
+        )
+        table["title"] = [
+            f"{title} (+{count})" if count > 0 else title
+            for title, count in zip(table["title"].astype(str), merged_counts)
+        ]
     show = table[
         [
             "title",
@@ -6231,7 +6483,12 @@ def main() -> None:
         )
         st.caption(" · ".join(x for x in head_parts if x))
 
+    # Заголовки, которые аналитик запретил склеивать автоматически.
+    blocked_merge_titles = blocked_title_merges(manual_state)
+    saved_title_merge = float(dashboard_view_settings.get("event_title_merge") or 0.0)
+
     min_event_messages: int | None = None
+    event_title_merge_threshold = saved_title_merge
     if not show_view_panel:
         show_metrics = "metrics" in saved_blocks
         min_event_messages = int(default_min_event_messages(project_profile, events))
@@ -6254,7 +6511,15 @@ def main() -> None:
                     )
                 else:
                     min_event_messages = render_min_event_messages_control(
-                        project_profile, events, key="main_min_event_messages"
+                        project_profile,
+                        events,
+                        key="main_min_event_messages",
+                        container=view_box,
+                    )
+                    event_title_merge_threshold = render_title_merge_control(
+                        saved_title_merge,
+                        key="main_title_merge",
+                        container=view_box,
                     )
                 if role_rank(role) >= role_rank("editor"):
                     st.divider()
@@ -6269,6 +6534,9 @@ def main() -> None:
                         dvs_raw["main_visible_blocks"] = (
                             ["metrics"] if show_metrics else []
                         ) + [b for b in saved_blocks if b != "metrics"]
+                        dvs_raw["event_title_merge"] = float(
+                            event_title_merge_threshold
+                        )
                         updated["dashboard_view_settings"] = dvs_raw
                         try:
                             update_project(project_id, settings=updated)
@@ -6277,8 +6545,25 @@ def main() -> None:
                             st.rerun()
                         except Exception as exc:
                             st.warning(f"Не удалось сохранить: {exc}")
+    # Смысловая склейка заголовков идёт до порога по числу сообщений: иначе
+    # одна тема, разбитая источником на три формулировки по два сообщения,
+    # отсекается как мелочь, хотя вместе это шесть сообщений.
+    merged_events_agg, title_merge_report = cached_merge_similar_events(
+        raw_events_agg,
+        project_id,
+        tuple(selected_period_ids),
+        float(event_title_merge_threshold),
+        tuple(sorted(blocked_merge_titles)),
+    )
+    st.session_state[f"title_merge_report_{project_id}"] = title_merge_report
+    st.session_state[f"title_merge_threshold_{project_id}"] = float(
+        event_title_merge_threshold
+    )
+    # Диагностика порогов должна считаться по несклеенному агрегату, иначе
+    # она меряет склейку поверх склейки.
+    st.session_state[f"title_merge_source_{project_id}"] = raw_events_agg
     events_agg, hidden_events, hidden_messages = filter_small_events(
-        raw_events_agg, int(min_event_messages or 0)
+        merged_events_agg, int(min_event_messages or 0)
     )
 
     metrics = None
