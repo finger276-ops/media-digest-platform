@@ -75,25 +75,25 @@ def _save_metric_settings(
 # ---------------------------------------------------------------------------
 
 
-def render_metric_cards(cards: dict[str, dict[str, Any]]) -> None:
-    bpi = cards.get("BPI", {})
-    top = st.columns([2, 1, 1, 1])
-    with top[0]:
-        st.metric(f"BPI · {METRIC_TITLES['BPI'][1]}", format_metric(bpi))
-        if not bpi.get("available"):
-            st.caption(bpi.get("reason", ""))
-    for column, key in zip(top[1:], ["NSS", "SES", "TVS"]):
-        card = cards.get(key, {})
-        with column:
-            st.metric(f"{card.get('code', key)}", format_metric(card))
+def _card_label(key: str, card: dict[str, Any]) -> str:
+    """Подпись карточки: аббревиатура плюс человеческое название.
 
-    bottom = st.columns(4)
-    for column, key in zip(bottom, ["SOV", "ReachScore", "ER", "ERR"]):
-        card = cards.get(key, {})
-        with column:
-            st.metric(f"{card.get('code', key)}", format_metric(card))
-            if not card.get("available"):
-                st.caption(card.get("reason", ""))
+    Одна аббревиатура понятна аналитику, но не клиенту, который открыл дашборд.
+    """
+    code = str(card.get("code") or key)
+    title = str(card.get("title") or METRIC_TITLES.get(key, ("", ""))[1])
+    return f"{code} · {title}" if title else code
+
+
+def render_metric_cards(cards: dict[str, dict[str, Any]]) -> None:
+    for row_keys in (["BPI", "NSS", "SES", "TVS"], ["SOV", "ReachScore", "ER", "ERR"]):
+        columns = st.columns(4)
+        for column, key in zip(columns, row_keys):
+            card = cards.get(key, {})
+            with column:
+                st.metric(_card_label(key, card), format_metric(card))
+                if not card.get("available"):
+                    st.caption(card.get("reason", ""))
 
 
 def render_metric_details(cards: dict[str, dict[str, Any]]) -> None:
@@ -175,7 +175,12 @@ def render_metrics_dynamics(
         alt.Chart(long)
         .mark_line(point=True)
         .encode(
-            x=alt.X("Период:N", sort=list(frame["Период"]), title=""),
+            x=alt.X(
+                "Период:N",
+                sort=list(frame["Период"]),
+                title="",
+                axis=alt.Axis(labelAngle=0, labelLimit=140),
+            ),
             y=alt.Y("Значение:Q", title="%"),
             color=alt.Color("Метрика:N", title=""),
             tooltip=["Период", "Метрика", alt.Tooltip("Значение:Q", format=".2f")],

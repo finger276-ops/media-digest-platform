@@ -57,7 +57,7 @@ from tag_tier_analytics_ui import render_tier_analytics_block
 from services.perf import perf_block, render_perf_sidebar, reset_perf_events
 
 APP_TITLE = "Платформа дайджестов"
-APP_VERSION = "4.7.0: индексы бренда (BPI, NSS, SES, SOV, ER)"
+APP_VERSION = "4.8.0: боковая навигация и перекомпоновка дашборда"
 
 ALGORITHM_PROFILE_OPTIONS = {
     "universal": "Универсальный",
@@ -127,20 +127,33 @@ DEFAULT_DASHBOARD_VIEW_SETTINGS = {
     "main_visible_blocks": ["metrics", "comparison", "summary", "threshold"],
 }
 
+# Разделы аналитики. Они же — пункты бокового меню: до содержимого
+# раздела теперь один экран, а не пять.
 DASHBOARD_SECTION_OPTIONS = [
-    "Клиентский обзор",
+    "Обзор",
     "Индексы бренда",
     "Теги",
     "Инфоповоды",
-    "Ключевые сообщения",
+    "Сообщения",
     "Динамика",
+    "Отчёт",
 ]
+
+# Старые названия разделов из сохранённых настроек проектов.
+SECTION_ALIASES = {
+    "Клиентский обзор": "Обзор",
+    "Ключевые сообщения": "Сообщения",
+    "Саммари": "Отчёт",
+}
+
+NAV_STATE_KEY = "platform_nav_page"
 TAXI_DASHBOARD_SECTION_OPTIONS = [
-    "Клиентский обзор",
+    "Обзор",
     "Индексы бренда",
     "Инфоповоды",
-    "Ключевые сообщения",
+    "Сообщения",
     "Динамика",
+    "Отчёт",
 ]
 
 
@@ -423,6 +436,97 @@ def chart_label_radius(settings: dict[str, Any] | None) -> int:
     if position == "bottom":
         return 54
     return 104
+
+
+def normalize_section(name: Any, options: list[str]) -> str:
+    """Привести название раздела к актуальному, с учётом старых настроек."""
+    value = str(name or "").strip()
+    value = SECTION_ALIASES.get(value, value)
+    return value if value in options else (options[0] if options else "")
+
+
+def _nav_button_type(active: bool) -> str:
+    """Активный пункт меню выделен заливкой, остальные — плоские."""
+    if active:
+        return "primary"
+    return "tertiary" if _supports_tertiary_buttons() else "secondary"
+
+
+def _supports_tertiary_buttons() -> bool:
+    if "_tertiary_ok" not in st.session_state:
+        try:
+            import inspect
+
+            source = inspect.signature(st.button)
+            st.session_state["_tertiary_ok"] = "type" in source.parameters
+        except Exception:
+            st.session_state["_tertiary_ok"] = False
+    return bool(st.session_state.get("_tertiary_ok"))
+
+
+def render_sidebar_nav(
+    groups: list[tuple[str, list[str]]],
+    default: str,
+    after_group: dict[str, Any] | None = None,
+) -> str:
+    """Единое меню разделов в боковой панели.
+
+    Кнопки вместо радио: группы получают заголовки, активный пункт видно сразу,
+    а переход не требует прокрутки страницы. `after_group` позволяет вставить
+    свой блок сразу после нужной группы — так выбор периодов оказывается рядом
+    с разделами аналитики, а не в самом низу панели.
+    """
+    available = [item for _, items in groups for item in items]
+    if not available:
+        return ""
+
+    current = st.session_state.get(NAV_STATE_KEY)
+    if current not in available:
+        current = default if default in available else available[0]
+        st.session_state[NAV_STATE_KEY] = current
+
+    for title, items in groups:
+        if not items:
+            continue
+        st.sidebar.caption(title)
+        for item in items:
+            if st.sidebar.button(
+                item,
+                key=f"nav_btn_{item}",
+                use_container_width=True,
+                type=_nav_button_type(item == current),
+            ):
+                st.session_state[NAV_STATE_KEY] = item
+                st.rerun()
+        hook = (after_group or {}).get(title)
+        if callable(hook):
+            hook()
+    return current
+
+
+def build_comparison_metrics(
+    messages: pd.DataFrame, periods: pd.DataFrame, period_ids: list[str]
+) -> dict[str, Any] | None:
+    """Посчитать последовательное сравнение периодов без отрисовки.
+
+    Нужна и разделу «Динамика», и выгрузкам в разделе «Отчёт», поэтому расчёт
+    отделён от интерфейса.
+    """
+    comparison = _period_metrics_for_comparison(messages, periods, period_ids)
+    if len(comparison) < 2:
+        return None
+    previous, current = comparison[-2], comparison[-1]
+    first, last = comparison[0], comparison[-1]
+    aggregate = overview_metrics(messages)
+    aggregate["period_label"] = selected_period_label(periods, period_ids)
+    aggregate["comparison_sequence"] = comparison
+    aggregate["comparison"] = {
+        "first": first,
+        "previous": previous,
+        "current": current,
+        "last": last,
+    }
+    return aggregate
 
 
 def parse_args() -> argparse.Namespace:
@@ -1146,13 +1250,39 @@ def render_period_comparison_charts(
                             f"**{row['Период']}**  \n{_chart_number_label(row['Значение'])} · {_chart_number_label(row['Доля'], percent=True)}"
                         )
         else:
-            metrics_line = base_metrics.mark_line(point=True)
+            # Аудитория измеряется миллионами, сообщения — сотнями. На общей оси
+            # видна только самая крупная метрика, поэтому каждая получает
+            # собственную шкалу и собственную панель.
             st.caption(
-                "Подписи значений скрыты, чтобы линии не накладывались. Значения доступны при наведении на точки."
+                "У каждой метрики своя шкала: на общей оси аудитория в миллионах "
+                "полностью скрывала бы сообщения. Значения — при наведении на точки."
             )
-            st.altair_chart(
-                metrics_line.properties(height=320), use_container_width=True
+            metrics_line = (
+                alt.Chart(metrics_long)
+                .mark_line(point=True)
+                .encode(
+                    x=alt.X(
+                        "Период:N",
+                        sort=None,
+                        title=None,
+                        axis=alt.Axis(labelAngle=0, labelLimit=120),
+                    ),
+                    y=alt.Y("Значение:Q", title=None),
+                    color=alt.Color("Метрика:N", legend=None),
+                    tooltip=[
+                        alt.Tooltip("Полный период:N", title="Период"),
+                        "Метрика",
+                        alt.Tooltip("Значение:Q", format=","),
+                    ],
+                )
+                .properties(height=190, width=200)
+                .facet(
+                    facet=alt.Facet("Метрика:N", title=None, sort=metrics_cols),
+                    columns=4,
+                )
+                .resolve_scale(y="independent")
             )
+            st.altair_chart(metrics_line, use_container_width=True)
 
     if "Динамика тональности" in selected_blocks:
         st.markdown("**Динамика долей тональности, %**")
@@ -1252,6 +1382,31 @@ def render_period_comparison_charts(
             st.altair_chart(
                 sentiment_line.properties(height=320), use_container_width=True
             )
+            # Нейтрал обычно занимает 90+ процентов и прижимает позитив с
+            # негативом к нулю. Негатив — то, за чем следят, поэтому он
+            # получает отдельную панель со своей шкалой.
+            negative_only = sentiment_long[sentiment_long["Тональность"] == "Негатив"]
+            if not negative_only.empty and float(negative_only["Доля, %"].max()) < 25:
+                st.caption("Негатив отдельно — на общей шкале его не видно из-за нейтрала.")
+                st.altair_chart(
+                    alt.Chart(negative_only)
+                    .mark_line(point=True, color=SENTIMENT_COLOR_RANGE[2])
+                    .encode(
+                        x=alt.X(
+                            "Период:N",
+                            sort=None,
+                            title=None,
+                            axis=alt.Axis(labelAngle=0, labelLimit=120),
+                        ),
+                        y=alt.Y("Доля, %:Q", title="Негатив, %"),
+                        tooltip=[
+                            alt.Tooltip("Период:N", title="Период"),
+                            alt.Tooltip("Доля, %:Q", format=".1f", title="Негатив, %"),
+                        ],
+                    )
+                    .properties(height=170),
+                    use_container_width=True,
+                )
 
     if "Сравнение выбранной метрики" in selected_blocks:
         st.markdown("**Сравнение выбранной метрики по периодам**")
@@ -1384,12 +1539,14 @@ def render_period_comparison_metrics(
     comparison_visible_charts: list[str] | None = None,
 ) -> dict[str, Any] | None:
     """Render sequential comparison when two or more periods are selected."""
-    comparison = _period_metrics_for_comparison(messages, periods, period_ids)
-    if len(comparison) < 2:
+    aggregate_metrics = build_comparison_metrics(messages, periods, period_ids)
+    if aggregate_metrics is None:
         return None
-
-    previous, current = comparison[-2], comparison[-1]
-    first, last = comparison[0], comparison[-1]
+    comparison = aggregate_metrics["comparison_sequence"]
+    previous = aggregate_metrics["comparison"]["previous"]
+    current = aggregate_metrics["comparison"]["current"]
+    first = aggregate_metrics["comparison"]["first"]
+    last = aggregate_metrics["comparison"]["last"]
     st.subheader("Последовательное сравнение периодов")
     st.caption(
         "Сравнение идет цепочкой по хронологии: "
@@ -1469,15 +1626,6 @@ def render_period_comparison_metrics(
             f"вовлеченность — {_metric_delta(last['engagement'], first['engagement'])}."
         )
 
-    aggregate_metrics = overview_metrics(messages)
-    aggregate_metrics["period_label"] = selected_period_label(periods, period_ids)
-    aggregate_metrics["comparison_sequence"] = comparison
-    aggregate_metrics["comparison"] = {
-        "first": first,
-        "previous": previous,
-        "current": current,
-        "last": last,
-    }
     return aggregate_metrics
 
 
@@ -1491,6 +1639,7 @@ def render_project_intro(
     chart_label_settings: dict[str, Any] | None = None,
     comparison_visible_charts: list[str] | None = None,
     show_comparison: bool = True,
+    show_title: bool = True,
 ) -> dict[str, Any]:
     """Unified top block for all project profiles.
 
@@ -1498,23 +1647,25 @@ def render_project_intro(
     the whole selected range. Sequential comparison is rendered below as a
     separate analytical block and does not replace the aggregate overview.
     """
-    st.header(project_name)
-    if profile_label:
-        st.caption(f"Профиль проекта: {profile_label}")
     period_label = selected_period_label(periods, period_ids)
     selected_ids = [x for x in (period_ids or []) if str(x).strip()]
-
-    st.subheader("Период и основные метрики")
     metrics = overview_metrics(messages)
     sent = metrics["sentiment"]
     total = int(sent.get("total", 0))
 
-    if len(selected_ids) >= 2:
-        st.caption(
-            f"Выбрано периодов: {len(selected_ids)} · общие данные по выбранным периодам: {period_label}"
-        )
-    else:
-        st.caption(f"Период: {period_label}")
+    # Заголовок и подпись периода рисуются здесь только в старых вызовах.
+    # На главной странице их берёт на себя компактная шапка проекта.
+    if show_title:
+        st.header(project_name)
+        if profile_label:
+            st.caption(f"Профиль проекта: {profile_label}")
+        st.subheader("Период и основные метрики")
+        if len(selected_ids) >= 2:
+            st.caption(
+                f"Выбрано периодов: {len(selected_ids)} · общие данные по выбранным периодам: {period_label}"
+            )
+        else:
+            st.caption(f"Период: {period_label}")
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Сообщений", format_int(metrics["messages"]))
@@ -6258,6 +6409,7 @@ def render_taxi_dashboard(
     dashboard_view_settings: dict[str, Any] | None = None,
     client_view: bool = False,
     project_settings: dict[str, Any] | None = None,
+    section: str | None = None,
 ) -> None:
     """Dedicated UI for driver-chat digest projects inside the platform namespace."""
     dashboard_view_settings = dashboard_view_settings or dict(
@@ -6312,28 +6464,22 @@ def render_taxi_dashboard(
         metrics=metrics,
         branding=report_branding,
     )
-    section_options = [
-        "Клиентский обзор",
-        "Индексы бренда",
-        "Инфоповоды",
-        "Ключевые сообщения",
-    ]
-    if len(selected_period_ids) >= 2:
-        section_options.append("Динамика")
-    default_section = str(
-        dashboard_view_settings.get("taxi_start_section") or "Клиентский обзор"
-    )
-    if default_section not in section_options:
-        default_section = section_options[0]
-    section = st.radio(
-        "Раздел аналитики",
-        section_options,
-        index=section_options.index(default_section),
-        horizontal=True,
-        key="taxi_dashboard_section",
-    )
+    # Раздел приходит из бокового меню; радио остаётся запасным вариантом
+    # для старых вызовов функции.
+    if not section:
+        section_options = list(TAXI_DASHBOARD_SECTION_OPTIONS)
+        default_section = normalize_section(
+            dashboard_view_settings.get("taxi_start_section"), section_options
+        )
+        section = st.radio(
+            "Раздел аналитики",
+            section_options,
+            index=section_options.index(default_section),
+            horizontal=True,
+            key="taxi_dashboard_section",
+        )
 
-    if section == "Клиентский обзор":
+    if section == "Обзор":
         render_client_insights(
             messages, events_agg, periods, selected_period_ids, profile="driver_chats"
         )
@@ -6349,18 +6495,21 @@ def render_taxi_dashboard(
     elif section == "Инфоповоды":
         render_small_events_notice(hidden_events, hidden_messages, min_event_messages)
         render_events(project_id, role, events_agg, messages, manual_state)
-    elif section == "Ключевые сообщения":
+    elif section == "Сообщения":
         render_messages_block(messages, project_id=project_id)
     elif section == "Динамика":
         render_period_dynamics(messages, periods, selected_period_ids)
+    elif section == "Отчёт":
+        st.info(
+            "Саммари и выгрузки для водительских проектов пока остаются в верхней "
+            "части страницы."
+        )
 
 
 def main() -> None:
     args = parse_args()
     reset_perf_events()
     st.set_page_config(page_title=APP_TITLE, layout="wide")
-    st.title(APP_TITLE)
-    st.caption(APP_VERSION)
 
     if not supabase_configured():
         st.error(
@@ -6371,48 +6520,17 @@ def main() -> None:
     is_admin = is_platform_admin()
     project_id, role, projects = render_project_access(is_admin)
 
-    if is_admin:
-        with st.sidebar.expander("Управление платформой", expanded=False):
-            if st.button("Открыть управление проектами"):
-                st.session_state["platform_page"] = "projects"
-    if project_id:
-        page_options = ["Дашборд", "Загрузка файла", "История периодов"]
-        if role_rank(role) >= role_rank("editor"):
-            page_options.append("Автозагрузка")
-    else:
-        page_options = []
-    if is_admin:
-        page_options.append("Проекты")
-    if not page_options:
-        st.info("Выберите проект или войдите как владелец платформы.")
-        if is_admin:
-            render_project_manager(projects)
-        return
-    page = st.sidebar.radio(
-        "Раздел",
-        page_options,
-        index=(
-            page_options.index("Проекты")
-            if st.session_state.get("platform_page") == "projects"
-            and "Проекты" in page_options
-            else 0
-        ),
+    # --- метаданные выбранного проекта ---
+    project_row = (
+        projects[projects["project_id"].astype(str) == str(project_id)]
+        if project_id and not projects.empty
+        else pd.DataFrame()
     )
-
-    if page == "Проекты":
-        render_project_manager(projects)
-        return
-
-    if not project_id:
-        st.info("Введите код доступа к проекту или войдите как владелец платформы.")
-        return
-
-    project_row = projects[projects["project_id"].astype(str) == str(project_id)]
     current_project_row = project_row.iloc[0] if not project_row.empty else None
     project_name = str(
         current_project_row.get("project_name")
         if current_project_row is not None
-        else project_id
+        else (project_id or "")
     )
     project_profile = project_topic_profile(current_project_row)
     current_project_settings = (
@@ -6429,17 +6547,71 @@ def main() -> None:
     dashboard_view_settings = dashboard_view_settings_from_project_settings(
         current_project_settings
     )
-    dashboard_view_mode = dashboard_view_mode_for_session(role, dashboard_view_settings)
-    client_view = dashboard_view_mode == "client"
-    st.sidebar.markdown(f"**Текущий проект:**  \n{project_name}")
-    st.sidebar.caption(
-        f"Профиль: {ALGORITHM_PROFILE_OPTIONS.get(project_profile, project_profile)}"
+
+    # --- боковое меню: разделы аналитики, работа с данными, платформа ---
+    taxi_profile = is_taxi_project_profile(project_profile)
+    section_options = list(
+        TAXI_DASHBOARD_SECTION_OPTIONS if taxi_profile else DASHBOARD_SECTION_OPTIONS
     )
-    if role == "admin":
+    groups: list[tuple[str, list[str]]] = []
+    if project_id:
+        groups.append(("Аналитика", section_options))
+        data_pages = ["Загрузка файла", "История периодов"]
+        if role_rank(role) >= role_rank("editor"):
+            data_pages.append("Автозагрузка")
+        groups.append(("Данные", data_pages))
+    if is_admin:
+        groups.append(("Платформа", ["Проекты"]))
+
+    if not groups:
+        st.info("Выберите проект или войдите как владелец платформы.")
+        if is_admin:
+            render_project_manager(projects)
+        return
+
+    start_key = "taxi_start_section" if taxi_profile else "start_section"
+    default_section = normalize_section(
+        dashboard_view_settings.get(start_key), section_options
+    )
+
+    # Выбор периодов относится к аналитике, поэтому он рисуется прямо под
+    # её разделами — до блоков «Данные» и «Платформа».
+    selected_period_ids: list[str] = []
+    periods = pd.DataFrame()
+    client_view = True
+    current_page = st.session_state.get(NAV_STATE_KEY) or default_section
+
+    def _periods_block() -> None:
+        nonlocal selected_period_ids, periods, client_view
+        if not project_id or current_page not in section_options:
+            return
+        selected_period_ids, periods = render_period_selector(project_id)
+        client_view = (
+            dashboard_view_mode_for_session(role, dashboard_view_settings) == "client"
+        )
+
+    page = render_sidebar_nav(
+        groups, default_section, after_group={"Аналитика": _periods_block}
+    )
+
+    # --- служебный низ боковой панели ---
+    if is_admin:
+        with st.sidebar.expander("Управление платформой", expanded=False):
+            if st.button("Открыть управление проектами", key="open_projects_page"):
+                st.session_state[NAV_STATE_KEY] = "Проекты"
+                st.rerun()
         st.sidebar.checkbox(
             "Диагностика скорости", value=False, key="platform_perf_debug"
         )
+    st.sidebar.caption(f"{APP_TITLE} · {APP_VERSION}")
 
+    # --- страницы, которым не нужны данные периодов ---
+    if page == "Проекты":
+        render_project_manager(projects)
+        return
+    if not project_id:
+        st.info("Введите код доступа к проекту или войдите как владелец платформы.")
+        return
     if page == "Загрузка файла":
         render_upload_page(project_id, role, args.work_dir)
         return
@@ -6450,9 +6622,8 @@ def main() -> None:
         render_ingest_admin_page(project_id, project_name, args.work_dir)
         return
 
-    selected_period_ids, periods = render_period_selector(project_id)
     if not selected_period_ids:
-        st.info("Выберите период или загрузите первый файл.")
+        st.info("Выберите период в боковой панели или загрузите первый файл.")
         return
 
     with st.spinner("Загружаю данные проекта..."):
@@ -6476,7 +6647,7 @@ def main() -> None:
         enriched_messages = prepare_dashboard_messages(enriched_messages)
     render_perf_sidebar()
 
-    if is_taxi_project_profile(project_profile):
+    if taxi_profile:
         render_taxi_dashboard(
             project_id,
             project_name,
@@ -6491,115 +6662,146 @@ def main() -> None:
             dashboard_view_settings=dashboard_view_settings,
             client_view=client_view,
             project_settings=current_project_settings,
+            section=page,
         )
         return
 
     raw_events_agg = aggregate_events(events)
-    if client_view and bool(dashboard_view_settings.get("client_hide_technical", True)):
-        min_event_messages = int(default_min_event_messages(project_profile, events))
-        show_threshold_default = False
-    else:
-        show_threshold_default = True
-        min_event_messages = None  # решится ниже, после панели вида
-
-    # --- Панель «Вид страницы»: что показывать на главной ---
-    saved_blocks = set(
-        dashboard_view_settings.get("main_visible_blocks")
-        or ["metrics", "comparison", "summary", "threshold"]
-    )
-    view_container = getattr(st, "popover", st.expander)
-    with view_container("⚙️ Вид страницы"):
-        show_metrics = st.checkbox(
-            "Метрики периода",
-            value=("metrics" in saved_blocks),
-            key="view_show_metrics",
-            help="Карточки с основными показателями выбранных периодов.",
-        )
-        show_comparison = st.checkbox(
-            "Сравнение периодов",
-            value=("comparison" in saved_blocks),
-            key="view_show_comparison",
-            help="Последовательное сравнение (при выборе двух и более периодов).",
-        )
-        show_summary = st.checkbox(
-            "Саммари периода",
-            value=("summary" in saved_blocks),
-            key="view_show_summary",
-            help="Текстовое саммари с кнопками экспорта отчётов.",
-        )
-        if show_threshold_default:
-            show_threshold = st.checkbox(
-                "Порог инфоповодов (техническое)",
-                value=("threshold" in saved_blocks),
-                key="view_show_threshold",
-                help="Ручная настройка минимального размера инфоповода.",
-            )
-        else:
-            show_threshold = False
-        if role_rank(role) >= role_rank("editor"):
-            if st.button(
-                "💾 Запомнить для проекта",
-                key="view_save_blocks",
-                help="Сохранить текущий набор блоков как вид по умолчанию для всех, кто открывает проект.",
-            ):
-                chosen = []
-                if show_metrics:
-                    chosen.append("metrics")
-                if show_comparison:
-                    chosen.append("comparison")
-                if show_summary:
-                    chosen.append("summary")
-                if show_threshold:
-                    chosen.append("threshold")
-                updated = dict(current_project_settings or {})
-                dvs_raw = dict(updated.get("dashboard_view_settings") or {})
-                dvs_raw["main_visible_blocks"] = chosen
-                updated["dashboard_view_settings"] = dvs_raw
-                try:
-                    update_project(project_id, settings=updated)
-                    st.success("Вид страницы сохранён для проекта.")
-                    st.rerun()
-                except Exception as exc:
-                    st.warning(f"Не удалось сохранить: {exc}")
-
-    if min_event_messages is None:
-        if show_threshold:
-            min_event_messages = render_min_event_messages_control(
-                project_profile, events, key="main_min_event_messages"
-            )
-        else:
-            min_event_messages = int(
-                default_min_event_messages(project_profile, events)
-            )
-    events_agg, hidden_events, hidden_messages = filter_small_events(
-        raw_events_agg, min_event_messages
-    )
-
     # Brand Analytics projects must show only system tags from columns after
     # `Обработано`. This prevents legacy taxi/generic labels from appearing
     # in the tag block after algorithm updates.
     enriched_messages = clean_brand_analytics_tags(enriched_messages)
     enriched_messages = prepare_dashboard_messages(enriched_messages)
 
+    hide_technical = client_view and bool(
+        dashboard_view_settings.get("client_hide_technical", True)
+    )
+    saved_blocks = set(
+        dashboard_view_settings.get("main_visible_blocks")
+        or ["metrics", "comparison", "summary", "threshold"]
+    )
+
+    # --- компактная шапка проекта: одна строка вместо трёх заголовков ---
+    period_label = selected_period_label(periods, selected_period_ids)
+    profile_label = ALGORITHM_PROFILE_OPTIONS.get(project_profile, project_profile)
+    head_left, head_right = st.columns([6, 1])
+    with head_left:
+        st.markdown(f"### {project_name}")
+        st.caption(f"{profile_label} · {page} · {period_label}")
+
+    min_event_messages: int | None = None
+    with head_right:
+        if hasattr(st, "popover"):
+            view_box = st.popover("⚙️ Вид", use_container_width=True)
+        else:
+            view_box = st.expander("⚙️ Вид")
+        with view_box:
+            show_metrics = st.checkbox(
+                "Метрики периода в шапке",
+                value=("metrics" in saved_blocks),
+                key="view_show_metrics",
+                help="Полоса из четырёх показателей и тональности под названием проекта.",
+            )
+            if hide_technical:
+                min_event_messages = int(
+                    default_min_event_messages(project_profile, events)
+                )
+            else:
+                min_event_messages = render_min_event_messages_control(
+                    project_profile, events, key="main_min_event_messages"
+                )
+            if role_rank(role) >= role_rank("editor"):
+                st.divider()
+                if st.button(
+                    "Открывать проект на этом разделе",
+                    key="view_save_start_section",
+                    help=f"Запомнить «{page}» как стартовый раздел проекта.",
+                ):
+                    updated = dict(current_project_settings or {})
+                    dvs_raw = dict(updated.get("dashboard_view_settings") or {})
+                    dvs_raw[start_key] = page
+                    dvs_raw["main_visible_blocks"] = (
+                        ["metrics"] if show_metrics else []
+                    ) + [b for b in saved_blocks if b != "metrics"]
+                    updated["dashboard_view_settings"] = dvs_raw
+                    try:
+                        update_project(project_id, settings=updated)
+                        clear_platform_caches(project_id)
+                        st.success("Сохранено для проекта.")
+                        st.rerun()
+                    except Exception as exc:
+                        st.warning(f"Не удалось сохранить: {exc}")
+
+    events_agg, hidden_events, hidden_messages = filter_small_events(
+        raw_events_agg, int(min_event_messages or 0)
+    )
+
+    metrics = None
     if show_metrics:
         metrics = render_project_intro(
             project_name,
             enriched_messages,
             periods,
             selected_period_ids,
-            profile_label=ALGORITHM_PROFILE_OPTIONS.get(
-                project_profile, project_profile
-            ),
+            profile_label=profile_label,
             chart_label_settings=chart_label_settings,
             comparison_visible_charts=dashboard_view_settings.get(
                 "comparison_visible_charts"
             ),
-            show_comparison=show_comparison,
+            show_comparison=False,
+            show_title=False,
         )
-    else:
-        st.header(project_name)
-        metrics = None
-    if show_summary:
+    st.divider()
+
+    # --- содержимое выбранного раздела ---
+    if page == "Обзор":
+        render_client_insights(
+            enriched_messages,
+            events_agg,
+            periods,
+            selected_period_ids,
+            profile=project_profile,
+        )
+    elif page == "Индексы бренда":
+        render_brand_metrics_page(
+            project_id,
+            current_project_settings,
+            enriched_messages,
+            periods,
+            selected_period_ids,
+            role_can_edit=role_rank(role) >= role_rank("editor"),
+        )
+    elif page == "Теги":
+        render_tag_statistics(enriched_messages, project_id=project_id)
+        render_tier_analytics_block(enriched_messages, project_id=project_id)
+    elif page == "Инфоповоды":
+        render_small_events_notice(hidden_events, hidden_messages, min_event_messages)
+        render_events(project_id, role, events_agg, enriched_messages, manual_state)
+    elif page == "Сообщения":
+        render_messages_block(enriched_messages, project_id=project_id)
+    elif page == "Динамика":
+        if len(selected_period_ids) < 2:
+            st.info(
+                "Выберите в боковой панели два периода или больше — тогда появится "
+                "сравнение и графики динамики."
+            )
+        else:
+            render_period_comparison_metrics(
+                enriched_messages,
+                periods,
+                selected_period_ids,
+                chart_label_settings=chart_label_settings,
+                comparison_visible_charts=dashboard_view_settings.get(
+                    "comparison_visible_charts"
+                ),
+            )
+            st.divider()
+            render_period_dynamics(enriched_messages, periods, selected_period_ids)
+    elif page == "Отчёт":
+        report_metrics = (
+            build_comparison_metrics(enriched_messages, periods, selected_period_ids)
+            or metrics
+        )
         render_period_summary(
             project_id,
             project_name,
@@ -6609,58 +6811,9 @@ def main() -> None:
             periods,
             role,
             profile=project_profile,
-            metrics=metrics,
+            metrics=report_metrics,
             branding=report_branding,
         )
-    section_options = [
-        "Клиентский обзор",
-        "Индексы бренда",
-        "Теги",
-        "Инфоповоды",
-        "Ключевые сообщения",
-    ]
-    if len(selected_period_ids) >= 2:
-        section_options.append("Динамика")
-    default_section = str(
-        dashboard_view_settings.get("start_section") or "Клиентский обзор"
-    )
-    if default_section not in section_options:
-        default_section = section_options[0]
-    section = st.radio(
-        "Раздел аналитики",
-        section_options,
-        index=section_options.index(default_section),
-        horizontal=True,
-        key="main_dashboard_section",
-    )
-
-    if section == "Клиентский обзор":
-        render_client_insights(
-            enriched_messages,
-            events_agg,
-            periods,
-            selected_period_ids,
-            profile=project_profile,
-        )
-    elif section == "Индексы бренда":
-        render_brand_metrics_page(
-            project_id,
-            current_project_settings,
-            enriched_messages,
-            periods,
-            selected_period_ids,
-            role_can_edit=role_rank(role) >= role_rank("editor"),
-        )
-    elif section == "Теги":
-        render_tag_statistics(enriched_messages, project_id=project_id)
-        render_tier_analytics_block(enriched_messages, project_id=project_id)
-    elif section == "Инфоповоды":
-        render_small_events_notice(hidden_events, hidden_messages, min_event_messages)
-        render_events(project_id, role, events_agg, enriched_messages, manual_state)
-    elif section == "Ключевые сообщения":
-        render_messages_block(enriched_messages, project_id=project_id)
-    elif section == "Динамика":
-        render_period_dynamics(enriched_messages, periods, selected_period_ids)
 
 
 if __name__ == "__main__":

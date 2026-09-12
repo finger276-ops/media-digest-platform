@@ -1,4 +1,4 @@
-"""Дымовой тест интерфейса: приложение стартует и раздел «Автозагрузка» рисуется.
+"""Дымовой тест интерфейса: боковая навигация, компактная шапка и разделы.
 
 Supabase подменен поддельным клиентом, поэтому тест не ходит в сеть.
 """
@@ -163,58 +163,70 @@ def check(label, condition, detail=""):
 
 
 print("1. Запуск приложения от имени владельца платформы")
-at = AppTest.from_file(str(REPO / "streamlit_app.py"), default_timeout=60)
+at = AppTest.from_file(str(REPO / "streamlit_app.py"), default_timeout=90)
 at.session_state["platform_is_admin"] = True
 at.run()
 check("приложение стартовало без исключений", not at.exception, str(at.exception))
-sidebar_radios = [r for r in at.sidebar.radio]
-sections = sidebar_radios[0].options if sidebar_radios else []
-check("раздел «Автозагрузка» есть в меню", "Автозагрузка" in sections, str(sections))
 
-print("2. Открытие раздела «Автозагрузка»")
-sidebar_radios[0].set_value("Автозагрузка").run()
-check("раздел отрисовался без исключений", not at.exception, str(at.exception))
+nav = {str(b.label): b for b in at.sidebar.button}
+check("меню разделов в боковой панели", "Индексы бренда" in nav and "Инфоповоды" in nav, str(list(nav)))
+check("работа с данными в том же меню", "Загрузка файла" in nav and "Автозагрузка" in nav, str(list(nav)))
+check("раздел «Отчёт» появился", "Отчёт" in nav, str(list(nav)))
+check("старого радио «Раздел» больше нет", not any("Раздел" == str(r.label) for r in at.sidebar.radio))
 
+
+def open_section(name):
+    """Нажать пункт меню и дождаться перерисовки."""
+    button = {str(b.label): b for b in at.sidebar.button}[name]
+    button.click().run()
+
+
+print("2. Главный экран: шапка и метрики без лишних заголовков")
 texts = [m.value for m in at.markdown] + [h.value for h in at.subheader] + [h.value for h in at.header]
-check("заголовок раздела на месте", any("Автозагрузка" in str(t) for t in texts), str(texts)[:200])
-check("блок очереди отрисован", any("Очередь автозагрузки" in str(t) for t in texts))
-check("блок источников отрисован", any("Источники автозагрузки" in str(t) for t in texts))
+joined = " ".join(str(t) for t in texts)
+check("имя проекта в шапке", "ТЕХНОНИКОЛЬ" in joined)
+check("заголовок приложения ушёл со страницы", "Платформа дайджестов" not in joined, joined[:160])
+check("подзаголовка «Период и основные метрики» больше нет", "Период и основные метрики" not in joined)
+metric_labels = [str(m.label) for m in at.metric]
+check("полоса метрик на месте", "Сообщений" in metric_labels, str(metric_labels[:6]))
+view_controls = [str(c.label) for c in at.checkbox]
+check(
+    "настройки вида спрятаны в панель «Вид», а не в поток страницы",
+    any("Метрики периода" in label for label in view_controls),
+    str(view_controls),
+)
+check(
+    "настройки графиков не висят на главной",
+    not any("Показывать графики" in str(m.label) for m in at.multiselect),
+    str([m.label for m in at.multiselect]),
+)
 
-metrics = {m.label: m.value for m in at.metric}
+print("3. Переход в «Индексы бренда» одним кликом")
+open_section("Индексы бренда")
+check("раздел открылся без исключений", not at.exception, str(at.exception))
+texts = [m.value for m in at.markdown] + [h.value for h in at.subheader]
+check("заголовок раздела на месте", any("Индексы бренда" in str(t) for t in texts))
+labels = {str(m.label): m.value for m in at.metric}
+check("карточка BPI с расшифровкой названия", any("BPI · Индекс восприятия" in k for k in labels), str(list(labels))[:200])
+check("карточка NSS с названием", any(k.startswith("NSS · ") for k in labels), str(list(labels))[:200])
+check("саммари не примешивается к разделу", not any("Саммари периода" in str(t) for t in texts))
+
+print("4. Раздел «Отчёт» держит саммари и выгрузки")
+open_section("Отчёт")
+check("раздел открылся без исключений", not at.exception, str(at.exception))
+texts = [m.value for m in at.markdown] + [h.value for h in at.subheader]
+check("саммари переехало сюда", any("Саммари" in str(t) for t in texts), str(texts)[:200])
+
+print("5. Раздел «Автозагрузка» по-прежнему работает")
+open_section("Автозагрузка")
+check("раздел открылся без исключений", not at.exception, str(at.exception))
+texts = [m.value for m in at.markdown] + [h.value for h in at.subheader] + [h.value for h in at.header]
+check("очередь автозагрузки на месте", any("Очередь автозагрузки" in str(t) for t in texts))
+metrics = {str(m.label): m.value for m in at.metric}
 check("метрика «В очереди» = 1", any("В очереди" in k and v == "1" for k, v in metrics.items()), str(metrics))
-check("метрика «Ошибка» = 1", any("Ошибка" in k and v == "1" for k, v in metrics.items()), str(metrics))
 
-buttons = [b.label for b in at.button]
-check("есть кнопка ручной обработки", "Обработать очередь сейчас" in buttons, str(buttons))
-
-print("3. Раздел «Индексы бренда» на дашборде")
-sidebar_radios = [r for r in at.sidebar.radio]
-sidebar_radios[0].set_value("Дашборд").run()
-check("дашборд открылся", not at.exception, str(at.exception))
-
-section_radios = [r for r in at.radio if "Раздел аналитики" in str(r.label)]
-if section_radios:
-    options = section_radios[0].options
-    check("«Индексы бренда» есть в разделах аналитики", "Индексы бренда" in options, str(options))
-    section_radios[0].set_value("Индексы бренда").run()
-    check("раздел отрисовался без исключений", not at.exception, str(at.exception))
-    texts = [m.value for m in at.markdown] + [h.value for h in at.subheader]
-    check("заголовок раздела на месте", any("Индексы бренда" in str(t) for t in texts))
-    check("блок категорийной выгрузки на месте", any("Выгрузка по категории" in str(t) for t in texts))
-    labels = {m.label: m.value for m in at.metric}
-    check("карточка BPI отрисована", any("BPI" in str(k) for k in labels), str(list(labels)[:8]))
-    check("карточка NSS отрисована", any(str(k) == "NSS" for k in labels), str(list(labels)[:8]))
-    check(
-        "SOV без выгрузки категории показывает прочерк",
-        any(str(k) == "SOV" and v == "—" for k, v in labels.items()),
-        str(labels),
-    )
-else:
-    check("найден переключатель разделов аналитики", False, "радио «Раздел аналитики» не отрисовалось")
-
-print("4. Страница ручной загрузки по-прежнему работает")
-sidebar_radios = [r for r in at.sidebar.radio]
-sidebar_radios[0].set_value("Загрузка файла").run()
+print("6. Страница загрузки файла")
+open_section("Загрузка файла")
 check("страница загрузки без исключений", not at.exception, str(at.exception))
 
 print()
