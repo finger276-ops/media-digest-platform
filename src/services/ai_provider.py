@@ -114,6 +114,90 @@ def bundled_ca_path() -> str:
     return ""
 
 
+def ca_pem_to_file(pem_text: str) -> str:
+    """Сохранить сертификат из секрета во временный файл и вернуть путь.
+
+    Так сертификат можно завести без терминала и без коммита в репозиторий:
+    текст вставляется в Streamlit Secrets, а `requests` всё равно нужен путь
+    к файлу. Файл пишется один раз на содержимое — повторные вызовы попадают
+    в уже готовый.
+    """
+    import hashlib  # noqa: PLC0415
+    import tempfile  # noqa: PLC0415
+    from pathlib import Path  # noqa: PLC0415
+
+    text = str(pem_text or "").strip()
+    if not text:
+        return ""
+    if not text.endswith("\n"):
+        text += "\n"
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    target = Path(tempfile.gettempdir()) / f"gigachat_ca_{digest}.pem"
+    if not target.is_file():
+        try:
+            target.write_text(text, encoding="utf-8")
+        except OSError:
+            return ""
+    return str(target)
+
+
+def describe_certificates(pem_text: str) -> list[dict[str, Any]]:
+    """Разобрать PEM и вернуть, что именно в нём лежит.
+
+    Нужно, чтобы человек, вставивший файл, сразу увидел — это действительно
+    сертификаты НУЦ Минцифры и они не просрочены, а не «кажется, что-то не то».
+    Без библиотеки cryptography возвращается пустой список: проверка
+    необязательная, она не должна ломать основной путь.
+    """
+    try:
+        from cryptography import x509  # noqa: PLC0415
+    except Exception:  # pragma: no cover - проверка необязательная
+        return []
+
+    from datetime import datetime, timezone  # noqa: PLC0415
+
+    blocks = []
+    marker = "-----BEGIN CERTIFICATE-----"
+    for chunk in str(pem_text or "").split(marker):
+        if "-----END CERTIFICATE-----" not in chunk:
+            continue
+        body = marker + chunk.split("-----END CERTIFICATE-----")[0]
+        body += "-----END CERTIFICATE-----\n"
+        try:
+            cert = x509.load_pem_x509_certificate(body.encode("utf-8"))
+        except Exception:
+            blocks.append({"ok": False, "subject": "не разобрался", "expired": False})
+            continue
+        try:
+            subject = cert.subject.rfc4514_string()
+        except Exception:
+            subject = "?"
+        try:
+            not_after = cert.not_valid_after_utc
+        except AttributeError:  # cryptography < 42
+            not_after = cert.not_valid_after.replace(tzinfo=timezone.utc)
+        blocks.append(
+            {
+                "ok": True,
+                "subject": subject,
+                "not_after": not_after,
+                "expired": not_after < datetime.now(timezone.utc),
+                "is_ca": _is_ca_cert(cert),
+            }
+        )
+    return blocks
+
+
+def _is_ca_cert(cert: Any) -> bool:
+    try:
+        from cryptography import x509  # noqa: PLC0415
+
+        constraints = cert.extensions.get_extension_for_class(x509.BasicConstraints)
+        return bool(constraints.value.ca)
+    except Exception:
+        return False
+
+
 def _bool_secret(name: str, default: bool) -> bool:
     raw = _secret_value(name)
     if not raw:
@@ -218,7 +302,13 @@ def load_ai_config() -> AIConfig:
         # сертификат не установлен в системе, проверку приходится отключать —
         # это осознанный выбор администратора, а не поведение по умолчанию.
         verify_ssl=_bool_secret("GIGACHAT_VERIFY_SSL", True),
-        ca_bundle=_secret_value("GIGACHAT_CA_BUNDLE") or bundled_ca_path(),
+        # Три способа задать сертификат, по убыванию удобства:
+        # текстом в секретах (без терминала), путём к файлу, файлом в репозитории.
+        ca_bundle=(
+            ca_pem_to_file(_secret_value("GIGACHAT_CA_PEM"))
+            or _secret_value("GIGACHAT_CA_BUNDLE")
+            or bundled_ca_path()
+        ),
         # Адреса вынесены в настройки: когда Сбер снова их поменяет, это правка
         # одной строки в секретах, а не выпуск новой версии платформы.
         chat_url=_secret_value("GIGACHAT_API_URL") or GIGACHAT_CHAT_URL,
@@ -273,13 +363,17 @@ def tls_trust_hint(config: "AIConfig") -> str:
         )
     return (
         "GigaChat подписан сертификатом НУЦ Минцифры, которого нет в системном "
-        "хранилище — поэтому проверка не прошла. Положите сертификат в папку "
-        "certs/ в корне репозитория под именем russian_trusted_ca.pem, и "
-        "платформа подхватит его сама:\n\n"
+        "хранилище — поэтому проверка не прошла.\n\n"
+        "**Без терминала:** раскройте блок «Сертификат для GigaChat: собрать без "
+        "терминала» чуть выше, скачайте с gosuslugi.ru/crt два файла в формате "
+        ".crt (корневой и выпускающий), загрузите их туда — платформа проверит "
+        "их и выдаст готовый блок для Streamlit Secrets.\n\n"
+        "**Если есть терминал:** положите сертификат в папку certs/ в корне "
+        "репозитория, платформа подхватит его сама:\n\n"
         f"    {CA_DOWNLOAD_HINT}\n\n"
-        "Скачать вручную можно на gosuslugi.ru/crt. Путь к уже имеющемуся файлу "
-        "задаётся секретом GIGACHAT_CA_BUNDLE. Отключать проверку "
-        "(GIGACHAT_VERIFY_SSL = \"false\") стоит только как временную меру."
+        "Путь к уже имеющемуся файлу задаётся секретом GIGACHAT_CA_BUNDLE. "
+        "Отключать проверку (GIGACHAT_VERIFY_SSL = \"false\") стоит только как "
+        "временную меру."
     )
 
 

@@ -20,9 +20,11 @@ import streamlit as st
 
 from services import category_store
 from services.ai_provider import (
+    PROVIDER_GIGACHAT,
     PROVIDER_OFF,
     AIError,
     check_connection,
+    describe_certificates,
     describe_config,
     estimate_tokens,
     load_ai_config,
@@ -60,6 +62,80 @@ GIGACHAT_AUTH_KEY = "..."       # для GigaChat, ключ авторизаци
 def is_platform_owner() -> bool:
     """Владелец платформы — тот, кто вошёл по PLATFORM_ADMIN_PASSWORD."""
     return bool(st.session_state.get("platform_is_admin"))
+
+
+def render_certificate_helper() -> None:
+    """Собрать сертификат НУЦ Минцифры без терминала и без коммита в репозиторий.
+
+    На Streamlit Cloud терминала нет, а два скачанных файла надо ещё и склеить.
+    Поэтому: загрузили оба файла — платформа проверила, что это действительно
+    сертификаты удостоверяющего центра и они не просрочены, и выдала готовый
+    блок для вставки в Secrets.
+    """
+    with st.expander("Сертификат для GigaChat: собрать без терминала", expanded=False):
+        st.markdown(
+            "1. Откройте **gosuslugi.ru/crt** и скачайте два файла для Linux "
+            "в формате `.crt` — **корневой** и **выпускающий**.\n"
+            "2. Загрузите здесь оба.\n"
+            "3. Скопируйте получившийся блок в Streamlit Secrets."
+        )
+        uploaded = st.file_uploader(
+            "Файлы сертификатов",
+            type=["crt", "pem", "cer", "txt"],
+            accept_multiple_files=True,
+            key="ai_ca_upload",
+        )
+        if not uploaded:
+            return
+
+        parts = []
+        for item in uploaded:
+            try:
+                text = item.getvalue().decode("utf-8", errors="replace").strip()
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"{item.name}: не удалось прочитать — {exc}")
+                return
+            if "-----BEGIN CERTIFICATE-----" not in text:
+                st.error(
+                    f"{item.name}: это не PEM-сертификат. На госуслугах нужен "
+                    "формат для Linux (.crt), а не .cer для Windows."
+                )
+                return
+            parts.append(text)
+
+        pem = "\n".join(parts).strip() + "\n"
+        blocks = describe_certificates(pem)
+        if blocks:
+            for block in blocks:
+                if not block.get("ok"):
+                    st.error("Один из файлов не разобрался как сертификат.")
+                    return
+                name = str(block.get("subject") or "")
+                tail = name.split(",")[0].replace("CN=", "") or name
+                if block.get("expired"):
+                    st.error(f"{tail}: срок действия истёк — нужен свежий файл.")
+                    return
+                if not block.get("is_ca"):
+                    st.warning(
+                        f"{tail}: это не сертификат удостоверяющего центра. "
+                        "Похоже, скачан не тот файл."
+                    )
+                st.success(
+                    f"{tail} · действует до "
+                    f"{block['not_after'].strftime('%d.%m.%Y')}"
+                )
+            if len(blocks) < 2:
+                st.warning(
+                    "Загружен только один сертификат. Нужны оба — корневой и "
+                    "выпускающий, иначе цепочка не соберётся."
+                )
+
+        st.caption("Скопируйте это в Streamlit Secrets целиком:")
+        st.code('GIGACHAT_CA_PEM = """\n' + pem + '"""', language="toml")
+        st.caption(
+            "После сохранения секретов приложение перезапустится само. "
+            "Затем нажмите «Проверить подключение»."
+        )
 
 
 def _render_access_control(
@@ -189,6 +265,10 @@ def render_ai_summary_panel(
         # редакторам заранее, а ключи добавить позже — и наоборот.
         if owner:
             _render_access_control(project_id, project_settings)
+            # Помощник по сертификату нужен ровно до тех пор, пока сертификата
+            # нет: дальше он только занимает место.
+            if config.provider == PROVIDER_GIGACHAT and not config.ca_bundle:
+                render_certificate_helper()
             if config.is_ready and st.button(
                 "Проверить подключение",
                 key=f"ai_check_{project_id}",

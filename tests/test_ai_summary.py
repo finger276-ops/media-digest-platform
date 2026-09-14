@@ -26,8 +26,10 @@ from services import ai_provider  # noqa: E402
 from services.ai_provider import (  # noqa: E402
     AIConfig,
     AIError,
+    ca_pem_to_file,
     check_connection,
     complete,
+    describe_certificates,
     is_tls_trust_error,
     load_ai_config,
     reset_gigachat_token,
@@ -559,6 +561,38 @@ check(
     "проверка стоит один короткий запрос",
     len(session.calls[-1]["json"]["messages"][1]["content"]) < 60,
     session.calls[-1]["json"]["messages"][1]["content"],
+)
+
+print("16. Сертификат заводится текстом, без терминала")
+SAMPLE_PEM = """-----BEGIN CERTIFICATE-----
+MIIFwqmUBMRUAAAAAAUkwDQYJKoZIhvcNAQELBQAwcDELMAkGA1UEBhMCUlUx
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIFwjCCA6qgAwIBAgICEAAwDQYJKoZIhvcNAQELBQAwcDELMAkGA1UEBhMCUlUx
+-----END CERTIFICATE-----
+"""
+path = ca_pem_to_file(SAMPLE_PEM)
+check("текст сертификата сохранён в файл", bool(path) and Path(path).is_file(), path)
+check(
+    "повторный вызов не плодит файлы",
+    ca_pem_to_file(SAMPLE_PEM) == path,
+    path,
+)
+check("пустой текст не создаёт файла", ca_pem_to_file("") == "")
+check(
+    "в файле сохранено ровно то, что дали",
+    Path(path).read_text(encoding="utf-8").count("BEGIN CERTIFICATE") == 2,
+)
+
+conf = AIConfig(provider="gigachat", api_key="k", ca_bundle=path)
+check("этот путь уходит в verify", conf.tls_verify == path, str(conf.tls_verify))
+
+check("мусор не выдаётся за сертификат", describe_certificates("просто текст") == [])
+real = describe_certificates(SAMPLE_PEM)
+check(
+    "битый PEM помечается как неразобранный",
+    real and all(not b.get("ok") for b in real),
+    str(real),
 )
 
 print()
