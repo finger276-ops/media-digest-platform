@@ -60,12 +60,17 @@ from services.ingest import IngestError, process_canonical, read_canonical_bytes
 from noise_filter_ui import render_noise_filter_block
 from ingest_admin_ui import render_ingest_admin_page
 from brand_metrics_ui import render_brand_metrics_page
+from ai_summary_ui import render_ai_summary_panel, render_saved_ai_text
+from services.ai_summary import (
+    KIND_BRAND as AI_KIND_BRAND,
+    KIND_RISKS as AI_KIND_RISKS,
+)
 from tag_hierarchy_ui import render_tag_hierarchy_block
 from tag_tier_analytics_ui import render_tier_analytics_block
 from services.perf import perf_block, render_perf_sidebar, reset_perf_events
 
 APP_TITLE = "Платформа дайджестов"
-APP_VERSION = "4.11.0: инфоповоды собираются по смыслу, а не по точной строке"
+APP_VERSION = "4.12.1: саммари от ИИ, доступ настраивается"
 
 ALGORITHM_PROFILE_OPTIONS = {
     "universal": "Универсальный",
@@ -5376,6 +5381,7 @@ def render_period_summary(
     profile: str = "",
     metrics: dict[str, Any] | None = None,
     branding: dict[str, Any] | None = None,
+    project_settings: dict[str, Any] | None = None,
 ) -> None:
     """Unified editable/exportable period summary for all project profiles."""
     st.subheader("Саммари периода")
@@ -5384,6 +5390,23 @@ def render_period_summary(
     auto_summary = build_auto_summary(messages, events_agg, periods, period_ids)
     summary_text = str((manual or {}).get("summary") or "").strip() or auto_summary
     st.markdown(summary_text.replace("\n", "  \n"))
+    if str((manual or {}).get("source") or "") == "ai":
+        st.caption("Текст сгенерирован моделью и сохранён владельцем платформы.")
+
+    # По умолчанию генерация доступна только владельцу платформы: она тратит
+    # деньги и отправляет данные проекта внешнему сервису. Владелец может
+    # открыть её редакторам конкретного проекта — настройка внутри панели.
+    render_ai_summary_panel(
+        project_id,
+        project_name,
+        period_ids,
+        messages,
+        events_agg,
+        periods,
+        role=role,
+        metrics=metrics,
+        project_settings=project_settings,
+    )
 
     metrics = metrics or overview_metrics(messages)
     metrics.setdefault("period_label", selected_period_label(periods, period_ids))
@@ -6595,6 +6618,12 @@ def main() -> None:
 
     # --- содержимое выбранного раздела ---
     if page == "Обзор":
+        render_saved_ai_text(
+            project_id,
+            AI_KIND_RISKS,
+            selected_period_ids,
+            heading="Риски периода",
+        )
         render_client_insights(
             enriched_messages,
             events_agg,
@@ -6610,6 +6639,12 @@ def main() -> None:
             periods,
             selected_period_ids,
             role_rank(role) >= role_rank("editor"),
+        )
+        render_saved_ai_text(
+            project_id,
+            AI_KIND_BRAND,
+            selected_period_ids,
+            heading="Что говорят индексы",
         )
     elif page == "Теги":
         _section_tags(enriched_messages, project_id)
@@ -6658,6 +6693,7 @@ def main() -> None:
             profile=project_profile,
             metrics=report_metrics,
             branding=report_branding,
+            project_settings=current_project_settings,
         )
 
 

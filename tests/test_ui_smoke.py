@@ -265,6 +265,24 @@ open_section("Отчёт")
 check("раздел открылся без исключений", not at.exception, str(at.exception))
 texts = [m.value for m in at.markdown] + [h.value for h in at.subheader]
 check("саммари переехало сюда", any("Саммари" in str(t) for t in texts), str(texts)[:200])
+expanders = [str(e.label) for e in at.expander]
+check(
+    "панель генерации ИИ видна владельцу платформы",
+    any("Тексты от ИИ" in label for label in expanders),
+    str(expanders),
+)
+infos = [str(i.value) for i in at.info]
+check(
+    "без ключей панель объясняет, чего не хватает, а не падает",
+    any("не настроена" in text for text in infos),
+    str(infos)[:300],
+)
+ai_access = [str(s.label) for s in at.selectbox]
+check(
+    "владелец может открыть генерацию редакторам проекта",
+    any("Кому доступна генерация" in label for label in ai_access),
+    str(ai_access),
+)
 
 print("5. Раздел «Автозагрузка» по-прежнему работает")
 open_section("Автозагрузка")
