@@ -70,7 +70,7 @@ from tag_tier_analytics_ui import render_tier_analytics_block
 from services.perf import perf_block, render_perf_sidebar, reset_perf_events
 
 APP_TITLE = "Платформа дайджестов"
-APP_VERSION = "4.12.2: саммари от ИИ, сертификаты GigaChat"
+APP_VERSION = "4.12.3: саммари от ИИ, новый адрес GigaChat"
 
 ALGORITHM_PROFILE_OPTIONS = {
     "universal": "Универсальный",

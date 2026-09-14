@@ -208,7 +208,11 @@ session = FakeSession([gigachat_token_response(), GIGACHAT_OK])
 text = complete("система", "запрос", GIGACHAT_CONFIG, session=session)
 check("текст извлечён из ответа", text == "Текст от GigaChat.", text)
 check("первым идёт OAuth", session.calls[0]["url"] == ai_provider.GIGACHAT_OAUTH_URL)
-check("вторым — чат", session.calls[1]["url"] == ai_provider.GIGACHAT_CHAT_URL)
+check(
+    "вторым — чат по новому адресу",
+    session.calls[1]["url"] == "https://api.giga.chat/v1/chat/completions",
+    session.calls[1]["url"],
+)
 check(
     "у OAuth есть RqUID",
     bool(session.calls[0]["headers"].get("RqUID")),
@@ -227,6 +231,41 @@ check(
     "повторный запрос идёт без нового OAuth",
     len(session.calls) == 1 and session.calls[0]["url"] == ai_provider.GIGACHAT_CHAT_URL,
     str([c["url"] for c in session.calls]),
+)
+
+print("3.1. Адреса GigaChat меняются настройкой, а не правкой кода")
+check(
+    "по умолчанию — новый единый адрес",
+    ai_provider.GIGACHAT_CHAT_URL == "https://api.giga.chat/v1/chat/completions",
+    ai_provider.GIGACHAT_CHAT_URL,
+)
+reset_gigachat_token()
+custom = AIConfig(
+    provider="gigachat", api_key="basic-key", model="GigaChat-3-Ultra",
+    chat_url="https://api.giga.chat/v2/chat/completions",
+    oauth_url="https://example.test/oauth",
+)
+session = FakeSession([gigachat_token_response(), GIGACHAT_OK])
+complete("система", "запрос", custom, session=session)
+check(
+    "свой адрес токена доезжает",
+    session.calls[0]["url"] == "https://example.test/oauth",
+    session.calls[0]["url"],
+)
+check(
+    "свой адрес чата доезжает",
+    session.calls[1]["url"] == "https://api.giga.chat/v2/chat/completions",
+    session.calls[1]["url"],
+)
+check(
+    "имя модели уходит как задано",
+    session.calls[1]["json"]["model"] == "GigaChat-3-Ultra",
+    str(session.calls[1]["json"].get("model")),
+)
+check(
+    "старый адрес по-прежнему доступен как запасной",
+    ai_provider.GIGACHAT_CHAT_URL_LEGACY.startswith("https://gigachat.devices.sberbank.ru"),
+    ai_provider.GIGACHAT_CHAT_URL_LEGACY,
 )
 
 print("4. Протухший токен обновляется один раз")

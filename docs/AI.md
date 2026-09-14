@@ -74,6 +74,42 @@ GIGACHAT_AUTH_KEY = "ключ авторизации из личного каб�
 GIGACHAT_SCOPE = "GIGACHAT_API_PERS"   # или GIGACHAT_API_B2B / GIGACHAT_API_CORP
 ```
 
+### Адреса GigaChat
+
+С 17 июля 2026 года у GigaChat единый адрес для всех — и для физлиц, и для
+компаний. Платформа по умолчанию ходит на него:
+
+| Что | Адрес |
+| --- | --- |
+| Запрос к модели | `https://api.giga.chat/v1/chat/completions` |
+| Токен доступа | `https://ngw.devices.sberbank.ru:9443/api/v2/oauth` |
+
+Старый адрес `gigachat.devices.sberbank.ru` пока работает, но объявлен
+устаревшим. Если нужно вернуться на него или перейти на `/v2/chat/completions`,
+это делается настройкой, без правки кода:
+
+```toml
+GIGACHAT_API_URL = "https://api.giga.chat/v2/chat/completions"
+GIGACHAT_OAUTH_URL = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
+```
+
+Текущий адрес виден в строке состояния панели; если выбран устаревший, там
+так и написано.
+
+### Выбор модели
+
+По умолчанию — `GigaChat`: она доступна на всех типах ключей. Другую модель
+задаёт `AI_MODEL`:
+
+```toml
+AI_MODEL = "GigaChat-3-Ultra"   # Ultra 3.5
+```
+
+**Ultra 3.5 доступна только физическим лицам в freemium-режиме.** На
+корпоративном ключе (`GIGACHAT_API_B2B` или `GIGACHAT_API_CORP`) запрос к ней
+вернётся ошибкой — это ограничение тарифа, а не платформы. Список доступных
+именно вашему ключу моделей отдаёт `GET https://api.giga.chat/v1/models`.
+
 Необязательные параметры (у всех есть разумные значения по умолчанию):
 
 ```toml

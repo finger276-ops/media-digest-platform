@@ -35,8 +35,15 @@ PROVIDER_TITLES = {
 }
 
 YANDEX_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
+
+# С 17 июля 2026 года у GigaChat единый адрес для всех — физлиц и компаний.
+# Старый адрес пока работает, но объявлен устаревшим, поэтому по умолчанию
+# используем новый, а старый оставляем доступным через настройку.
 GIGACHAT_OAUTH_URL = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
-GIGACHAT_CHAT_URL = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
+GIGACHAT_CHAT_URL = "https://api.giga.chat/v1/chat/completions"
+GIGACHAT_CHAT_URL_LEGACY = (
+    "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
+)
 
 DEFAULT_TIMEOUT = 90.0
 DEFAULT_MAX_TOKENS = 1800
@@ -137,6 +144,8 @@ class AIConfig:
     scope: str = "GIGACHAT_API_PERS"
     verify_ssl: bool = True
     ca_bundle: str = ""
+    chat_url: str = GIGACHAT_CHAT_URL
+    oauth_url: str = GIGACHAT_OAUTH_URL
     timeout: float = DEFAULT_TIMEOUT
     max_tokens: int = DEFAULT_MAX_TOKENS
     temperature: float = DEFAULT_TEMPERATURE
@@ -210,6 +219,10 @@ def load_ai_config() -> AIConfig:
         # это осознанный выбор администратора, а не поведение по умолчанию.
         verify_ssl=_bool_secret("GIGACHAT_VERIFY_SSL", True),
         ca_bundle=_secret_value("GIGACHAT_CA_BUNDLE") or bundled_ca_path(),
+        # Адреса вынесены в настройки: когда Сбер снова их поменяет, это правка
+        # одной строки в секретах, а не выпуск новой версии платформы.
+        chat_url=_secret_value("GIGACHAT_API_URL") or GIGACHAT_CHAT_URL,
+        oauth_url=_secret_value("GIGACHAT_OAUTH_URL") or GIGACHAT_OAUTH_URL,
         timeout=_float_secret("AI_TIMEOUT", DEFAULT_TIMEOUT),
         max_tokens=_int_secret("AI_MAX_TOKENS", DEFAULT_MAX_TOKENS),
         temperature=_float_secret("AI_TEMPERATURE", DEFAULT_TEMPERATURE),
@@ -307,7 +320,7 @@ def _gigachat_token(config: AIConfig, session: Any) -> str:
         if _GIGACHAT_TOKEN.value and _GIGACHAT_TOKEN.expires_at - 60 > now:
             return _GIGACHAT_TOKEN.value
         response = session.post(
-            GIGACHAT_OAUTH_URL,
+            config.oauth_url,
             headers={
                 "Authorization": f"Basic {config.api_key}",
                 "RqUID": str(uuid.uuid4()),
@@ -381,7 +394,7 @@ def _complete_yandex(config: AIConfig, system: str, user: str, session: Any) -> 
 def _complete_gigachat(config: AIConfig, system: str, user: str, session: Any) -> str:
     token = _gigachat_token(config, session)
     response = session.post(
-        GIGACHAT_CHAT_URL,
+        config.chat_url,
         headers={
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
@@ -404,7 +417,7 @@ def _complete_gigachat(config: AIConfig, system: str, user: str, session: Any) -
         reset_gigachat_token()
         token = _gigachat_token(config, session)
         response = session.post(
-            GIGACHAT_CHAT_URL,
+            config.chat_url,
             headers={
                 "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json",
@@ -488,6 +501,10 @@ def describe_config(config: AIConfig | None = None) -> str:
     state = "готово" if config.is_ready else config.problem
     parts = [config.title, model, state]
     if config.provider == PROVIDER_GIGACHAT:
+        host = config.chat_url.split("/")[2] if "//" in config.chat_url else config.chat_url
+        parts.append(host)
+        if config.chat_url == GIGACHAT_CHAT_URL_LEGACY:
+            parts.append("устаревший адрес")
         if not config.verify_ssl:
             parts.append("проверка сертификата ВЫКЛЮЧЕНА")
         elif config.ca_bundle:
