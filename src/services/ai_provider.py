@@ -75,6 +75,38 @@ def _secret_value(*names: str) -> str:
     return ""
 
 
+# Сертификаты GigaChat подписаны НУЦ Минцифры, которого нет в системных
+# хранилищах. Правильное решение — доверять этому корню точечно, только для
+# запросов к GigaChat, а не отключать проверку и не подмешивать корень в
+# системный список. Файл кладётся в папку certs/ в корне репозитория.
+CA_BUNDLE_DIR = "certs"
+CA_BUNDLE_NAMES = (
+    "russian_trusted_ca.pem",
+    "russian_trusted_root_ca.crt",
+    "russian_trusted_root_ca_pem.crt",
+    "russian_trusted_root_ca.pem",
+)
+CA_DOWNLOAD_HINT = (
+    "mkdir -p certs && "
+    "curl -sS -w '\\n' https://gu-st.ru/content/lending/russian_trusted_root_ca_pem.crt "
+    "> certs/russian_trusted_ca.pem && "
+    "curl -sS -w '\\n' https://gu-st.ru/content/lending/russian_trusted_sub_ca_pem.crt "
+    ">> certs/russian_trusted_ca.pem"
+)
+
+
+def bundled_ca_path() -> str:
+    """Путь к сертификату НУЦ Минцифры в репозитории, если он там лежит."""
+    from pathlib import Path  # noqa: PLC0415
+
+    root = Path(__file__).resolve().parents[2]
+    for name in CA_BUNDLE_NAMES:
+        candidate = root / CA_BUNDLE_DIR / name
+        if candidate.is_file():
+            return str(candidate)
+    return ""
+
+
 def _bool_secret(name: str, default: bool) -> bool:
     raw = _secret_value(name)
     if not raw:
@@ -104,6 +136,7 @@ class AIConfig:
     model: str = ""
     scope: str = "GIGACHAT_API_PERS"
     verify_ssl: bool = True
+    ca_bundle: str = ""
     timeout: float = DEFAULT_TIMEOUT
     max_tokens: int = DEFAULT_MAX_TOKENS
     temperature: float = DEFAULT_TEMPERATURE
@@ -111,6 +144,18 @@ class AIConfig:
     @property
     def title(self) -> str:
         return PROVIDER_TITLES.get(self.provider, self.provider)
+
+    @property
+    def tls_verify(self):
+        """Что передать в `verify=` запроса.
+
+        Путь к файлу сертификата — если он задан или найден в репозитории;
+        иначе обычная системная проверка. `False` возвращается только тогда,
+        когда администратор явно выключил проверку.
+        """
+        if not self.verify_ssl:
+            return False
+        return self.ca_bundle or True
 
     @property
     def is_ready(self) -> bool:
@@ -164,6 +209,7 @@ def load_ai_config() -> AIConfig:
         # сертификат не установлен в системе, проверку приходится отключать —
         # это осознанный выбор администратора, а не поведение по умолчанию.
         verify_ssl=_bool_secret("GIGACHAT_VERIFY_SSL", True),
+        ca_bundle=_secret_value("GIGACHAT_CA_BUNDLE") or bundled_ca_path(),
         timeout=_float_secret("AI_TIMEOUT", DEFAULT_TIMEOUT),
         max_tokens=_int_secret("AI_MAX_TOKENS", DEFAULT_MAX_TOKENS),
         temperature=_float_secret("AI_TEMPERATURE", DEFAULT_TEMPERATURE),
@@ -178,6 +224,50 @@ def _requests():
             "Не установлена библиотека requests — добавьте её в requirements.txt."
         ) from exc
     return requests
+
+
+def is_tls_trust_error(message: str) -> bool:
+    """Похоже ли это на «не доверяю сертификату», а не на обрыв сети."""
+    text = str(message or "").lower()
+    markers = (
+        "certificate_verify_failed",
+        "certificate verify failed",
+        "self-signed certificate",
+        "self signed certificate",
+        "unable to get local issuer",
+        "sslcertverificationerror",
+    )
+    return any(marker in text for marker in markers)
+
+
+def tls_trust_hint(config: "AIConfig") -> str:
+    """Что делать с ошибкой доверия сертификату GigaChat.
+
+    Сообщение должно закрывать вопрос целиком: человек видит его вместо
+    трассировки и не должен идти гуглить, что такое НУЦ Минцифры.
+    """
+    if config.provider != PROVIDER_GIGACHAT:
+        return (
+            "Сертификат сервера не прошёл проверку. Если между приложением и "
+            "интернетом стоит корпоративный прокси, добавьте его корневой "
+            "сертификат в GIGACHAT_CA_BUNDLE."
+        )
+    if config.ca_bundle:
+        return (
+            f"GigaChat не принял сертификат из файла {config.ca_bundle}. "
+            "Проверьте, что в файле лежат оба сертификата НУЦ Минцифры — "
+            "корневой и выпускающий, — и что файл не повреждён."
+        )
+    return (
+        "GigaChat подписан сертификатом НУЦ Минцифры, которого нет в системном "
+        "хранилище — поэтому проверка не прошла. Положите сертификат в папку "
+        "certs/ в корне репозитория под именем russian_trusted_ca.pem, и "
+        "платформа подхватит его сама:\n\n"
+        f"    {CA_DOWNLOAD_HINT}\n\n"
+        "Скачать вручную можно на gosuslugi.ru/crt. Путь к уже имеющемуся файлу "
+        "задаётся секретом GIGACHAT_CA_BUNDLE. Отключать проверку "
+        "(GIGACHAT_VERIFY_SSL = \"false\") стоит только как временную меру."
+    )
 
 
 def _readable_http_error(status: int, body: str, provider: str) -> str:
@@ -226,7 +316,7 @@ def _gigachat_token(config: AIConfig, session: Any) -> str:
             },
             data={"scope": config.scope},
             timeout=config.timeout,
-            verify=config.verify_ssl,
+            verify=config.tls_verify,
         )
         if response.status_code >= 400:
             raise AIError(
@@ -307,7 +397,7 @@ def _complete_gigachat(config: AIConfig, system: str, user: str, session: Any) -
             "max_tokens": config.max_tokens,
         },
         timeout=config.timeout,
-        verify=config.verify_ssl,
+        verify=config.tls_verify,
     )
     if response.status_code in (401, 403):
         # Токен мог протухнуть раньше срока — один повтор с новым токеном.
@@ -330,7 +420,7 @@ def _complete_gigachat(config: AIConfig, system: str, user: str, session: Any) -
                 "max_tokens": config.max_tokens,
             },
             timeout=config.timeout,
-            verify=config.verify_ssl,
+            verify=config.tls_verify,
         )
     if response.status_code >= 400:
         raise AIError(
@@ -375,6 +465,8 @@ def complete(
         raise AIError(f"Ответ модели не разобран как JSON: {exc}") from exc
     except Exception as exc:
         message = str(exc)
+        if is_tls_trust_error(message):
+            raise AIError(tls_trust_hint(config)) from exc
         if "timed out" in message.lower() or "timeout" in message.lower():
             raise AIError(
                 f"Модель не ответила за {int(config.timeout)} с. "
@@ -394,7 +486,29 @@ def describe_config(config: AIConfig | None = None) -> str:
         return "Генерация не настроена."
     model = config.model or "модель по умолчанию"
     state = "готово" if config.is_ready else config.problem
-    return f"{config.title} · {model} · {state}"
+    parts = [config.title, model, state]
+    if config.provider == PROVIDER_GIGACHAT:
+        if not config.verify_ssl:
+            parts.append("проверка сертификата ВЫКЛЮЧЕНА")
+        elif config.ca_bundle:
+            parts.append("сертификат НУЦ Минцифры подключён")
+    return " · ".join(parts)
+
+
+def check_connection(config: AIConfig | None = None, *, session: Any = None) -> str:
+    """Короткий пробный запрос. Возвращает описание успеха или бросает AIError.
+
+    Нужен, чтобы настройку можно было проверить одной кнопкой, а не выяснять
+    работоспособность на первом же реальном саммари.
+    """
+    config = config or load_ai_config()
+    text = complete(
+        "Ты отвечаешь одним словом.",
+        "Ответь одним словом: работает",
+        config,
+        session=session,
+    )
+    return f"{config.title} ответил: {text[:80]}"
 
 
 # Стоимость запроса полезно понимать до нажатия кнопки. Обе модели считают

@@ -22,6 +22,7 @@ from services import category_store
 from services.ai_provider import (
     PROVIDER_OFF,
     AIError,
+    check_connection,
     describe_config,
     estimate_tokens,
     load_ai_config,
@@ -188,6 +189,16 @@ def render_ai_summary_panel(
         # редакторам заранее, а ключи добавить позже — и наоборот.
         if owner:
             _render_access_control(project_id, project_settings)
+            if config.is_ready and st.button(
+                "Проверить подключение",
+                key=f"ai_check_{project_id}",
+                help="Один короткий запрос к модели — чтобы не выяснять это на реальном саммари.",
+            ):
+                with st.spinner("Проверяю подключение..."):
+                    try:
+                        st.success(check_connection(config))
+                    except AIError as exc:
+                        st.error(str(exc))
             st.divider()
 
         if config.provider == PROVIDER_OFF or not config.is_ready:

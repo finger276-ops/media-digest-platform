@@ -26,7 +26,9 @@ from services import ai_provider  # noqa: E402
 from services.ai_provider import (  # noqa: E402
     AIConfig,
     AIError,
+    check_connection,
     complete,
+    is_tls_trust_error,
     load_ai_config,
     reset_gigachat_token,
 )
@@ -421,6 +423,103 @@ check(
 check(
     "пустая роль не проходит",
     not can_generate_ai("", {"ai_access": "editor"}, is_platform_owner=False),
+)
+
+print("13. Сертификат НУЦ Минцифры: ошибка объясняется, а не падает трассировкой")
+
+
+class SslSession:
+    """Транспорт, который падает ровно так же, как requests без корневого сертификата."""
+
+    def __init__(self):
+        self.calls = []
+
+    def post(self, url, **kwargs):
+        self.calls.append({"url": url, **kwargs})
+        raise RuntimeError(
+            "HTTPSConnectionPool(host='ngw.devices.sberbank.ru', port=9443): "
+            "Max retries exceeded with url: /api/v2/oauth (Caused by SSLError("
+            "SSLCertVerificationError(1, '[SSL: CERTIFICATE_VERIFY_FAILED] "
+            "certificate verify failed: self-signed certificate in certificate chain')))"
+        )
+
+
+check("ошибка доверия опознаётся", is_tls_trust_error("CERTIFICATE_VERIFY_FAILED"))
+check(
+    "обрыв сети не путается с недоверием",
+    not is_tls_trust_error("Connection reset by peer"),
+)
+
+reset_gigachat_token()
+try:
+    complete("система", "запрос", GIGACHAT_CONFIG, session=SslSession())
+    check("падение по сертификату превращается в AIError", False, "исключения не было")
+except AIError as exc:
+    text = str(exc)
+    check("названа причина — НУЦ Минцифры", "НУЦ Минцифры" in text, text[:160])
+    check("сказано, куда положить файл", "certs/" in text, text[:200])
+    check("дана команда скачивания", "gu-st.ru" in text, text[:300])
+    check(
+        "отключение проверки предложено только как временная мера",
+        "временную меру" in text,
+        text[-160:],
+    )
+
+reset_gigachat_token()
+with_bundle = AIConfig(
+    provider="gigachat", api_key="basic-key", model="GigaChat",
+    ca_bundle="/opt/certs/russian_trusted_ca.pem",
+)
+try:
+    complete("система", "запрос", with_bundle, session=SslSession())
+    check("с указанным файлом тоже AIError", False, "исключения не было")
+except AIError as exc:
+    check(
+        "если файл задан — сообщение про этот файл",
+        "/opt/certs/russian_trusted_ca.pem" in str(exc),
+        str(exc)[:200],
+    )
+
+print("14. Путь к сертификату доезжает до запроса")
+reset_gigachat_token()
+session = FakeSession([gigachat_token_response(), GIGACHAT_OK])
+complete("система", "запрос", with_bundle, session=session)
+check(
+    "verify получает путь к файлу",
+    all(c["verify"] == "/opt/certs/russian_trusted_ca.pem" for c in session.calls),
+    str([c.get("verify") for c in session.calls]),
+)
+
+reset_gigachat_token()
+session = FakeSession([gigachat_token_response(), GIGACHAT_OK])
+complete("система", "запрос", GIGACHAT_CONFIG, session=session)
+check(
+    "без файла — обычная системная проверка",
+    all(c["verify"] is True for c in session.calls),
+    str([c.get("verify") for c in session.calls]),
+)
+
+reset_gigachat_token()
+off_verify = AIConfig(
+    provider="gigachat", api_key="basic-key", model="GigaChat", verify_ssl=False
+)
+session = FakeSession([gigachat_token_response(), GIGACHAT_OK])
+complete("система", "запрос", off_verify, session=session)
+check(
+    "выключенная проверка доезжает как False",
+    all(c["verify"] is False for c in session.calls),
+    str([c.get("verify") for c in session.calls]),
+)
+
+print("15. Кнопка «Проверить подключение»")
+reset_gigachat_token()
+session = FakeSession([gigachat_token_response(), GIGACHAT_OK])
+result = check_connection(GIGACHAT_CONFIG, session=session)
+check("проверка возвращает ответ модели", "GigaChat ответил" in result, result)
+check(
+    "проверка стоит один короткий запрос",
+    len(session.calls[-1]["json"]["messages"][1]["content"]) < 60,
+    session.calls[-1]["json"]["messages"][1]["content"],
 )
 
 print()
