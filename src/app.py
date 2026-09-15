@@ -103,6 +103,7 @@ from messages_ui import render_messages_block, render_message_list
 from tags_ui import render_tag_statistics
 from client_insights_ui import render_client_insights
 from project_admin_ui import render_project_access, render_project_manager
+from session_presence_ui import render_presence_heartbeat, render_session_presence_page
 from services.dashboard_config import (
     ALGORITHM_PROFILE_OPTIONS,
     LEGACY_PROFILE_ALIASES,
@@ -353,6 +354,10 @@ def main() -> None:
     is_admin = is_platform_admin()
     project_id, role, projects = render_project_access(is_admin)
 
+    heartbeat_role = "owner" if is_admin else role
+    if heartbeat_role in {"owner", "editor", "viewer"}:
+        render_presence_heartbeat(project_id, heartbeat_role)
+
     # --- метаданные выбранного проекта ---
     project_row = (
         projects[projects["project_id"].astype(str) == str(project_id)]
@@ -392,7 +397,7 @@ def main() -> None:
                 ("Данные", ["Загрузка файла", "История периодов", "Автозагрузка"])
             )
     if is_admin:
-        groups.append(("Платформа", ["Проекты"]))
+        groups.append(("Платформа", ["Проекты", "Сессии"]))
 
     if not groups:
         st.info("Выберите проект или войдите как владелец платформы.")
@@ -439,6 +444,9 @@ def main() -> None:
     # --- страницы, которым не нужны данные периодов ---
     if page == "Проекты":
         render_project_manager(projects)
+        return
+    if page == "Сессии":
+        render_session_presence_page()
         return
     if not project_id:
         st.info("Введите код доступа к проекту или войдите как владелец платформы.")

@@ -6,8 +6,9 @@ class Result:
 
 
 class Query:
-    def __init__(self, db, table, op, payload=None):
+    def __init__(self, db, table, op, payload=None, on_conflict=None):
         self.db, self.table, self.op, self.payload = db, table, op, payload
+        self.on_conflict = on_conflict
         self.filters = []
         self._order = None
         self._desc = False
@@ -20,6 +21,10 @@ class Query:
 
     def lt(self, col, val):
         self.filters.append(("lt", col, val))
+        return self
+
+    def gte(self, col, val):
+        self.filters.append(("gte", col, val))
         return self
 
     def in_(self, col, vals):
@@ -47,6 +52,8 @@ class Query:
                 return False
             if kind == "lt" and not (current and str(current) < str(val)):
                 return False
+            if kind == "gte" and not (current and str(current) >= str(val)):
+                return False
         return True
 
     def execute(self):
@@ -71,9 +78,16 @@ class Query:
             rows.append(dict(self.payload))
             return Result([dict(self.payload)])
         if self.op == "upsert":
-            key = "source_key" if self.table.endswith("sources") else "task_id"
+            # Ключ конфликта берём из on_conflict, как это делает PostgREST;
+            # старая эвристика по имени таблицы осталась только как запасной
+            # вариант для вызовов без on_conflict.
+            key = self.on_conflict or (
+                "source_key" if self.table.endswith("sources") else "task_id"
+            )
             for row in rows:
                 if row.get(key) == self.payload.get(key):
+                    # ON CONFLICT DO UPDATE обновляет только переданные колонки,
+                    # остальные (например, started_at с default now()) остаются.
                     row.update(self.payload)
                     return Result([dict(row)])
             rows.append(dict(self.payload))
@@ -100,7 +114,7 @@ class Table:
         return Query(self.db, self.name, "insert", payload)
 
     def upsert(self, payload, on_conflict=None):
-        return Query(self.db, self.name, "upsert", payload)
+        return Query(self.db, self.name, "upsert", payload, on_conflict=on_conflict)
 
     def delete(self):
         return Query(self.db, self.name, "delete")

@@ -398,6 +398,23 @@ texts = [h.value for h in at.header]
 check("заголовок раздела на месте", any("История периодов" in str(t) for t in texts))
 check("таблица периодов отрисована", bool(at.dataframe))
 
+print("6.7. Сессии: собственная вкладка видна как онлайн")
+open_section("Сессии")
+check("раздел открылся без исключений", not at.exception, str(at.exception))
+texts = [m.value for m in at.markdown] + [h.value for h in at.header]
+check("заголовок раздела на месте", any("Сессии" in str(t) for t in texts))
+presence_metrics = {str(m.label): str(m.value) for m in at.metric}
+check(
+    "счётчик «Сейчас онлайн» посчитал текущую вкладку",
+    presence_metrics.get("Сейчас онлайн") == "1",
+    str(presence_metrics),
+)
+check(
+    "роль владельца попала в таблицу сессий",
+    any("Онлайн сейчас" in str(t) for t in texts),
+    str(texts)[:200],
+)
+
 print("7. Раздел «Платформа»: управление проектами")
 open_section("Проекты")
 check("раздел открылся без исключений", not at.exception, str(at.exception))
