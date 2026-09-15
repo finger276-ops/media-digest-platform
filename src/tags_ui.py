@@ -231,7 +231,7 @@ def render_tag_statistics(
     tag_selection = st.dataframe(
         display,
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
         selection_mode="single-row",
         on_select="rerun",
         key=f"tag_statistics_table_{project_id or 'global'}",

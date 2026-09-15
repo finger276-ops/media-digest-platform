@@ -99,7 +99,7 @@ def render_messages_block(
             if st.button(
                 "Сбросить фильтр",
                 key=f"clear_event_message_filter_{project_id or 'global'}",
-                use_container_width=True,
+                width="stretch",
             ):
                 clear_selected_event_filter(project_id)
                 st.rerun()

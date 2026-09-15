@@ -62,7 +62,7 @@ def render_noise_filter_block(canonical: pd.DataFrame, text_column: str = "Со�
                     ),
                     "Текст": (text[:130] + "…") if len(text) > 130 else text,
                 })
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
             st.caption(
                 "Блок информационный: показывает шум, но НЕ удаляет сообщения."
             )

@@ -430,7 +430,7 @@ def render_client_insights(
             for col in [c for c in display.columns if c != "Тег"]:
                 display[col] = display[col].apply(format_int)
             with st.expander("Теги с наибольшими изменениями", expanded=True):
-                st.dataframe(display, hide_index=True, use_container_width=True)
+                st.dataframe(display, hide_index=True, width="stretch")
 
     st.markdown("#### Что включить в отчет")
     c1, c2 = st.columns(2)

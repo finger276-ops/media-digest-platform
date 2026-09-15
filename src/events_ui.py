@@ -269,7 +269,7 @@ def render_title_merge_diagnostics(
         f"Текущий порог: {threshold if threshold > 0 else 'выключено'}. "
         "Строки ниже показывают, что было бы при других порогах."
     )
-    st.dataframe(preview, hide_index=True, use_container_width=True)
+    st.dataframe(preview, hide_index=True, width="stretch")
 
 
 def render_title_merge_report(
@@ -298,7 +298,7 @@ def render_title_merge_report(
                     if st.button(
                         "Вернуть",
                         key=f"reallow_title_{project_id}_{abs(hash(title))}",
-                        use_container_width=True,
+                        width="stretch",
                     ):
                         delete_manual(
                             project_id,
@@ -339,7 +339,7 @@ def render_title_merge_report(
                         if st.button(
                             "Не склеивать",
                             key=f"unmerge_title_{project_id}_{index}_{abs(hash(variant))}",
-                            use_container_width=True,
+                            width="stretch",
                         ):
                             save_manual(
                                 project_id,
@@ -444,7 +444,7 @@ def render_events(
                 )
                 .head(500),
                 hide_index=True,
-                use_container_width=True,
+                width="stretch",
                 column_config={"Ссылка": st.column_config.LinkColumn("Ссылка")},
             )
 
@@ -490,7 +490,7 @@ def render_events(
     event = st.dataframe(
         show,
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
         selection_mode="single-row",
         on_select="rerun",
     )

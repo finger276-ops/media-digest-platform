@@ -77,6 +77,6 @@ def render_perf_sidebar() -> None:
         with st.sidebar.expander("Диагностика скорости", expanded=False):
             df = pd.DataFrame(events)
             if not df.empty:
-                st.dataframe(df.tail(15), hide_index=True, use_container_width=True)
+                st.dataframe(df.tail(15), hide_index=True, width="stretch")
     except Exception:
         pass

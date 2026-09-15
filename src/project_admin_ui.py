@@ -160,7 +160,7 @@ def render_project_manager(projects: pd.DataFrame) -> None:
     event = st.dataframe(
         show,
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
         selection_mode="single-row",
         on_select="rerun",
     )

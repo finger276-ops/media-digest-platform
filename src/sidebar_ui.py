@@ -244,7 +244,7 @@ def render_sidebar_nav(
             st.sidebar.button(
                 item,
                 key=f"nav_btn_{item}",
-                use_container_width=True,
+                width="stretch",
                 type=_nav_button_type(item == current),
                 on_click=_select_nav_page,
                 args=(item,),

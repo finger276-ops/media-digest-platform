@@ -511,7 +511,7 @@ def main() -> None:
     else:
         with head_right:
             if hasattr(st, "popover"):
-                view_box = st.popover("⚙️ Вид", use_container_width=True)
+                view_box = st.popover("⚙️ Вид", width="stretch")
             else:
                 view_box = st.expander("⚙️ Вид")
             with view_box:

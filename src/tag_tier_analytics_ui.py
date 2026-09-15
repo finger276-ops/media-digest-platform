@@ -140,7 +140,7 @@ def render_tier_analytics_block(
                     ["Тег", "Сообщений (с потомками)", "Сообщений (сам тег)", "Доля от всех"]
                 ],
                 hide_index=True,
-                use_container_width=True,
+                width="stretch",
             )
 
         # --- 2. Drill-down ---
@@ -183,7 +183,7 @@ def render_tier_analytics_block(
                         ]
                     ],
                     hide_index=True,
-                    use_container_width=True,
+                    width="stretch",
                 )
 
         # --- 3. Теги вне структуры (подсказка аналитику) ---
@@ -196,7 +196,7 @@ def render_tier_analytics_block(
                 outside_df = pd.DataFrame(
                     coverage["outside_tags"], columns=["Тег (нормализован)", "Сообщений"]
                 )
-                st.dataframe(outside_df, hide_index=True, use_container_width=True)
+                st.dataframe(outside_df, hide_index=True, width="stretch")
     except Exception:
         # мягкая деградация: аналитика по тирам не должна ломать раздел «Теги»
         return

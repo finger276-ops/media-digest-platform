@@ -107,7 +107,7 @@ def _render_sessions_table(
     st.dataframe(
         view[["Проект", "Роль", "С какого момента", "Длительность"]],
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
     )
 
 
@@ -177,7 +177,7 @@ def render_session_presence_page() -> None:
             .reset_index()
             .sort_values("Онлайн", ascending=False)
         )
-        st.dataframe(breakdown, hide_index=True, use_container_width=True)
+        st.dataframe(breakdown, hide_index=True, width="stretch")
 
         st.markdown("#### Онлайн сейчас")
         _render_sessions_table(online, project_names, now=now, duration_from="started_at")

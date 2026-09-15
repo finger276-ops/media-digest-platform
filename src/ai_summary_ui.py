@@ -346,7 +346,7 @@ def render_ai_summary_panel(
                 if st.button(
                     KIND_TITLES[kind],
                     key=f"ai_generate_{kind}_{project_id}",
-                    use_container_width=True,
+                    width="stretch",
                 ):
                     _run_generation(
                         project_id, kind, base_args, extra, config
@@ -400,7 +400,7 @@ def _render_generated_block(project_id: str, kind: str, period_ids: list[str]) -
     columns = st.columns(3)
     with columns[0]:
         if st.button(
-            "Сохранить", key=f"ai_save_{kind}_{project_id}", use_container_width=True
+            "Сохранить", key=f"ai_save_{kind}_{project_id}", width="stretch"
         ):
             payload = dict(draft or saved or {})
             payload.update({"text": edited, "kind": kind, "period_ids": period_ids})
@@ -414,7 +414,7 @@ def _render_generated_block(project_id: str, kind: str, period_ids: list[str]) -
         if kind == KIND_SUMMARY and st.button(
             "Сделать саммари периода",
             key=f"ai_promote_{kind}_{project_id}",
-            use_container_width=True,
+            width="stretch",
             help=(
                 "Заменить текст саммари периода этим. Он попадёт в Word, PDF и "
                 "PNG-выгрузки и будет виден клиенту."
@@ -435,7 +435,7 @@ def _render_generated_block(project_id: str, kind: str, period_ids: list[str]) -
         if saved and st.button(
             "Удалить",
             key=f"ai_delete_{kind}_{project_id}",
-            use_container_width=True,
+            width="stretch",
         ):
             delete_manual(project_id, ai_text_storage_key(kind, period_ids))
             st.session_state.pop(f"ai_draft_{kind}_{project_id}", None)

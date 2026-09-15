@@ -104,7 +104,7 @@ def _render_sentiment_donut(
     left, right = st.columns([3, 2])
     with left:
         st.altair_chart(
-            arcs.properties(height=260, title=period_label), use_container_width=True
+            arcs.properties(height=260, title=period_label), width="stretch"
         )
     with right:
         st.markdown("**Значения**")
@@ -159,7 +159,7 @@ def _render_value_distribution_donut(
     left, right = st.columns([3, 2])
     with left:
         st.altair_chart(
-            donut.properties(height=300, title=title), use_container_width=True
+            donut.properties(height=300, title=title), width="stretch"
         )
     with right:
         st.markdown("**Значения**")
@@ -200,7 +200,7 @@ def render_period_comparison_charts(
         st.markdown("**Графики динамики**")
     with head_right:
         settings_box = (
-            st.popover("⚙️ Графики", use_container_width=True)
+            st.popover("⚙️ Графики", width="stretch")
             if hasattr(st, "popover")
             else st.expander("⚙️ Графики")
         )
@@ -276,7 +276,7 @@ def render_period_comparison_charts(
                     ],
                 )
             )
-            st.altair_chart(bars.properties(height=320), use_container_width=True)
+            st.altair_chart(bars.properties(height=320), width="stretch")
         elif chart_type == "Круговая диаграмма":
             pie_metric = st.selectbox(
                 "Метрика для круговой диаграммы",
@@ -318,7 +318,7 @@ def render_period_comparison_charts(
                 with left_pie:
                     st.altair_chart(
                         donut.properties(height=300, title=pie_metric),
-                        use_container_width=True,
+                        width="stretch",
                     )
                 with right_pie:
                     st.markdown("**Значения**")
@@ -361,7 +361,7 @@ def render_period_comparison_charts(
                 )
                 .resolve_scale(y="independent")
             )
-            st.altair_chart(metrics_line, use_container_width=True)
+            st.altair_chart(metrics_line, width="stretch")
 
     if "Динамика тональности" in selected_blocks:
         st.markdown("**Динамика долей тональности, %**")
@@ -427,7 +427,7 @@ def render_period_comparison_charts(
                 )
             )
             st.altair_chart(
-                sentiment_bars.properties(height=320), use_container_width=True
+                sentiment_bars.properties(height=320), width="stretch"
             )
         elif sentiment_chart_type == "Круговая диаграмма":
             period_options = [str(x) for x in chart_df["Период"].tolist()]
@@ -453,7 +453,7 @@ def render_period_comparison_charts(
                 "Подписи процентов скрыты, чтобы линии не накладывались. Значения доступны при наведении на точки."
             )
             st.altair_chart(
-                sentiment_line.properties(height=320), use_container_width=True
+                sentiment_line.properties(height=320), width="stretch"
             )
             # Нейтрал обычно занимает 90+ процентов и прижимает позитив с
             # негативом к нулю. Негатив — то, за чем следят, поэтому он
@@ -478,7 +478,7 @@ def render_period_comparison_charts(
                         ],
                     )
                     .properties(height=170),
-                    use_container_width=True,
+                    width="stretch",
                 )
 
     if "Сравнение выбранной метрики" in selected_blocks:
@@ -548,7 +548,7 @@ def render_period_comparison_charts(
                 ).encode(text="Подпись:N")
                 st.altair_chart(
                     (line + line_labels).properties(height=320),
-                    use_container_width=True,
+                    width="stretch",
                 )
             else:
                 bar = bar_base.mark_bar(size=70)
@@ -570,7 +570,7 @@ def render_period_comparison_charts(
                     )
                 )
                 st.altair_chart(
-                    (bar + bar_labels).properties(height=320), use_container_width=True
+                    (bar + bar_labels).properties(height=320), width="stretch"
                 )
 
     if "Круговые диаграммы тональности" in selected_blocks and len(comparison) >= 2:
@@ -673,7 +673,7 @@ def render_period_comparison_metrics(
     st.dataframe(
         build_comparison_table(comparison, view),
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
     )
     if view == "Все показатели":
         st.caption(

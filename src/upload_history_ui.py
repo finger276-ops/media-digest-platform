@@ -121,7 +121,7 @@ def render_upload_page(project_id: str, role: str, work_dir: str) -> None:
             return
     st.success(f"Файл прочитан: {len(canonical):,} строк".replace(",", " "))
     with st.expander("Предпросмотр распознанных колонок", expanded=False):
-        st.dataframe(canonical.head(20), use_container_width=True)
+        st.dataframe(canonical.head(20), width="stretch")
     render_noise_filter_block(canonical)
 
     with st.spinner("Собираю сообщения, обсуждения и инфоповоды..."):
@@ -187,7 +187,7 @@ def render_period_history(project_id: str, role: str) -> None:
     event = st.dataframe(
         show,
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
         selection_mode="single-row",
         on_select="rerun",
     )

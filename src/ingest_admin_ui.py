@@ -172,7 +172,7 @@ def render_ingest_queue_block(project_id: str, work_dir: str) -> None:
 
         st.dataframe(
             _tasks_view(tasks).drop(columns=["task_id"]),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
@@ -250,7 +250,7 @@ def render_ingest_sources_block(project_id: str, project_name: str) -> None:
                 ),
             }
         )
-        st.dataframe(view, use_container_width=True, hide_index=True)
+        st.dataframe(view, width="stretch", hide_index=True)
 
     with st.form("ingest_source_form"):
         st.markdown("**Добавить или изменить источник**")

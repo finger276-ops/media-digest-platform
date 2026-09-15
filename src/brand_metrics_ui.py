@@ -113,7 +113,7 @@ def render_metric_details(cards: dict[str, dict[str, Any]]) -> None:
                 ]
                 if rows:
                     st.dataframe(
-                        pd.DataFrame(rows), use_container_width=True, hide_index=True
+                        pd.DataFrame(rows), width="stretch", hide_index=True
                     )
                 st.markdown(f"Результат: **{format_metric(card)}**")
             else:
@@ -187,9 +187,9 @@ def render_metrics_dynamics(
         )
         .properties(height=320)
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
     st.dataframe(
-        frame[["Период"] + chosen], use_container_width=True, hide_index=True
+        frame[["Период"] + chosen], width="stretch", hide_index=True
     )
 
 
@@ -321,7 +321,7 @@ def render_category_upload(
                             "is_own": "Наш бренд",
                         }
                     )
-                    st.dataframe(view, use_container_width=True, hide_index=True)
+                    st.dataframe(view, width="stretch", hide_index=True)
                 st.caption(
                     f"Файл: {record.get('source_filename') or '—'} · "
                     f"обновлено: {str(record.get('updated_at') or '')[:16].replace('T', ' ')}"
@@ -425,7 +425,7 @@ def render_category_upload(
                 "is_own": "Наш бренд",
             }
         ),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 
@@ -487,7 +487,7 @@ def render_brand_metrics_page(
 
     table = metrics_to_frame(cards)
     if not table.empty:
-        st.dataframe(table, use_container_width=True, hide_index=True)
+        st.dataframe(table, width="stretch", hide_index=True)
         st.download_button(
             "Скачать метрики в CSV",
             table.to_csv(index=False).encode("utf-8-sig"),

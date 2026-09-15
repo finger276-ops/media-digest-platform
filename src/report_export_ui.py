@@ -62,7 +62,7 @@ def render_summary_export_buttons(
                 data=generate_summary_docx(payload),
                 file_name=safe_export_filename(project_name, period_label, "docx"),
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                use_container_width=True,
+                width="stretch",
                 key=f"{key_prefix}_docx",
             )
         except Exception as exc:
@@ -74,7 +74,7 @@ def render_summary_export_buttons(
                 data=generate_summary_pdf(payload),
                 file_name=safe_export_filename(project_name, period_label, "pdf"),
                 mime="application/pdf",
-                use_container_width=True,
+                width="stretch",
                 key=f"{key_prefix}_pdf",
             )
         except Exception as exc:
@@ -86,7 +86,7 @@ def render_summary_export_buttons(
                 data=generate_summary_infographic_png(payload),
                 file_name=safe_export_filename(project_name, period_label, "png"),
                 mime="image/png",
-                use_container_width=True,
+                width="stretch",
                 key=f"{key_prefix}_png",
             )
         except Exception as exc:
