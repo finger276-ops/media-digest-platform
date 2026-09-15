@@ -1,0 +1,57 @@
+name: Тесты
+
+# Прогоняет тестовый набор (tests/) при каждом пуше и пул-реквесте. Тесты не
+# ходят в сеть — Supabase подменяется поддельным клиентом (fake_supabase.py),
+# поэтому секреты не нужны. Каждый файл — отдельный шаг: так видно, какой
+# именно тест упал, не дожидаясь остальных.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Забрать код
+        uses: actions/checkout@v4
+
+      - name: Поставить Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Установить зависимости
+        run: pip install -r requirements.txt
+
+      - name: Индексы бренда (формулы против примеров из гайда)
+        run: python tests/test_brand_metrics.py
+
+      - name: Склейка похожих заголовков инфоповодов
+        run: python tests/test_event_titles.py
+
+      - name: Обогащение сообщений и агрегация инфоповодов
+        run: python tests/test_event_enrichment.py
+
+      - name: Тексты от ИИ (YandexGPT/GigaChat, без сети)
+        run: python tests/test_ai_summary.py
+
+      - name: Выгрузки саммари (PNG/DOCX/PDF)
+        run: python tests/test_report_export.py
+
+      - name: Очередь автозагрузки
+        run: python tests/test_ingest_queue.py
+
+      - name: Воркер автозагрузки целиком
+        run: python tests/test_worker_e2e.py
+
+      - name: Дымовой тест интерфейса
+        run: python tests/test_ui_smoke.py
