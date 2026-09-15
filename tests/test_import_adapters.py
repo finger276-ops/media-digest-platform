@@ -7,6 +7,7 @@
 """
 
 import sys
+import tempfile
 import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -29,6 +30,7 @@ from import_adapters import (  # noqa: E402
     canonicalize_table,
     detect_source_system,
     first_existing,
+    get_excel_sheet_names,
     read_source_table,
 )
 
@@ -208,12 +210,49 @@ with TemporaryDirectory() as tmp:
             if item.filename == "xl/styles.xml":
                 payload = b"<styleSheet>"  # обрезанный, невалидный XML
             dst.writestr(item, payload)
+    # Починка делает временную копию файла размером с исходную выгрузку.
+    # Если её не удалять, каждая загрузка битого xlsx оставляет мусор в temp —
+    # на сервере это растёт молча, пока не кончится место.
+    def leftovers():
+        return set(Path(tempfile.gettempdir()).glob("xlsx_styles_repaired_*"))
+
+    before = leftovers()
     try:
         repaired = read_source_table(broken)
         check("битый файл всё равно прочитан", len(repaired) == 1, str(repaired.to_dict("records")))
         check("данные не потеряны при починке", repaired.loc[0, "Сообщение"] == "раз")
     except Exception as exc:  # noqa: BLE001
         check("битый файл всё равно прочитан", False, f"{type(exc).__name__}: {exc}")
+    check(
+        "чтение не оставило временную копию",
+        not (leftovers() - before),
+        str(sorted(p.name for p in leftovers() - before)),
+    )
+
+    before = leftovers()
+    names = get_excel_sheet_names(broken)
+    check("список листов битого файла получен", names == ["Сообщения"], str(names))
+    check(
+        "список листов не оставил временную копию",
+        not (leftovers() - before),
+        str(sorted(p.name for p in leftovers() - before)),
+    )
+
+    # Худший случай: расширение .xlsx, а внутри вовсе не zip. Починка успевает
+    # создать временный файл и падает — убрать его должна она сама.
+    not_a_zip = Path(tmp) / "fake.xlsx"
+    not_a_zip.write_bytes(b"Date;Text\n24.04.2026;raz\n")
+    before = leftovers()
+    try:
+        read_source_table(not_a_zip)
+        check("не-zip с расширением .xlsx отвергнут", False, "чтение неожиданно удалось")
+    except Exception:  # noqa: BLE001 — понятная ошибка пользователю ожидаема
+        check("не-zip с расширением .xlsx отвергнут", True)
+    check(
+        "неудавшаяся починка не оставила временную копию",
+        not (leftovers() - before),
+        str(sorted(p.name for p in leftovers() - before)),
+    )
 
 print()
 if failures:

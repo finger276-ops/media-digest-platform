@@ -7,12 +7,14 @@ and maps their columns to that canonical schema before preprocessing.
 
 from __future__ import annotations
 
+import contextlib
 import csv
+import logging
 import re
 import tempfile
 import zipfile
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Iterator
 
 import pandas as pd
 
@@ -27,6 +29,9 @@ MINIMAL_XLSX_STYLES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
   <dxfs count="0"/>
   <tableStyles count="0" defaultTableStyle="TableStyleMedium9" defaultPivotStyle="PivotStyleLight16"/>
 </styleSheet>"""
+
+
+LOGGER = logging.getLogger("platform.import_adapters")
 
 
 def _excel_error_mentions_styles(exc: Exception) -> bool:
@@ -58,41 +63,80 @@ def _repair_xlsx_styles(path: Path) -> Path:
     tmp_path = Path(tmp.name)
     tmp.close()
 
-    with zipfile.ZipFile(path, "r") as zin, zipfile.ZipFile(
-        tmp_path, "w", compression=zipfile.ZIP_DEFLATED
-    ) as zout:
-        wrote_styles = False
-        for item in zin.infolist():
-            if item.filename == "xl/styles.xml":
-                zout.writestr(item, MINIMAL_XLSX_STYLES)
-                wrote_styles = True
-            else:
-                zout.writestr(item, zin.read(item.filename))
-        if not wrote_styles:
-            zout.writestr("xl/styles.xml", MINIMAL_XLSX_STYLES)
+    # Файл уже создан, а дальше всё может упасть: сюда попадают в том числе
+    # файлы, которые вовсе не zip (чужой формат с расширением .xlsx). Без
+    # уборки на этой ветке пустышка оставалась бы в temp после каждой такой
+    # попытки — а вызывающий про неё даже не узнает, ему прилетит исключение.
+    try:
+        with zipfile.ZipFile(path, "r") as zin, zipfile.ZipFile(
+            tmp_path, "w", compression=zipfile.ZIP_DEFLATED
+        ) as zout:
+            wrote_styles = False
+            for item in zin.infolist():
+                if item.filename == "xl/styles.xml":
+                    zout.writestr(item, MINIMAL_XLSX_STYLES)
+                    wrote_styles = True
+                else:
+                    zout.writestr(item, zin.read(item.filename))
+            if not wrote_styles:
+                zout.writestr("xl/styles.xml", MINIMAL_XLSX_STYLES)
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            LOGGER.warning("Не удалось удалить временную копию %s", tmp_path)
+        raise
     return tmp_path
 
 
-def _open_excel_file_resilient(path: Path) -> tuple[pd.ExcelFile, Path]:
+@contextlib.contextmanager
+def _open_excel_file_resilient(path: Path) -> Iterator[tuple[pd.ExcelFile, Path]]:
+    """Открыть книгу, при необходимости починив стили, и прибрать за собой.
+
+    Контекстный менеджер, а не обычная функция: починка делает временную копию
+    файла, и без гарантированного выхода эта копия оставалась в temp навсегда —
+    размером с исходную выгрузку, на каждую загрузку. Заодно закрывается сам
+    pd.ExcelFile: на Windows незакрытый хендл не даёт удалить копию, так что
+    одна утечка держала бы вторую.
+    """
+    repaired: Path | None = None
+    xls: pd.ExcelFile | None = None
     try:
-        return pd.ExcelFile(path), path
-    except Exception as exc:
-        # openpyxl may raise either a friendly "could not read stylesheet"
-        # ValueError or a raw XMLSyntaxError while parsing xl/styles.xml. For
-        # XLSX/XLSM files it is safe to try one repaired copy before failing.
-        if path.suffix.lower() not in {".xlsx", ".xlsm"}:
-            raise
         try:
-            repaired = _repair_xlsx_styles(path)
-            return pd.ExcelFile(repaired), repaired
-        except Exception as repair_exc:
-            if _excel_error_mentions_styles(exc):
-                raise ValueError(
-                    "Excel-файл не удалось прочитать из-за поврежденных стилей книги. "
-                    "Попробуйте открыть файл в Excel/LibreOffice и сохранить заново как .xlsx или .csv. "
-                    "Если это выгрузка Brand Analytics, лучше сохранить лист «Сообщения» отдельным CSV."
-                ) from repair_exc
-            raise exc
+            xls = pd.ExcelFile(path)
+            read_path = path
+        except Exception as exc:
+            # openpyxl may raise either a friendly "could not read stylesheet"
+            # ValueError or a raw XMLSyntaxError while parsing xl/styles.xml. For
+            # XLSX/XLSM files it is safe to try one repaired copy before failing.
+            if path.suffix.lower() not in {".xlsx", ".xlsm"}:
+                raise
+            try:
+                repaired = _repair_xlsx_styles(path)
+                xls = pd.ExcelFile(repaired)
+                read_path = repaired
+            except Exception as repair_exc:
+                if _excel_error_mentions_styles(exc):
+                    raise ValueError(
+                        "Excel-файл не удалось прочитать из-за поврежденных стилей книги. "
+                        "Попробуйте открыть файл в Excel/LibreOffice и сохранить заново как .xlsx или .csv. "
+                        "Если это выгрузка Brand Analytics, лучше сохранить лист «Сообщения» отдельным CSV."
+                    ) from repair_exc
+                raise exc
+        yield xls, read_path
+    finally:
+        if xls is not None:
+            try:
+                xls.close()
+            except Exception:  # noqa: BLE001 — закрытие не должно ронять разбор
+                LOGGER.warning("Не удалось закрыть книгу %s", path, exc_info=True)
+        if repaired is not None:
+            try:
+                repaired.unlink(missing_ok=True)
+            except OSError:
+                # Файл мог остаться занятым антивирусом или индексатором:
+                # мусор в temp лучше, чем упавшая загрузка выгрузки.
+                LOGGER.warning("Не удалось удалить временную копию %s", repaired)
 
 
 CANONICAL_COLUMNS = [
@@ -277,7 +321,19 @@ def _read_excel_any(path: Path, sheet_name: str | int | None = None) -> pd.DataF
     skip empty sheets instead of crashing on preview.iloc[0]. If the workbook
     has broken styles.xml, we automatically read a temporary repaired copy.
     """
-    xls, read_path = _open_excel_file_resilient(path)
+    with _open_excel_file_resilient(path) as (xls, read_path):
+        return _read_excel_sheets(xls, read_path, sheet_name)
+
+
+def _read_excel_sheets(
+    xls: pd.ExcelFile, read_path: Path, sheet_name: str | int | None
+) -> pd.DataFrame:
+    """Выбрать лист с сообщениями и прочитать его.
+
+    Вынесено из _read_excel_any, чтобы выбор листа целиком помещался внутрь
+    контекста открытой книги: после выхода из него временной копии уже нет, и
+    читать по read_path будет нечего.
+    """
     sheets = xls.sheet_names
     if not sheets:
         raise ValueError("В Excel-файле не найдено листов.")
@@ -714,7 +770,7 @@ def get_excel_sheet_names(path: str | Path) -> list[str]:
     if path.suffix.lower() not in {".xlsx", ".xls", ".xlsm"}:
         return []
     try:
-        xls, _ = _open_excel_file_resilient(path)
-        return xls.sheet_names
+        with _open_excel_file_resilient(path) as (xls, _):
+            return list(xls.sheet_names)
     except Exception:
         return []
