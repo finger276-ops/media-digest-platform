@@ -5,9 +5,11 @@ Supabase подменен поддельным клиентом, Storage — с�
 """
 
 import datetime as dt
+import io
 import os
 import random
 import sys
+import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -76,17 +78,18 @@ def make_ba_export(rows: int = 40, start_day: int = 24) -> bytes:
                 "отзыв": "отзыв" if i % 4 == 0 else "",
             }
         )
-    path = f"/tmp/ba_worker_{start_day}.xlsx"
-    with pd.ExcelWriter(path, engine="openpyxl") as writer:
+    # Через BytesIO, а не через файл в /tmp: путь был захардкожен по-юниксовому
+    # и тест не запускался на Windows, плюс файл после себя не убирался.
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         pd.DataFrame(data).to_excel(writer, sheet_name="Сообщения", index=False)
-    with open(path, "rb") as handle:
-        return handle.read()
+    return buffer.getvalue()
 
 
 ARGS = Namespace(
     max_tasks=5,
     once=False,
-    work_dir="/tmp/worker_work",
+    work_dir=str(Path(tempfile.gettempdir()) / "platform_worker_work"),
     worker_id="test-worker",
     requeue_stale_minutes=45,
     no_fail_on_error=False,
