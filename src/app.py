@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import uuid
 import re
@@ -284,6 +285,39 @@ def normalize_text(value: Any) -> str:
     return str(value or "").strip()
 
 
+LOGGER = logging.getLogger("platform.app")
+
+
+def render_section_safely(title: str, render, *args, _details: bool = False, **kwargs) -> bool:
+    """Отрисовать раздел так, чтобы его падение не уносило всю страницу.
+
+    Без этой границы исключение в любом блоке роняло весь дашборд: заказчик
+    видел трейсбек вместо платформы, хотя не работал один раздел из двенадцати.
+
+    st.rerun() внутри раздела продолжает работать: RerunException наследуется от
+    BaseException, поэтому мимо except Exception проходит насквозь. Расширить
+    границу до BaseException — значит молча сломать каждую кнопку в приложении;
+    это стережёт tests/test_section_boundary.py.
+
+    Параметр назван с подчёркиванием, чтобы не столкнуться с именами аргументов
+    самих разделов, которые уезжают дальше через **kwargs.
+    """
+    try:
+        render(*args, **kwargs)
+        return True
+    except Exception as exc:  # noqa: BLE001 — это и есть граница отказа
+        LOGGER.exception("Раздел «%s» не отрисовался", title)
+        st.error(f"Не удалось отобразить раздел «{title}».")
+        st.caption(
+            "Остальные разделы продолжают работать. Попробуйте обновить "
+            "страницу, выбрать другой период или вернуться сюда позже."
+        )
+        if _details:
+            with st.expander("Подробности ошибки", expanded=False):
+                st.exception(exc)
+        return False
+
+
 def _as_fragment(func):
     """Обернуть раздел во фрагмент, если версия Streamlit это умеет.
 
@@ -441,34 +475,76 @@ def main() -> None:
         )
     st.sidebar.caption(f"{APP_TITLE} · {APP_VERSION}")
 
+    # Технические подробности ошибки нужны тем, кто может с ними что-то
+    # сделать; заказчику в клиентском виде показывается только сообщение.
+    show_error_details = is_admin or role_rank(role) >= role_rank("editor")
+
     # --- страницы, которым не нужны данные периодов ---
     if page == "Проекты":
-        render_project_manager(projects)
+        render_section_safely(
+            "Проекты", render_project_manager, projects, _details=show_error_details
+        )
         return
     if page == "Сессии":
-        render_session_presence_page()
+        render_section_safely(
+            "Сессии", render_session_presence_page, _details=show_error_details
+        )
         return
     if not project_id:
         st.info("Введите код доступа к проекту или войдите как владелец платформы.")
         return
     if page == "Загрузка файла":
-        render_upload_page(project_id, role, args.work_dir)
+        render_section_safely(
+            "Загрузка файла",
+            render_upload_page,
+            project_id,
+            role,
+            args.work_dir,
+            _details=show_error_details,
+        )
         return
     if page == "История периодов":
-        render_period_history(project_id, role)
+        render_section_safely(
+            "История периодов",
+            render_period_history,
+            project_id,
+            role,
+            _details=show_error_details,
+        )
         return
     if page == "Автозагрузка":
-        render_ingest_admin_page(project_id, project_name, args.work_dir)
+        render_section_safely(
+            "Автозагрузка",
+            render_ingest_admin_page,
+            project_id,
+            project_name,
+            args.work_dir,
+            _details=show_error_details,
+        )
         return
 
     if not selected_period_ids:
         st.info("Выберите период в боковой панели или загрузите первый файл.")
         return
 
-    with st.spinner("Загружаю данные проекта..."):
-        events, enriched_messages, raw_events_agg, manual_state = load_dashboard_data(
-            project_id, selected_period_ids
+    # Падение здесь оставило бы страницу без данных, поэтому дальше идти
+    # нельзя — но и трейсбеком на весь экран отвечать не нужно.
+    try:
+        with st.spinner("Загружаю данные проекта..."):
+            events, enriched_messages, raw_events_agg, manual_state = (
+                load_dashboard_data(project_id, selected_period_ids)
+            )
+    except Exception as exc:  # noqa: BLE001 — граница отказа
+        LOGGER.exception("Не удалось загрузить данные проекта %s", project_id)
+        st.error("Не удалось загрузить данные проекта за выбранные периоды.")
+        st.caption(
+            "Попробуйте выбрать другой период или обновить страницу. "
+            "Если не помогает — период мог быть загружен с ошибкой."
         )
+        if show_error_details:
+            with st.expander("Подробности ошибки", expanded=False):
+                st.exception(exc)
+        return
     render_perf_sidebar()
 
     hide_technical = client_view and bool(
@@ -564,13 +640,24 @@ def main() -> None:
     # Смысловая склейка заголовков идёт до порога по числу сообщений: иначе
     # одна тема, разбитая источником на три формулировки по два сообщения,
     # отсекается как мелочь, хотя вместе это шесть сообщений.
-    merged_events_agg, title_merge_report = cached_merge_similar_events(
-        raw_events_agg,
-        project_id,
-        tuple(selected_period_ids),
-        float(event_title_merge_threshold),
-        tuple(sorted(blocked_merge_titles)),
-    )
+    # Склейка — самый тяжёлый и самый «умный» шаг на странице. Если она
+    # сломается, показывать инфоповоды без неё честнее, чем не показывать
+    # вообще: данные те же, просто близкие заголовки останутся раздельными.
+    try:
+        merged_events_agg, title_merge_report = cached_merge_similar_events(
+            raw_events_agg,
+            project_id,
+            tuple(selected_period_ids),
+            float(event_title_merge_threshold),
+            tuple(sorted(blocked_merge_titles)),
+        )
+    except Exception:  # noqa: BLE001 — граница отказа
+        LOGGER.exception("Склейка заголовков не отработала для проекта %s", project_id)
+        merged_events_agg, title_merge_report = raw_events_agg, []
+        st.caption(
+            "Склейка похожих заголовков сейчас недоступна — "
+            "инфоповоды показаны без неё."
+        )
     st.session_state[f"title_merge_report_{project_id}"] = title_merge_report
     st.session_state[f"title_merge_threshold_{project_id}"] = float(
         event_title_merge_threshold
@@ -584,110 +671,124 @@ def main() -> None:
 
     metrics = None
     if show_metrics:
-        # Дельты в шапке: сравниваем с периодом, который идёт перед выбранными.
-        prev_id = previous_period_id(periods, selected_period_ids)
-        prev_metrics = period_overview_metrics(project_id, prev_id)
-        prev_label = ""
-        if prev_metrics and prev_id and not periods.empty:
-            prev_row = periods[periods["period_id"].astype(str) == str(prev_id)]
-            if not prev_row.empty:
-                prev_label = str(prev_row.iloc[0].get("period_name") or prev_id)
-        metrics = render_project_intro(
-            project_name,
-            enriched_messages,
-            periods,
-            selected_period_ids,
-            profile_label=profile_label,
-            chart_label_settings=chart_label_settings,
-            comparison_visible_charts=dashboard_view_settings.get(
-                "comparison_visible_charts"
-            ),
-            show_comparison=False,
-            show_title=False,
-            previous_metrics=prev_metrics,
-            previous_label=prev_label,
-        )
-    st.divider()
-
-    # --- содержимое выбранного раздела ---
-    if page == "Обзор":
-        render_saved_ai_text(
-            project_id,
-            AI_KIND_RISKS,
-            selected_period_ids,
-            heading="Риски периода",
-        )
-        render_client_insights(
-            enriched_messages,
-            events_agg,
-            periods,
-            selected_period_ids,
-            profile=project_profile,
-        )
-    elif page == "Индексы бренда":
-        _section_brand_metrics(
-            project_id,
-            current_project_settings,
-            enriched_messages,
-            periods,
-            selected_period_ids,
-            role_rank(role) >= role_rank("editor"),
-        )
-        render_saved_ai_text(
-            project_id,
-            AI_KIND_BRAND,
-            selected_period_ids,
-            heading="Что говорят индексы",
-        )
-    elif page == "Теги":
-        _section_tags(enriched_messages, project_id)
-    elif page == "Инфоповоды":
-        _section_events(
-            project_id,
-            role,
-            events_agg,
-            enriched_messages,
-            manual_state,
-            hidden_events,
-            hidden_messages,
-            int(min_event_messages or 0),
-        )
-    elif page == "Сообщения":
-        _section_messages(enriched_messages, project_id)
-    elif page == "Динамика":
-        if len(selected_period_ids) < 2:
-            st.info(
-                "Выберите в боковой панели два периода или больше — тогда появится "
-                "сравнение и графики динамики."
-            )
-        else:
-            render_period_comparison_metrics(
+        # Полоса метрик — надстройка над разделом, а не сам раздел: её падение
+        # не должно стоить пользователю содержимого страницы.
+        try:
+            # Дельты в шапке: сравниваем с периодом, который идёт перед выбранными.
+            prev_id = previous_period_id(periods, selected_period_ids)
+            prev_metrics = period_overview_metrics(project_id, prev_id)
+            prev_label = ""
+            if prev_metrics and prev_id and not periods.empty:
+                prev_row = periods[periods["period_id"].astype(str) == str(prev_id)]
+                if not prev_row.empty:
+                    prev_label = str(prev_row.iloc[0].get("period_name") or prev_id)
+            metrics = render_project_intro(
+                project_name,
                 enriched_messages,
                 periods,
                 selected_period_ids,
+                profile_label=profile_label,
                 chart_label_settings=chart_label_settings,
                 comparison_visible_charts=dashboard_view_settings.get(
                     "comparison_visible_charts"
                 ),
+                show_comparison=False,
+                show_title=False,
+                previous_metrics=prev_metrics,
+                previous_label=prev_label,
             )
-    elif page == "Отчёт":
-        report_metrics = (
-            build_comparison_metrics(enriched_messages, periods, selected_period_ids)
-            or metrics
-        )
-        render_period_summary(
-            project_id,
-            project_name,
-            selected_period_ids,
-            enriched_messages,
-            events_agg,
-            periods,
-            role,
-            profile=project_profile,
-            metrics=report_metrics,
-            branding=report_branding,
-            project_settings=current_project_settings,
-        )
+        except Exception:  # noqa: BLE001 — граница отказа
+            LOGGER.exception("Метрики в шапке не отрисовались")
+            st.caption("Метрики периода сейчас недоступны.")
+    st.divider()
+
+    # --- содержимое выбранного раздела ---
+    # Вложенная функция, а не отдельная: разделы читают полтора десятка
+    # локальных значений, и тащить их через параметры значило бы переписать
+    # роутер ради границы отказа.
+    def _render_selected_section() -> None:
+        if page == "Обзор":
+            render_saved_ai_text(
+                project_id,
+                AI_KIND_RISKS,
+                selected_period_ids,
+                heading="Риски периода",
+            )
+            render_client_insights(
+                enriched_messages,
+                events_agg,
+                periods,
+                selected_period_ids,
+                profile=project_profile,
+            )
+        elif page == "Индексы бренда":
+            _section_brand_metrics(
+                project_id,
+                current_project_settings,
+                enriched_messages,
+                periods,
+                selected_period_ids,
+                role_rank(role) >= role_rank("editor"),
+            )
+            render_saved_ai_text(
+                project_id,
+                AI_KIND_BRAND,
+                selected_period_ids,
+                heading="Что говорят индексы",
+            )
+        elif page == "Теги":
+            _section_tags(enriched_messages, project_id)
+        elif page == "Инфоповоды":
+            _section_events(
+                project_id,
+                role,
+                events_agg,
+                enriched_messages,
+                manual_state,
+                hidden_events,
+                hidden_messages,
+                int(min_event_messages or 0),
+            )
+        elif page == "Сообщения":
+            _section_messages(enriched_messages, project_id)
+        elif page == "Динамика":
+            if len(selected_period_ids) < 2:
+                st.info(
+                    "Выберите в боковой панели два периода или больше — тогда появится "
+                    "сравнение и графики динамики."
+                )
+            else:
+                render_period_comparison_metrics(
+                    enriched_messages,
+                    periods,
+                    selected_period_ids,
+                    chart_label_settings=chart_label_settings,
+                    comparison_visible_charts=dashboard_view_settings.get(
+                        "comparison_visible_charts"
+                    ),
+                )
+        elif page == "Отчёт":
+            report_metrics = (
+                build_comparison_metrics(
+                    enriched_messages, periods, selected_period_ids
+                )
+                or metrics
+            )
+            render_period_summary(
+                project_id,
+                project_name,
+                selected_period_ids,
+                enriched_messages,
+                events_agg,
+                periods,
+                role,
+                profile=project_profile,
+                metrics=report_metrics,
+                branding=report_branding,
+                project_settings=current_project_settings,
+            )
+
+    render_section_safely(page, _render_selected_section, _details=show_error_details)
 
 
 if __name__ == "__main__":

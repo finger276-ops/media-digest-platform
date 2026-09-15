@@ -62,5 +62,8 @@ jobs:
       - name: Воркер автозагрузки целиком
         run: python tests/test_worker_e2e.py
 
+      - name: Границы отказа разделов
+        run: python tests/test_section_boundary.py
+
       - name: Дымовой тест интерфейса
         run: python tests/test_ui_smoke.py
