@@ -32,6 +32,12 @@ jobs:
       - name: Установить зависимости
         run: pip install -r requirements.txt
 
+      - name: Разбор выгрузок (форматы, канонизация, битый xlsx)
+        run: python tests/test_import_adapters.py
+
+      - name: Обработка выгрузки (микротемы, заголовки, сборка таблиц)
+        run: python tests/test_preprocess.py
+
       - name: Индексы бренда (формулы против примеров из гайда)
         run: python tests/test_brand_metrics.py
 
@@ -46,6 +52,9 @@ jobs:
 
       - name: Выгрузки саммари (PNG/DOCX/PDF)
         run: python tests/test_report_export.py
+
+      - name: Живые сессии платформы
+        run: python tests/test_session_presence.py
 
       - name: Очередь автозагрузки
         run: python tests/test_ingest_queue.py
