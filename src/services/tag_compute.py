@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import pandas as pd
+import streamlit as st
 
 from .metrics_compute import numeric_series
 
@@ -190,3 +191,8 @@ def build_tag_statistics_compute(messages: pd.DataFrame) -> pd.DataFrame:
     return stats.sort_values(
         ["Сообщений", "Аудитория", "Охват", "Вовлеченность"], ascending=False
     ).reset_index(drop=True)
+
+
+@st.cache_data(show_spinner=False, max_entries=6, ttl=600)
+def build_tag_statistics(messages: pd.DataFrame) -> pd.DataFrame:
+    return build_tag_statistics_compute(messages)

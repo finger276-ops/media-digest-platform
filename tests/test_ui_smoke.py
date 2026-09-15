@@ -36,6 +36,7 @@ CLIENT.db["platform_projects"] = [
     }
 ]
 PERIOD_ID = "p_2026_04"
+PERIOD_ID_2 = "p_2026_05"
 
 CLIENT.db["platform_periods"] = [
     {
@@ -48,14 +49,25 @@ CLIENT.db["platform_periods"] = [
         "status": "active",
         "manifest": {},
         "uploaded_at": now,
-    }
+    },
+    {
+        "project_id": "tn_project",
+        "period_id": PERIOD_ID_2,
+        "period_name": "01.05.2026–07.05.2026",
+        "date_from": "2026-05-01",
+        "date_to": "2026-05-07",
+        "source_filename": "week2.xlsx",
+        "status": "active",
+        "manifest": {},
+        "uploaded_at": now,
+    },
 ]
 
 
-def _message_row(index, sentiment, views, audience, engagement, theme):
+def _message_row(index, sentiment, views, audience, engagement, theme, period_id=PERIOD_ID):
     payload = {
-        "message_id": f"m{index}",
-        "period_id": PERIOD_ID,
+        "message_id": f"{period_id}_m{index}",
+        "period_id": period_id,
         "date": "24.04.2026",
         "datetime": "2026-04-24T10:00:00",
         "sentiment": sentiment,
@@ -74,7 +86,7 @@ def _message_row(index, sentiment, views, audience, engagement, theme):
     }
     return {
         "project_id": "tn_project",
-        "period_id": PERIOD_ID,
+        "period_id": period_id,
         "table_name": "messages",
         "row_id": payload["message_id"],
         "payload": payload,
@@ -135,6 +147,42 @@ CLIENT.db["platform_table_rows"] += [
         },
     }
     for i, title in enumerate(_SAME_STORY)
+]
+
+# Второй период — чтобы упражнять последовательное сравнение периодов
+# (графики, донаты, сравнительная таблица), которое раньше жило в app.py.
+CLIENT.db["platform_table_rows"] += [
+    _message_row(
+        i,
+        _THEMES[i % 3][0],
+        16_000 * (i + 1),
+        7_000,
+        180,
+        _THEMES[i % 3][1],
+        period_id=PERIOD_ID_2,
+    )
+    for i in range(9)
+] + [
+    {
+        "project_id": "tn_project",
+        "period_id": PERIOD_ID_2,
+        "table_name": "events",
+        "row_id": f"p2_e{i}",
+        "payload": {
+            "event_id": f"p2_e{i}",
+            "period_id": PERIOD_ID_2,
+            "event_title": theme,
+            "event_summary": f"Инфоповод про {theme}",
+            "message_count": 3,
+            "negative_count": 3 if sentiment == "негатив" else 0,
+            "chat_count": 2,
+            "importance_score": 8 - i,
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-07",
+            "main_tags": theme,
+        },
+    }
+    for i, (sentiment, theme) in enumerate(_THEMES)
 ]
 
 CLIENT.db["platform_ingest_queue"] = [
@@ -229,6 +277,35 @@ check(
     not any("Показывать графики" in str(m.label) for m in at.multiselect),
     str([m.label for m in at.multiselect]),
 )
+check(
+    "клиентский обзор (риски и сигналы) отрисован на главной",
+    any("Риски и сигналы" in str(t) for t in texts),
+    joined[:160],
+)
+
+print("2.5. Раздел «Динамика»: последовательное сравнение двух периодов")
+period_multiselect = [m for m in at.sidebar.multiselect if str(m.label) == "Периоды"]
+check(
+    "селектор периодов найден",
+    bool(period_multiselect),
+    str([m.label for m in at.sidebar.multiselect]),
+)
+if period_multiselect:
+    period_multiselect[0].set_value([PERIOD_ID, PERIOD_ID_2]).run()
+    open_section("Динамика")
+    check("раздел открылся без исключений", not at.exception, str(at.exception))
+    texts = [m.value for m in at.markdown] + [h.value for h in at.subheader]
+    check("заголовок «Сравнение периодов» появился", any("Сравнение периодов" in str(t) for t in texts))
+    check("панель «Графики динамики» на месте", any("Графики динамики" in str(t) for t in texts))
+    check("сравнительная таблица отрисована", bool(at.dataframe))
+    metric_deltas = [str(m.delta) for m in at.metric if m.delta]
+    check("у метрик есть дельта к предыдущему периоду", bool(metric_deltas), str(metric_deltas)[:200])
+    # Возвращаем выбор к одному периоду и на «Обзор» — дальше тест проверяет
+    # разделы в исходном однопериодном состоянии.
+    period_multiselect = [m for m in at.sidebar.multiselect if str(m.label) == "Периоды"]
+    period_multiselect[0].set_value([PERIOD_ID]).run()
+    open_section("Обзор")
+    check("возврат к одному периоду не роняет приложение", not at.exception, str(at.exception))
 
 print("3. Переход в «Индексы бренда» одним кликом")
 open_section("Индексы бренда")
@@ -239,6 +316,13 @@ labels = {str(m.label): m.value for m in at.metric}
 check("карточка BPI с расшифровкой названия", any("BPI · Индекс восприятия" in k for k in labels), str(list(labels))[:200])
 check("карточка NSS с названием", any(k.startswith("NSS · ") for k in labels), str(list(labels))[:200])
 check("саммари не примешивается к разделу", not any("Саммари периода" in str(t) for t in texts))
+
+print("3.2. Раздел «Теги»: статистика и карточка тега")
+open_section("Теги")
+check("раздел открылся без исключений", not at.exception, str(at.exception))
+texts = [m.value for m in at.markdown] + [h.value for h in at.subheader]
+check("заголовок раздела на месте", any("Статистика тегов" in str(t) for t in texts))
+check("таблица статистики тегов отрисована", bool(at.dataframe))
 
 print("3.5. Раздел «Инфоповоды»: склейка похожих заголовков видна аналитику")
 open_section("Инфоповоды")
@@ -259,6 +343,17 @@ check(
     str(merge_control),
 )
 check("аналитический вид не уронил раздел", not at.exception, str(at.exception))
+
+print("3.7. Раздел «Сообщения»: топ и вся лента рендерятся без исключений")
+open_section("Сообщения")
+check("раздел открылся без исключений", not at.exception, str(at.exception))
+texts = [m.value for m in at.markdown] + [h.value for h in at.subheader]
+check("заголовок раздела на месте", any("Ключевые сообщения" in str(t) for t in texts))
+mode_control = [r for r in at.radio if str(r.label) == "Режим просмотра сообщений"]
+check("переключатель режима на месте", bool(mode_control), str([str(r.label) for r in at.radio]))
+if mode_control:
+    mode_control[0].set_value("Вся лента").run()
+    check("вся лента открывается без исключений", not at.exception, str(at.exception))
 
 print("4. Раздел «Отчёт» держит саммари и выгрузки")
 open_section("Отчёт")
@@ -295,6 +390,20 @@ check("метрика «В очереди» = 1", any("В очереди" in k a
 print("6. Страница загрузки файла")
 open_section("Загрузка файла")
 check("страница загрузки без исключений", not at.exception, str(at.exception))
+
+print("6.5. История периодов: список отрисован")
+open_section("История периодов")
+check("раздел открылся без исключений", not at.exception, str(at.exception))
+texts = [h.value for h in at.header]
+check("заголовок раздела на месте", any("История периодов" in str(t) for t in texts))
+check("таблица периодов отрисована", bool(at.dataframe))
+
+print("7. Раздел «Платформа»: управление проектами")
+open_section("Проекты")
+check("раздел открылся без исключений", not at.exception, str(at.exception))
+texts = [m.value for m in at.markdown] + [h.value for h in at.header]
+check("заголовок раздела на месте", any("Управление проектами" in str(t) for t in texts))
+check("существующий проект виден в таблице", bool(at.dataframe))
 
 print()
 if failures:
