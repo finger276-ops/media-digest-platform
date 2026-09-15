@@ -254,6 +254,76 @@ with TemporaryDirectory() as tmp:
         str(sorted(p.name for p in leftovers() - before)),
     )
 
+print("10. Многолистовая выгрузка: лист с сообщениями находится сам")
+# Выгрузки мониторинга редко состоят из одного листа: сверху обложка, рядом
+# сводки и служебные вкладки. Раньше этот путь не был покрыт ничем, хотя через
+# него проходит каждый загруженный xlsx.
+MESSAGES = [
+    {
+        "Дата": "24.04.2026",
+        "Сообщение": f"Сообщение номер {i} про кровельные материалы",
+        "Ссылка": f"https://example.com/{i}",
+        "Автор": f"user{i}",
+        "Площадка": "vk.com",
+        "Тональность": ["позитив", "негатив", "нейтрал"][i % 3],
+    }
+    for i in range(3)
+]
+
+with TemporaryDirectory() as tmp:
+    multi = Path(tmp) / "multi.xlsx"
+    with pd.ExcelWriter(multi, engine="openpyxl") as writer:
+        pd.DataFrame([{"Отчёт": "Еженедельный мониторинг", "Период": "24.04–30.04"}]).to_excel(
+            writer, sheet_name="Обложка", index=False
+        )
+        pd.DataFrame().to_excel(writer, sheet_name="Пустой", index=False)
+        pd.DataFrame([{"Площадка": "vk.com", "Сообщений": 12}]).to_excel(
+            writer, sheet_name="Источники", index=False
+        )
+        pd.DataFrame(MESSAGES).to_excel(writer, sheet_name="Сообщения", index=False)
+
+    names = get_excel_sheet_names(multi)
+    check(
+        "все листы перечислены в порядке книги",
+        names == ["Обложка", "Пустой", "Источники", "Сообщения"],
+        str(names),
+    )
+    table = read_source_table(multi)
+    check("прочитан лист с сообщениями, а не обложка", len(table) == 3, str(len(table)))
+    check(
+        "текст сообщения на месте",
+        "кровельные материалы" in str(table.loc[0, "Сообщение"]),
+        str(table.loc[0, "Сообщение"]),
+    )
+    check(
+        "пустой служебный лист не сломал выбор",
+        "Отчёт" not in set(table.columns),
+        str(list(table.columns))[:200],
+    )
+
+    # Имя листа — только подсказка: у части систем он называется как угодно,
+    # и выбирать приходится по составу колонок.
+    odd = Path(tmp) / "odd_names.xlsx"
+    with pd.ExcelWriter(odd, engine="openpyxl") as writer:
+        pd.DataFrame([{"Показатель": "Всего", "Значение": 3}]).to_excel(
+            writer, sheet_name="Свод", index=False
+        )
+        pd.DataFrame(MESSAGES).to_excel(writer, sheet_name="Лист1", index=False)
+    table = read_source_table(odd)
+    check(
+        "лист найден по колонкам, а не по названию",
+        len(table) == 3 and "кровельные материалы" in str(table.loc[0, "Сообщение"]),
+        str(table.to_dict("records"))[:200],
+    )
+
+    # Явное указание листа должно перебивать автоматический выбор.
+    only_sources = read_source_table(multi, sheet_name="Источники")
+    check(
+        "явно указанный лист читается вместо угаданного",
+        len(only_sources) == 1,
+        str(only_sources.to_dict("records"))[:200],
+    )
+
 print()
 if failures:
     print(f"ПРОВАЛЕНО: {len(failures)} → {failures}")

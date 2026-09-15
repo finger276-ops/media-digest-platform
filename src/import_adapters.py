@@ -90,7 +90,7 @@ def _repair_xlsx_styles(path: Path) -> Path:
 
 
 @contextlib.contextmanager
-def _open_excel_file_resilient(path: Path) -> Iterator[tuple[pd.ExcelFile, Path]]:
+def _open_excel_file_resilient(path: Path) -> Iterator[pd.ExcelFile]:
     """Открыть книгу, при необходимости починив стили, и прибрать за собой.
 
     Контекстный менеджер, а не обычная функция: починка делает временную копию
@@ -98,13 +98,15 @@ def _open_excel_file_resilient(path: Path) -> Iterator[tuple[pd.ExcelFile, Path]
     размером с исходную выгрузку, на каждую загрузку. Заодно закрывается сам
     pd.ExcelFile: на Windows незакрытый хендл не даёт удалить копию, так что
     одна утечка держала бы вторую.
+
+    Наружу отдаётся книга, а не путь: читать нужно именно из неё, иначе pandas
+    разбирает файл заново на каждый лист.
     """
     repaired: Path | None = None
     xls: pd.ExcelFile | None = None
     try:
         try:
             xls = pd.ExcelFile(path)
-            read_path = path
         except Exception as exc:
             # openpyxl may raise either a friendly "could not read stylesheet"
             # ValueError or a raw XMLSyntaxError while parsing xl/styles.xml. For
@@ -114,7 +116,6 @@ def _open_excel_file_resilient(path: Path) -> Iterator[tuple[pd.ExcelFile, Path]
             try:
                 repaired = _repair_xlsx_styles(path)
                 xls = pd.ExcelFile(repaired)
-                read_path = repaired
             except Exception as repair_exc:
                 if _excel_error_mentions_styles(exc):
                     raise ValueError(
@@ -123,7 +124,7 @@ def _open_excel_file_resilient(path: Path) -> Iterator[tuple[pd.ExcelFile, Path]
                         "Если это выгрузка Brand Analytics, лучше сохранить лист «Сообщения» отдельным CSV."
                     ) from repair_exc
                 raise exc
-        yield xls, read_path
+        yield xls
     finally:
         if xls is not None:
             try:
@@ -321,18 +322,22 @@ def _read_excel_any(path: Path, sheet_name: str | int | None = None) -> pd.DataF
     skip empty sheets instead of crashing on preview.iloc[0]. If the workbook
     has broken styles.xml, we automatically read a temporary repaired copy.
     """
-    with _open_excel_file_resilient(path) as (xls, read_path):
-        return _read_excel_sheets(xls, read_path, sheet_name)
+    with _open_excel_file_resilient(path) as xls:
+        return _read_excel_sheets(xls, sheet_name)
 
 
 def _read_excel_sheets(
-    xls: pd.ExcelFile, read_path: Path, sheet_name: str | int | None
+    xls: pd.ExcelFile, sheet_name: str | int | None
 ) -> pd.DataFrame:
     """Выбрать лист с сообщениями и прочитать его.
 
     Вынесено из _read_excel_any, чтобы выбор листа целиком помещался внутрь
-    контекста открытой книги: после выхода из него временной копии уже нет, и
-    читать по read_path будет нечего.
+    контекста открытой книги: после выхода из него временной копии уже нет.
+
+    Все чтения идут из xls, а не по пути на диске. Выгрузки мониторинга часто
+    многолистовые (обложка, сводка, динамика, источники, сообщения), а выбор
+    нужного листа требует заглянуть в каждый: чтение по пути заставляло pandas
+    распаковывать и разбирать всю книгу заново на каждую такую заглядку.
     """
     sheets = xls.sheet_names
     if not sheets:
@@ -341,7 +346,7 @@ def _read_excel_sheets(
     def safe_preview(sheet):
         try:
             preview_df = pd.read_excel(
-                read_path,
+                xls,
                 sheet_name=sheet,
                 header=None,
                 dtype=str,
@@ -409,7 +414,7 @@ def _read_excel_sheets(
         )
 
     df = pd.read_excel(
-        read_path,
+        xls,
         sheet_name=selected_sheet,
         header=selected_header_idx,
         dtype=str,
@@ -770,7 +775,7 @@ def get_excel_sheet_names(path: str | Path) -> list[str]:
     if path.suffix.lower() not in {".xlsx", ".xls", ".xlsm"}:
         return []
     try:
-        with _open_excel_file_resilient(path) as (xls, _):
+        with _open_excel_file_resilient(path) as xls:
             return list(xls.sheet_names)
     except Exception:
         return []
