@@ -1080,7 +1080,13 @@ def make_discussions(
             )
             prev = row
 
-    discussion_messages = pd.DataFrame(discussion_links)
+    # Колонки задаём явно: без сообщений список связей пуст, а DataFrame из
+    # пустого списка не имеет колонок — слияние по message_id падало бы
+    # KeyError'ом на выгрузке без единого разобранного сообщения (неделя без
+    # упоминаний или файл с одними заголовками — штатная ситуация).
+    discussion_messages = pd.DataFrame(
+        discussion_links, columns=["discussion_id", "message_id", "discussion_source"]
+    )
     enriched = discussion_messages.merge(messages, on="message_id", how="left")
 
     rows = []
@@ -1810,9 +1816,15 @@ def make_events(
             }
         )
 
-    events = pd.DataFrame(rows).sort_values(
-        ["importance_score", "message_count"], ascending=False
-    )
+    # Пустой список строк даёт DataFrame без колонок, и сортировка по ним
+    # падала бы KeyError'ом — так выгрузка, из которой не разобралось ни одного
+    # сообщения, роняла обработку вместо понятного «данных нет».
+    # make_events_from_source_stories выше уже защищён так же.
+    events = pd.DataFrame(rows)
+    if not events.empty:
+        events = events.sort_values(
+            ["importance_score", "message_count"], ascending=False
+        )
     return events, event_discussions
 
 
