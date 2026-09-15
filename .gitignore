@@ -6,3 +6,4 @@ __pycache__/
 data/work/
 data/uploads/
 data/processed/
+.claude/settings.local.json
