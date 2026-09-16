@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """Раздел «Отзывы»: репутация товара по отзывам покупателей.
 
 Раздел появился из наблюдения на реальных выгрузках: почти весь негатив периода
@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import pandas as pd
 import streamlit as st
+
+from metric_cards_ui import metric_card, render_metric_row
 
 from services.metrics_compute import format_int
 from services.reviews import (
@@ -62,26 +64,29 @@ def render_reviews(messages: pd.DataFrame) -> None:
     total = int(overview["reviews"])
     rating_avg = overview["rating_avg"]
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Отзывов", format_int(total))
-    c2.metric(
-        "Средняя оценка",
-        f"{rating_avg:.2f}" if rating_avg is not None else "—",
-        help=(
-            f"По {format_int(int(overview['rated']))} отзывам, где покупатель "
-            "поставил оценку."
-        ),
+    render_metric_row(
+        [
+            metric_card("Отзывов", format_int(total)),
+            metric_card(
+                "Средняя оценка",
+                f"{rating_avg:.2f}" if rating_avg is not None else "—",
+                help_text=(
+                    f"По {format_int(int(overview['rated']))} отзывам, где "
+                    "покупатель поставил оценку."
+                ),
+            ),
+            metric_card(
+                "Претензий",
+                format_int(int(overview["negative"])),
+                help_text=(
+                    f"Отзывы с оценкой не выше {LOW_RATING:.0f} или размеченные "
+                    "негативными. Одного признака мало: разметка тональности и "
+                    "оценка расходятся в обе стороны."
+                ),
+            ),
+            metric_card("Товаров", format_int(int(overview["products"]))),
+        ]
     )
-    c3.metric(
-        "Претензий",
-        format_int(int(overview["negative"])),
-        help=(
-            f"Отзывы с оценкой не выше {LOW_RATING:.0f} или размеченные "
-            "негативными. Одного признака мало: разметка тональности и оценка "
-            "расходятся в обе стороны."
-        ),
-    )
-    c4.metric("Товаров", format_int(int(overview["products"])))
 
     st.divider()
 

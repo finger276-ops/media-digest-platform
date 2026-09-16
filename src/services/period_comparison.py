@@ -15,6 +15,35 @@ from .formatting import fmt_date, fmt_period
 from .metrics_compute import format_int, overview_metrics, percent_text
 
 
+def previous_period_id(
+    periods: pd.DataFrame, selected_ids: list[str]
+) -> str | None:
+    """Период, который идёт перед самым ранним из выбранных.
+
+    Нужен, чтобы динамика была видна даже когда открыт один период — важно не
+    абсолютное число, а «стало больше или меньше».
+
+    Живёт здесь, а не в app.py: тем же вопросом задаются и индексы бренда, а
+    импортировать из роутера значило бы завести круговую зависимость.
+    """
+    if periods is None or periods.empty or not selected_ids:
+        return None
+    if "period_id" not in periods.columns:
+        return None
+    work = periods.copy()
+    order = pd.to_datetime(work.get("date_from"), errors="coerce")
+    if order.isna().all():
+        order = pd.to_datetime(work.get("uploaded_at"), errors="coerce")
+    work["_order"] = order
+    work = work.sort_values("_order", na_position="first")
+    ordered = work["period_id"].astype(str).tolist()
+    selected = {str(x) for x in selected_ids}
+    positions = [i for i, pid in enumerate(ordered) if pid in selected]
+    if not positions or positions[0] == 0:
+        return None
+    return ordered[positions[0] - 1]
+
+
 def period_row_label(row: pd.Series, fallback: str = "") -> str:
     name = (
         str(row.get("period_name") or "").strip() if isinstance(row, pd.Series) else ""

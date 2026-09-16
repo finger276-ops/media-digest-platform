@@ -230,6 +230,17 @@ check("пустые значения отбрасываются", period_key(["a
 check("повторы схлопываются", period_key(["a", "a"]) == "a", period_key(["a", "a"]))
 check("пустой список даёт пустой ключ", period_key([]) == "" and period_key(None) == "")
 
+print("Направление метрики: где цвет утверждает «лучше», а где нет")
+# Цвет у изменения утверждает «стало лучше» или «стало хуже». Для доли голоса
+# такого утверждения нет: громкость бывает и скандальной, о чём говорит
+# подсказка самой метрики.
+from services.brand_metrics import metric_direction  # noqa: E402
+
+for code in ("BPI", "NSS", "SES", "TVS", "ReachScore", "ER", "ERR"):
+    check(f"у {code} направление вверх", metric_direction(code) == "up", metric_direction(code))
+check("у SOV направление не задано", metric_direction("SOV") == "neutral", metric_direction("SOV"))
+check("незнакомая метрика не красится", metric_direction("WHATEVER") == "neutral")
+
 print("Бренды категории берутся из тегов самой выгрузки")
 # SOV и ReachScore сравнивают бренд с категорией, и до сих пор для этого
 # требовалась отдельная выгрузка по всей категории. В категорийном мониторинге

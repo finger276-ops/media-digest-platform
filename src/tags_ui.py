@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """Раздел «Теги»: статистика по тегам и карточка выбранного тега.
 
 Теги берутся из системных колонок Brand Analytics после «Обработано»
@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import pandas as pd
 import streamlit as st
+
+from metric_cards_ui import metric_card, render_metric_row
 
 from messages_ui import render_message_list
 from services.message_compute import message_link_column, message_text_column
@@ -123,16 +125,19 @@ def render_selected_tag_detail(
             )
             break
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Сообщений", format_int(metrics.get("messages", 0)))
-    c2.metric("Источников/чатов", format_int(source_count))
-    c3.metric("Авторов", format_int(author_count))
-    c4.metric("Негатив", percent_text(int(sent.get("negative", 0) or 0), total))
-
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Аудитория", format_int(metrics.get("audience", 0)))
-    m2.metric("Охват", format_int(metrics.get("reach", 0)))
-    m3.metric("Вовлеченность", format_int(metrics.get("engagement", 0)))
+    render_metric_row(
+        [
+            metric_card("Сообщений", format_int(metrics.get("messages", 0))),
+            metric_card("Источников/чатов", format_int(source_count)),
+            metric_card("Авторов", format_int(author_count)),
+            metric_card(
+                "Негатив", percent_text(int(sent.get("negative", 0) or 0), total)
+            ),
+            metric_card("Аудитория", format_int(metrics.get("audience", 0))),
+            metric_card("Охват", format_int(metrics.get("reach", 0))),
+            metric_card("Вовлеченность", format_int(metrics.get("engagement", 0))),
+        ]
+    )
 
     mode = st.radio(
         "Сообщения тега",

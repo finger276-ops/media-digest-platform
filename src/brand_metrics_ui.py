@@ -9,6 +9,7 @@ ReachScore, ER, ERR), расшифровку каждого расчёта, ди
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import altair as alt
@@ -25,9 +26,22 @@ from services.brand_metrics import (
     metrics_by_period,
     metrics_to_frame,
 )
-from services.cached_store import clear_platform_caches, update_project
+from metric_cards_ui import (
+    DELTA_NEUTRAL,
+    DELTA_NORMAL,
+    metric_card,
+    render_metric_row,
+)
+from services.brand_metrics import metric_direction
+from services.cached_store import (
+    cache_version,
+    clear_platform_caches,
+    load_table,
+    update_project,
+)
 from services.ingest import IngestError, read_canonical_bytes
 from services.metric_notes import load_notes, period_key, save_note
+from services.period_comparison import previous_period_id
 from services.project_settings import category_brands_from_project_settings
 
 METRIC_ORDER = ["BPI", "NSS", "SES", "TVS", "SOV", "ReachScore", "ER", "ERR"]
@@ -77,6 +91,57 @@ def _save_metric_settings(
 # ---------------------------------------------------------------------------
 
 
+@st.cache_data(show_spinner=False, max_entries=6, ttl=900)
+def _cached_previous_metrics(
+    project_id: str, period_id: str, fingerprint: str, data_version: int
+) -> dict[str, float]:
+    """Значения метрик прошлого периода — для динамики в карточках.
+
+    Данные прошлого периода в дашборд не загружаются: он показывает выбранное.
+    Ради одной строки изменения тянуть их каждый раз дорого, поэтому результат
+    кешируется — так же, как дельты в шапке «Обзора».
+
+    Отпечаток настроек в ключе не украшение: веса BPI и разметка брендов меняют
+    значения, и без него аналитик, поправивший веса, сравнивал бы новое число
+    со старым.
+    """
+    messages = load_table(project_id, [period_id], "messages")
+    if messages is None or messages.empty:
+        return {}
+    settings, own, competitors = json.loads(fingerprint)
+    benchmark = category_store.benchmark_from_messages(messages, own, competitors)
+    cards = compute_brand_metrics(messages, benchmark=benchmark, settings=settings)
+    return {
+        str(card["code"]): float(card["value"])
+        for card in cards.values()
+        if card.get("available") and card.get("value") is not None
+    }
+
+
+def previous_period_metrics(
+    project_id: str,
+    period_id: str | None,
+    settings: dict[str, Any],
+    brand_map: dict[str, list[str]],
+) -> dict[str, float]:
+    if not project_id or not period_id:
+        return {}
+    fingerprint = json.dumps(
+        [settings, brand_map.get("own", []), brand_map.get("competitors", [])],
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    try:
+        return _cached_previous_metrics(
+            str(project_id),
+            str(period_id),
+            fingerprint,
+            cache_version(project_id, "data"),
+        )
+    except Exception:  # noqa: BLE001 — динамика не критична для раздела
+        return {}
+
+
 def _card_label(key: str, card: dict[str, Any]) -> str:
     """Подпись карточки: аббревиатура плюс человеческое название.
 
@@ -87,15 +152,54 @@ def _card_label(key: str, card: dict[str, Any]) -> str:
     return f"{code} · {title}" if title else code
 
 
-def render_metric_cards(cards: dict[str, dict[str, Any]]) -> None:
-    for row_keys in (["BPI", "NSS", "SES", "TVS"], ["SOV", "ReachScore", "ER", "ERR"]):
-        columns = st.columns(4)
-        for column, key in zip(columns, row_keys):
-            card = cards.get(key, {})
-            with column:
-                st.metric(_card_label(key, card), format_metric(card))
-                if not card.get("available"):
-                    st.caption(card.get("reason", ""))
+def _metric_delta(
+    card: dict[str, Any], previous: dict[str, float] | None
+) -> tuple[str | None, str]:
+    """Изменение к прошлому периоду и цвет для него.
+
+    Цвет утверждает «стало лучше» или «стало хуже». Для доли голоса такого
+    утверждения нет: громкость бывает и скандальной, о чём говорит подсказка
+    самой метрики. Её изменение показывается без цвета.
+    """
+    if not previous or not card.get("available"):
+        return None, DELTA_NEUTRAL
+    code = str(card.get("code") or "")
+    before = previous.get(code)
+    value = card.get("value")
+    if before is None or value is None:
+        return None, DELTA_NEUTRAL
+    change = float(value) - float(before)
+    if abs(change) < 0.005:
+        return None, DELTA_NEUTRAL
+    color = DELTA_NORMAL if metric_direction(code) == "up" else DELTA_NEUTRAL
+    return f"{change:+.2f} п.п.".replace(".", ","), color
+
+
+def render_metric_cards(
+    cards: dict[str, dict[str, Any]],
+    previous: dict[str, float] | None = None,
+) -> None:
+    unavailable: list[tuple[str, str]] = []
+    row = []
+    for key in METRIC_ORDER:
+        card = cards.get(key, {})
+        delta, color = _metric_delta(card, previous)
+        row.append(
+            metric_card(
+                _card_label(key, card),
+                format_metric(card),
+                delta=delta,
+                delta_color=color,
+                help_text=str(card.get("hint") or ""),
+            )
+        )
+        if not card.get("available") and card.get("reason"):
+            unavailable.append((_card_label(key, card), str(card["reason"])))
+    render_metric_row(row, columns=4)
+    # Причины вынесены под полосу: внутри карточки длинный текст ломает её
+    # высоту, и ряд перестаёт быть рядом.
+    for label, reason in unavailable:
+        st.caption(f"{label}: {reason}")
 
 
 def render_metric_conclusions(
@@ -689,7 +793,15 @@ def render_brand_metrics_page(
 
     cards = compute_brand_metrics(messages, benchmark=benchmark, settings=settings)
 
-    render_metric_cards(cards)
+    previous = previous_period_metrics(
+        project_id,
+        previous_period_id(periods, selected_period_ids),
+        settings,
+        brand_map,
+    )
+    render_metric_cards(cards, previous)
+    if previous:
+        st.caption("Изменения — к предыдущему периоду.")
     render_category_source_notice(benchmark, brand_map)
     render_metric_conclusions(
         project_id, cards, selected_period_ids, role_can_edit=role_can_edit

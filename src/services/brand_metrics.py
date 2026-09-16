@@ -714,6 +714,26 @@ def compute_brand_metrics(
     return cards
 
 
+# Куда «лучше» для каждой метрики. Цвет у изменения утверждает «стало лучше» или
+# «стало хуже», и утверждать это можно не везде: высокая доля голоса не всегда
+# хороша — громкость бывает и скандальной, о чём говорит подсказка самой метрики.
+# Там, где направление неоднозначно, изменение показывается без цвета.
+METRIC_DIRECTION = {
+    "BPI": "up",
+    "NSS": "up",
+    "SES": "up",
+    "TVS": "up",
+    "ReachScore": "up",
+    "ER": "up",
+    "ERR": "up",
+    "SOV": "neutral",
+}
+
+
+def metric_direction(code: str) -> str:
+    return METRIC_DIRECTION.get(str(code), "neutral")
+
+
 def metrics_to_frame(
     cards: dict[str, dict[str, Any]], notes: dict[str, str] | None = None
 ) -> pd.DataFrame:

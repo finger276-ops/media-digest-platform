@@ -91,6 +91,7 @@ from upload_history_ui import (
 from services.period_comparison import (
     period_metrics_for_comparison,
     build_comparison_metrics,
+    previous_period_id,
     selected_period_label,
 )
 from overview_ui import (
@@ -194,30 +195,6 @@ def load_dashboard_data(
     )
 
 
-def previous_period_id(
-    periods: pd.DataFrame, selected_ids: list[str]
-) -> str | None:
-    """Период, который идёт перед самым ранним из выбранных.
-
-    Нужен, чтобы в шапке была видна динамика даже когда открыт один период —
-    клиенту важно не абсолютное число, а «стало больше или меньше».
-    """
-    if periods is None or periods.empty or not selected_ids:
-        return None
-    if "period_id" not in periods.columns:
-        return None
-    work = periods.copy()
-    order = pd.to_datetime(work.get("date_from"), errors="coerce")
-    if order.isna().all():
-        order = pd.to_datetime(work.get("uploaded_at"), errors="coerce")
-    work["_order"] = order
-    work = work.sort_values("_order", na_position="first")
-    ordered = work["period_id"].astype(str).tolist()
-    selected = {str(x) for x in selected_ids}
-    positions = [i for i, pid in enumerate(ordered) if pid in selected]
-    if not positions or positions[0] == 0:
-        return None
-    return ordered[positions[0] - 1]
 
 
 @st.cache_data(show_spinner=False, max_entries=6, ttl=900)

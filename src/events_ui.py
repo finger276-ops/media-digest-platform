@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """Раздел «Инфоповоды»: таблица инфоповодов, карточка выбранного, ручная
 модерация (создание/правка/скрытие/объединение) и отчёт по склейке похожих
 заголовков.
@@ -10,6 +10,8 @@ from typing import Any
 
 import pandas as pd
 import streamlit as st
+
+from metric_cards_ui import metric_card, render_metric_row
 
 from services.cached_store import delete_manual, get_manual, save_manual
 from services.event_filter_state import (
@@ -466,25 +468,23 @@ def render_selected_event_detail(
     # Карточки в рамках, как в шапке «Обзора»: одинаковые числа должны и
     # выглядеть одинаково, иначе показатели инфоповода читаются как подпись к
     # заголовку, а не как самостоятельная сводка.
-    volume_cards = [
-        ("Сообщений", format_int(metrics.get("messages", 0))),
-        ("Источников/чатов", format_int(chat_count)),
-        ("Авторов", format_int(author_count)),
-        ("Негатив", percent_text(int(sent.get("negative", 0) or 0), total)),
-        ("Важность", str(round(float(selected.get("importance_score", 0) or 0), 2))),
-    ]
-    for column, (label, value) in zip(st.columns(5), volume_cards):
-        with column, st.container(border=True):
-            st.metric(label, value)
-
-    scale_cards = [
-        ("Аудитория", format_int(metrics.get("audience", 0))),
-        ("Охват", format_int(metrics.get("reach", 0))),
-        ("Вовлеченность", format_int(metrics.get("engagement", 0))),
-    ]
-    for column, (label, value) in zip(st.columns(3), scale_cards):
-        with column, st.container(border=True):
-            st.metric(label, value)
+    render_metric_row(
+        [
+            metric_card("Сообщений", format_int(metrics.get("messages", 0))),
+            metric_card("Источников/чатов", format_int(chat_count)),
+            metric_card("Авторов", format_int(author_count)),
+            metric_card(
+                "Негатив", percent_text(int(sent.get("negative", 0) or 0), total)
+            ),
+            metric_card(
+                "Важность",
+                str(round(float(selected.get("importance_score", 0) or 0), 2)),
+            ),
+            metric_card("Аудитория", format_int(metrics.get("audience", 0))),
+            metric_card("Охват", format_int(metrics.get("reach", 0))),
+            metric_card("Вовлеченность", format_int(metrics.get("engagement", 0))),
+        ]
+    )
 
     if tags_text:
         st.caption(f"Теги: {tags_text}")
