@@ -1,4 +1,4 @@
-"""Проверка обогащения сообщений связями с инфоповодами и агрегации инфоповодов.
+﻿"""Проверка обогащения сообщений связями с инфоповодами и агрегации инфоповодов.
 
 Этот код раньше жил внутри app.py без единого теста. Отдельного внимания
 заслуживает fallback-путь enrich_messages: у выгрузок Brand Analytics по
@@ -187,6 +187,77 @@ group_auto = pd.DataFrame([{"event_summary": "жалобы на брак", "main
 check(
     "без ручного описания используется автоматическое",
     "проблемы, жалобы" in pick_event_description(group_auto),
+)
+
+print("7. Остаточная корзина не попадает в верх рейтинга")
+# «Без сюжета» собирает всё, что не сложилось в инфоповод. Вес считается от
+# числа сообщений, а их там сотни, поэтому корзина закономерно выходила первой
+# строкой — заказчик видел на месте главной новости мешок.
+ranked = aggregate_events(
+    pd.DataFrame(
+        [
+            {
+                "event_id": "e1",
+                "event_title": "Без сюжета",
+                "message_count": 577,
+                "chat_count": 120,
+                "negative_count": 20,
+                "importance_score": 34.04, "start_date": "2026-07-01", "end_date": "2026-07-31",
+                "is_residual": True,
+            },
+            {
+                "event_id": "e2",
+                "event_title": "Запуск линии кровельных материалов",
+                "message_count": 124,
+                "chat_count": 30,
+                "negative_count": 0,
+                "importance_score": 25.10, "start_date": "2026-07-03", "end_date": "2026-07-29",
+                "is_residual": False,
+            },
+            {
+                "event_id": "e3",
+                "event_title": "Акция на профлист",
+                "message_count": 10,
+                "chat_count": 5,
+                "negative_count": 0,
+                "importance_score": 13.71, "start_date": "2026-07-10", "end_date": "2026-07-12",
+                "is_residual": False,
+            },
+        ]
+    )
+)
+check("признак остатка пережил агрегацию", "is_residual" in ranked.columns)
+check(
+    "первым идёт настоящий инфоповод, а не корзина",
+    ranked.iloc[0]["title"] == "Запуск линии кровельных материалов",
+    str(ranked.iloc[0]["title"]),
+)
+check(
+    "корзина ушла в самый конец",
+    bool(ranked.iloc[-1]["is_residual"]),
+    str(list(ranked["title"])),
+)
+check(
+    "вес корзины не подменён нулём — он честно показывает объём",
+    float(ranked[ranked["is_residual"]].iloc[0]["importance_score"]) == 34.04,
+    str(ranked[ranked["is_residual"]].iloc[0]["importance_score"]),
+)
+# Остаток опознаётся и по названию: старые периоды, обработанные до появления
+# колонки, не должны всплывать наверх после обновления платформы.
+legacy = aggregate_events(
+    pd.DataFrame(
+        [
+            {"event_id": "e1", "event_title": "Без сюжета", "message_count": 500,
+             "importance_score": 30.0, "start_date": "2026-07-01", "end_date": "2026-07-31"},
+            {"event_id": "e2", "event_title": "Настоящий повод", "message_count": 20,
+             "importance_score": 12.0, "start_date": "2026-07-05", "end_date": "2026-07-06"},
+        ]
+    )
+)
+check(
+    "старые периоды без колонки тоже разбираются по названию",
+    legacy.iloc[0]["title"] == "Настоящий повод" and bool(legacy.iloc[-1]["is_residual"]),
+    str(list(legacy["title"])),
 )
 
 print()

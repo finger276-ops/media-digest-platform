@@ -226,6 +226,45 @@ def test_tokens_drop_numbers_and_stopwords():
     assert "более" not in tokens
 
 
+def test_residual_bucket_sorts_last_after_merge():
+    """Остаточная корзина не возвращается наверх после склейки заголовков.
+
+    «Без сюжета» собирает всё, что не сложилось в инфоповод, и её вес выходит
+    наибольшим просто потому, что сообщений там сотни. Склейка пересортировывает
+    список заново, и без отдельного правила мешок снова встал бы первым.
+    """
+    frame = events_frame(
+        ["Без сюжета", "Запуск линии кровельных материалов", "Акция на профлист"],
+        counts=[577, 124, 10],
+    )
+    frame["is_residual"] = [True, False, False]
+
+    merged, _ = merge_similar_events(frame, threshold=DEFAULT_SIMILARITY)
+    assert "is_residual" in merged.columns, merged.columns.tolist()
+    assert not bool(merged.iloc[0]["is_residual"]), merged["title"].tolist()
+    assert bool(merged.iloc[-1]["is_residual"]), merged["title"].tolist()
+    # Вес не подменяется: он честно показывает объём остатка.
+    residual = merged[merged["is_residual"]].iloc[0]
+    assert float(residual["importance_score"]) == 577.0, residual["importance_score"]
+
+
+def test_residual_flag_survives_a_merge_group():
+    """Если остаток попал в склейку, результат остаётся остатком."""
+    frame = events_frame(["Без сюжета", "без сюжета…"], counts=[300, 200])
+    frame["is_residual"] = [True, False]
+    merged, _ = merge_similar_events(frame, threshold=DEFAULT_SIMILARITY)
+    assert len(merged) == 1, merged["title"].tolist()
+    assert bool(merged.iloc[0]["is_residual"])
+
+
+def test_merge_without_residual_column_still_works():
+    """Периоды, обработанные до появления колонки, не должны падать."""
+    frame = events_frame(["Запуск завода", "Акция на профлист"], counts=[20, 5])
+    merged, _ = merge_similar_events(frame, threshold=DEFAULT_SIMILARITY)
+    assert len(merged) == 2, merged["title"].tolist()
+    assert merged.iloc[0]["message_count"] == 20
+
+
 if __name__ == "__main__":
     failures = []
     for name, func in sorted(dict(globals()).items()):

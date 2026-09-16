@@ -41,6 +41,17 @@ ORIGIN_INHERITED = "inherited"
 ORIGIN_CLUSTERED = "clustered"
 ORIGIN_NONE = ""
 
+# Название корзины, в которую попадает всё, что так и не собралось в сюжет.
+# Это не инфоповод, а остаток, и в рейтинге важности ему не место: на выгрузках
+# RUFLEX он весил 34 против 25 у лучшего настоящего повода и вставал первым.
+RESIDUAL_STORY_TITLE = "Без сюжета"
+
+
+def is_residual_title(value: object) -> bool:
+    """Это остаточная корзина, а не инфоповод?"""
+    return str(value or "").strip().casefold() == RESIDUAL_STORY_TITLE.casefold()
+
+
 ORIGIN_LABELS = {
     ORIGIN_SOURCE: "Сюжет выгрузки",
     ORIGIN_INHERITED: "Та же публикация",

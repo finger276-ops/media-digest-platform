@@ -11,6 +11,7 @@ from __future__ import annotations
 import pandas as pd
 
 from .event_titles import normalize_event_title
+from .story_recovery import is_residual_title
 
 
 def enrich_messages(
@@ -240,6 +241,26 @@ def pick_event_description(group: pd.DataFrame) -> str:
     return build_event_description(group)
 
 
+def _numbers(group: pd.DataFrame, column: str) -> pd.Series:
+    """Числовая колонка группы, а ноль — когда колонки нет.
+
+    Здесь был скрытый отказ: `group.get(column, 0)` при отсутствии колонки
+    возвращает скаляр, у которого потом вызывался `.fillna` — защита выглядела
+    защитой, но роняла агрегацию с AttributeError на любом кадре без
+    необязательной колонки.
+    """
+    if column not in group.columns:
+        return pd.Series([0] * len(group), index=group.index, dtype="float64")
+    return pd.to_numeric(group[column], errors="coerce").fillna(0)
+
+
+def _dates(group: pd.DataFrame, column: str) -> pd.Series:
+    """Колонка дат группы; пустая — когда колонки нет."""
+    if column not in group.columns:
+        return pd.Series([pd.NaT] * len(group), index=group.index, dtype="datetime64[ns]")
+    return pd.to_datetime(group[column], errors="coerce")
+
+
 def aggregate_events(events: pd.DataFrame) -> pd.DataFrame:
     if events.empty:
         return events
@@ -276,35 +297,24 @@ def aggregate_events(events: pd.DataFrame) -> pd.DataFrame:
                     - {""}
                 )
             ),
-            "start_date": pd.to_datetime(
-                group.get("start_date"), errors="coerce"
-            ).min(),
-            "end_date": pd.to_datetime(group.get("end_date"), errors="coerce").max(),
-            "message_count": int(
-                pd.to_numeric(group.get("message_count", 0), errors="coerce")
-                .fillna(0)
-                .sum()
-            ),
-            "chat_count": int(
-                pd.to_numeric(group.get("chat_count", 0), errors="coerce")
-                .fillna(0)
-                .sum()
-            ),
-            "negative_count": int(
-                pd.to_numeric(group.get("negative_count", 0), errors="coerce")
-                .fillna(0)
-                .sum()
-            ),
-            "importance_score": float(
-                pd.to_numeric(group.get("importance_score", 0), errors="coerce")
-                .fillna(0)
-                .max()
-            ),
+            "start_date": _dates(group, "start_date").min(),
+            "end_date": _dates(group, "end_date").max(),
+            "message_count": int(_numbers(group, "message_count").sum()),
+            "chat_count": int(_numbers(group, "chat_count").sum()),
+            "negative_count": int(_numbers(group, "negative_count").sum()),
+            "importance_score": float(_numbers(group, "importance_score").max()),
             "event_ids": (
                 list(group["event_id"].astype(str))
                 if "event_id" in group.columns
                 else []
             ),
+            # Остаточная корзина — не инфоповод, и в рейтинге важности ей не
+            # место. Признак должен пережить агрегацию, иначе дашборд снова
+            # поставит мешок из сотен сообщений первым.
+            "is_residual": bool(
+                group.get("is_residual", pd.Series([False] * len(group))).fillna(False).any()
+            )
+            or is_residual_title(variants[0] if variants else ""),
         }
         row["negative_share"] = (
             row["negative_count"] / row["message_count"] if row["message_count"] else 0
@@ -312,5 +322,8 @@ def aggregate_events(events: pd.DataFrame) -> pd.DataFrame:
         rows.append(row)
     out = pd.DataFrame(rows)
     if not out.empty:
-        out = out.sort_values(["importance_score", "message_count"], ascending=False)
+        out = out.sort_values(
+            ["is_residual", "importance_score", "message_count"],
+            ascending=[True, False, False],
+        )
     return out

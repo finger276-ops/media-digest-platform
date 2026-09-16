@@ -347,7 +347,38 @@ def _combine_group(group: pd.DataFrame) -> dict[str, Any]:
     row["negative_share"] = (
         int(row.get("negative_count") or 0) / message_count if message_count else 0
     )
+    # Признак остаточной корзины заразителен: если в склейку попал остаток,
+    # результат остаётся остатком, каким бы ни был лидер группы. Иначе мешок
+    # из сотен сообщений вернётся в рейтинг через заднюю дверь.
+    if "is_residual" in group.columns:
+        row["is_residual"] = bool(group["is_residual"].fillna(False).any())
     return row
+
+
+def _sorted_events(out: pd.DataFrame) -> pd.DataFrame:
+    """Упорядочить инфоповоды: остаточная корзина всегда последняя.
+
+    Её вес считается по тем же формулам и закономерно выходит наибольшим — в
+    ней сотни сообщений, — но это объём мешка, а не значимость события.
+    Обнулять вес нельзя: он честно показывает, сколько осталось за кадром.
+
+    Сортировка нужна на обоих выходах merge_similar_events. Когда склеивать
+    нечего, функция возвращалась раньше и не сортировала вовсе; порядок держался
+    только потому, что вход уже был упорядочен — то есть случайно.
+    """
+    if out.empty or not {"importance_score", "message_count"} <= set(out.columns):
+        return out
+    if "is_residual" in out.columns:
+        # Пропуски приравниваются к «не остаток»: у периодов, обработанных до
+        # появления колонки, её просто нет, и наверх им не место.
+        out = out.copy()
+        out["is_residual"] = out["is_residual"].fillna(False).astype(bool)
+        columns = ["is_residual", "importance_score", "message_count"]
+        ascending = [True, False, False]
+    else:
+        columns = ["importance_score", "message_count"]
+        ascending = [False, False]
+    return out.sort_values(columns, ascending=ascending).reset_index(drop=True)
 
 
 def merge_similar_events(
@@ -395,7 +426,7 @@ def merge_similar_events(
             out["title_variants"] = [[t] for t in out["title"].astype(str)]
         if "merged_titles" not in out.columns:
             out["merged_titles"] = 0
-        return out, []
+        return _sorted_events(out), []
 
     rows = [
         _combine_group(group)
@@ -404,10 +435,7 @@ def merge_similar_events(
     out = pd.DataFrame(rows)
     if "_merge_key" in out.columns:
         out = out.drop(columns=["_merge_key"])
-    if not out.empty and {"importance_score", "message_count"} <= set(out.columns):
-        out = out.sort_values(
-            ["importance_score", "message_count"], ascending=False
-        ).reset_index(drop=True)
+    out = _sorted_events(out)
 
     report = [
         {

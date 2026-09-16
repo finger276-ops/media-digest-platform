@@ -32,7 +32,11 @@ from io_utils import read_source_csv, write_table, write_manifest
 from services.event_titles import normalize_event_title
 from services.message_kinds import classify_kinds
 from services.ru_text import tokenize_ru, top_keywords, top_phrases
-from services.story_recovery import recover_stories
+from services.story_recovery import (
+    RESIDUAL_STORY_TITLE,
+    is_residual_title,
+    recover_stories,
+)
 
 
 def stable_hash(value: str, prefix: str = "") -> str:
@@ -1585,7 +1589,7 @@ def make_events_from_source_stories(
     if "source_main_topic" not in d.columns:
         d["source_main_topic"] = ""
     d["__story"] = d["source_main_topic"].fillna("").astype(str).map(normalize_spaces)
-    d["__story"] = d["__story"].replace("", "Без сюжета")
+    d["__story"] = d["__story"].replace("", RESIDUAL_STORY_TITLE)
     # Идентификатор сюжета считаем по нормализованной форме: кавычки, ё/е,
     # регистр и многоточие в конце — это тот же сюжет, а не новый. Название
     # при этом остаётся исходным, в формулировке Brand Analytics.
@@ -1602,7 +1606,9 @@ def make_events_from_source_stories(
             if "message_count" in group.columns
             else group["__story"].value_counts()
         )
-        story = str(story_counts.index[0] if len(story_counts) else "Без сюжета")
+        story = str(
+            story_counts.index[0] if len(story_counts) else RESIDUAL_STORY_TITLE
+        )
         keywords = top_keywords(
             group["discussion_text"].fillna("").astype(str), top_n=7
         )
@@ -1663,14 +1669,20 @@ def make_events_from_source_stories(
                 "importance_score": round(float(importance_score), 2),
                 "status": "новый",
                 "is_hidden": False,
+                "is_residual": is_residual_title(story),
                 "event_source": "brand_analytics_story",
             }
         )
 
     events = pd.DataFrame(rows)
     if not events.empty:
+        # Остаточная корзина сортируется последней, а не по важности. Её вес
+        # считается по тем же формулам и закономерно выходит наибольшим —
+        # в ней сотни сообщений, — но это свойство мешка, а не события.
+        # Обнулять вес нельзя: он честно показывает объём остатка.
         events = events.sort_values(
-            ["importance_score", "message_count"], ascending=False
+            ["is_residual", "importance_score", "message_count"],
+            ascending=[True, False, False],
         )
     return events, event_discussions
 
@@ -1788,6 +1800,10 @@ def make_events(
                 "importance_score": round(float(importance_score), 2),
                 "status": "новый",
                 "is_hidden": False,
+                # В этом пути каждое событие собрано кластеризацией, остаточной
+                # корзины не возникает — но колонка нужна, чтобы схема таблицы
+                # не зависела от системы-источника.
+                "is_residual": False,
             }
         )
 

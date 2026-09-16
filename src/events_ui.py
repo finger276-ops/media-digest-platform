@@ -33,6 +33,69 @@ from services.tag_compute import split_pipe_values
 from messages_ui import render_message_list
 
 
+def render_residual_events(
+    residual_events: pd.DataFrame, messages: pd.DataFrame
+) -> None:
+    """Показать то, что не собралось в инфоповоды, отдельным блоком.
+
+    Раньше эта корзина была строкой в общей таблице — и первой, потому что вес
+    считается от числа сообщений, а их там сотни. Заказчик видел на месте
+    главной новости периода мешок из несвязанных публикаций.
+
+    Прятать её совсем нельзя: это половина периода, и человек должен понимать,
+    что именно осталось за кадром.
+    """
+    if residual_events is None or residual_events.empty:
+        return
+
+    total = int(
+        pd.to_numeric(residual_events.get("message_count", 0), errors="coerce")
+        .fillna(0)
+        .sum()
+    )
+    if not total:
+        return
+    negative = int(
+        pd.to_numeric(residual_events.get("negative_count", 0), errors="coerce")
+        .fillna(0)
+        .sum()
+    )
+
+    with st.expander(
+        f"Вне инфоповодов — {format_int(total)} сообщений", expanded=False
+    ):
+        st.caption(
+            "Публикации, которые не сложились в общий сюжет: разовые посты, "
+            "реклама и обсуждения, о которых написал кто-то один. Это не "
+            "инфоповоды, поэтому в рейтинг важности они не попадают."
+        )
+        if negative:
+            st.caption(
+                f"Негативных среди них: {format_int(negative)}. "
+                "Отзывы о товаре разбираются в своём разделе."
+            )
+        event_ids: set[str] = set()
+        for raw in residual_events.get("event_ids", pd.Series(dtype=object)):
+            for value in raw if isinstance(raw, (list, tuple, set)) else []:
+                event_ids.add(str(value))
+        if event_ids and "event_id" in messages.columns:
+            subset = messages[messages["event_id"].astype(str).isin(event_ids)]
+            if not subset.empty:
+                # Сортируем по вовлечённости: если уж смотреть мешок, то
+                # начиная с того, что заметили люди.
+                if "engagement" in subset.columns:
+                    subset = subset.sort_values(
+                        "engagement",
+                        key=lambda s: pd.to_numeric(s, errors="coerce").fillna(0),
+                        ascending=False,
+                    )
+                render_message_list(
+                    subset.head(50),
+                    text_col=message_text_column(subset),
+                    link_col=message_link_column(subset),
+                )
+
+
 def _event_tags_text(selected: pd.Series, event_messages: pd.DataFrame) -> str:
     values: list[str] = []
     for col in ["tags", "main_tags", "display_tags", "source_topics"]:
@@ -448,6 +511,23 @@ def render_events(
                 column_config={"Ссылка": st.column_config.LinkColumn("Ссылка")},
             )
 
+    # Остаточная корзина — всё, что не собралось в инфоповод, — показывается
+    # отдельно от списка. В ней сотни сообщений, и в общей таблице она стояла
+    # первой строкой: заказчик видел на месте главной новости мешок.
+    residual_events = pd.DataFrame()
+    if "is_residual" in filtered_events.columns:
+        residual_mask = filtered_events["is_residual"].fillna(False).astype(bool)
+        residual_events = filtered_events[residual_mask]
+        filtered_events = filtered_events[~residual_mask]
+
+    if filtered_events.empty:
+        st.info(
+            "За выбранный период не собралось ни одного инфоповода. "
+            "Сообщения периода — в блоке ниже и в разделе «Сообщения»."
+        )
+        render_residual_events(residual_events, messages)
+        return
+
     table = filtered_events.copy()
     table["Период"] = table.apply(
         lambda r: (
@@ -494,6 +574,8 @@ def render_events(
         selection_mode="single-row",
         on_select="rerun",
     )
+
+    render_residual_events(residual_events, messages)
 
     rows = getattr(event, "selection", {}).get("rows", []) if event is not None else []
     if not rows:
