@@ -185,6 +185,68 @@ CLIENT.db["platform_table_rows"] += [
     for i, (sentiment, theme) in enumerate(_THEMES)
 ]
 
+# Отзывы с маркетплейса: своя природа сообщения, своя метрика (оценка товара)
+# и почти весь негатив периода. В ленте инфоповодов им места нет — у них
+# отдельный раздел.
+CLIENT.db["platform_table_rows"] += [
+    {
+        "project_id": "tn_project",
+        "period_id": PERIOD_ID,
+        "table_name": "messages",
+        "row_id": f"{PERIOD_ID}_rev{i}",
+        "payload": {
+            "message_id": f"{PERIOD_ID}_rev{i}",
+            "period_id": PERIOD_ID,
+            "date": "25.04.2026",
+            "datetime": "2026-04-25T12:00:00",
+            "sentiment": sentiment,
+            "is_negative": sentiment == "негатив",
+            "views": 0,
+            "audience": 0,
+            "engagement": 0,
+            "text_clean": text,
+            "message_raw": text,
+            "message_link": f"https://wildberries.ru/review/{i}",
+            "platform": "wildberries.ru",
+            "platform_type": "Отзывы",
+            "message_type": "Комментарий",
+            "title": title,
+            "rating": rating,
+            "author": f"Покупатель {i}",
+            "tags": "Кровля",
+            "event_title": "",
+        },
+    }
+    for i, (sentiment, rating, title, text) in enumerate(
+        [
+            (
+                "негатив",
+                "1",
+                "ТН / Гибкая черепица 3м2",
+                "Недостатки: Пришло в рваном пакете, часть гонтов сломана",
+            ),
+            (
+                "негатив",
+                "2",
+                "ТН / Гибкая черепица 3м2",
+                "Недостатки: Слабая клейкость лепестков",
+            ),
+            (
+                "нейтрал",
+                "5",
+                "ТН / Гибкая черепица 3м2",
+                "Плюсы товара: хорошее качество, внешний вид, простая установка",
+            ),
+            (
+                "позитив",
+                "5",
+                "ТН / Мягкая кровля для беседки",
+                "Плюсы товара: хорошее качество, внешний вид",
+            ),
+        ]
+    )
+]
+
 CLIENT.db["platform_ingest_queue"] = [
     {
         "task_id": "ing_demo_1",
@@ -343,6 +405,35 @@ check(
     str(merge_control),
 )
 check("аналитический вид не уронил раздел", not at.exception, str(at.exception))
+
+print("3.6. Раздел «Отзывы»: репутация товара и претензии покупателей")
+open_section("Отзывы")
+check("раздел открылся без исключений", not at.exception, str(at.exception))
+texts = [m.value for m in at.markdown] + [h.value for h in at.subheader]
+check("заголовок раздела на месте", any("Отзывы о товаре" in str(t) for t in texts))
+review_metrics = {str(m.label): str(m.value) for m in at.metric}
+check("счётчик отзывов посчитал все четыре", review_metrics.get("Отзывов") == "4", str(review_metrics))
+check(
+    "средняя оценка посчитана по колонке «Оценка»",
+    review_metrics.get("Средняя оценка") == "3.25",
+    str(review_metrics),
+)
+check(
+    "претензии отделены от похвалы",
+    review_metrics.get("Претензий") == "2",
+    str(review_metrics),
+)
+check("товары посчитаны", review_metrics.get("Товаров") == "2", str(review_metrics))
+check(
+    "плюсы товара сложились в счёт",
+    any("Хорошее качество — **2**" in str(t) for t in texts),
+    str([t for t in texts if "качество" in str(t)])[:200],
+)
+check(
+    "претензии показаны таблицей, а не сводкой",
+    bool(at.dataframe),
+    "таблиц на странице нет",
+)
 
 print("3.7. Раздел «Сообщения»: топ и вся лента рендерятся без исключений")
 open_section("Сообщения")

@@ -101,6 +101,7 @@ from services.event_filter_state import (
     event_series_filter,
 )
 from messages_ui import render_messages_block, render_message_list
+from reviews_ui import render_reviews
 from tags_ui import render_tag_statistics
 from client_insights_ui import render_client_insights
 from project_admin_ui import render_project_access, render_project_manager
@@ -749,6 +750,8 @@ def main() -> None:
                 hidden_messages,
                 int(min_event_messages or 0),
             )
+        elif page == "Отзывы":
+            render_reviews(enriched_messages)
         elif page == "Сообщения":
             _section_messages(enriched_messages, project_id)
         elif page == "Динамика":

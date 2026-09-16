@@ -44,6 +44,9 @@ jobs:
       - name: Восстановление сюжетов (наследование и кластеризация)
         run: python tests/test_story_recovery.py
 
+      - name: Отзывы о товаре (оценки, шаблон, претензии)
+        run: python tests/test_reviews.py
+
       - name: Аудитория по площадкам, а не по строкам
         run: python tests/test_audience_metrics.py
 
