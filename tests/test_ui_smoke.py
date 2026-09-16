@@ -691,6 +691,12 @@ check("метрика «В очереди» = 1", any("В очереди" in k a
 print("6. Страница загрузки файла")
 open_section("Загрузка файла")
 check("страница загрузки без исключений", not at.exception, str(at.exception))
+upload_expanders = [str(e.label) for e in at.expander]
+check(
+    "блок порогов сборки инфоповодов виден",
+    any("Что платформа считает инфоповодом" in label for label in upload_expanders),
+    str(upload_expanders),
+)
 
 print("6.5. История периодов: список отрисован")
 open_section("История периодов")

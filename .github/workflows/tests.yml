@@ -50,6 +50,9 @@ jobs:
       - name: Восстановление сюжетов (наследование и кластеризация)
         run: python tests/test_story_recovery.py
 
+      - name: Пороги сборки инфоповодов в настройках проекта
+        run: python tests/test_project_settings.py
+
       - name: Отзывы о товаре (оценки, шаблон, претензии)
         run: python tests/test_reviews.py
 

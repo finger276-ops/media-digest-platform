@@ -29,6 +29,10 @@ import platform_store as store
 from import_adapters import read_source_table
 from io_utils import read_table
 from preprocess import run_preprocess_from_dataframe
+from .project_settings import (
+    project_settings_from_row,
+    story_build_settings_from_project_settings,
+)
 
 GENERATED_TABLES = [
     "events",
@@ -85,6 +89,23 @@ def algorithm_params(params: dict[str, Any] | None) -> dict[str, float]:
         except (TypeError, ValueError):
             continue
     return merged
+
+
+def story_build_params(project_id: str) -> dict[str, Any]:
+    """Пороги сборки инфоповодов из настроек проекта — с дефолтами при сбое.
+
+    Единственная точка чтения: process_canonical проходят и ручная загрузка,
+    и воркер автозагрузки, и переобработка из админки — читать здесь значит
+    читать один раз для всех трёх путей.
+    """
+    try:
+        row = store.get_project(project_id)
+        settings = project_settings_from_row(row)
+        return story_build_settings_from_project_settings(settings)
+    except Exception:  # noqa: BLE001 — нет связи с базой не должно останавливать импорт
+        from .dashboard_config import DEFAULT_STORY_BUILD_SETTINGS
+
+        return dict(DEFAULT_STORY_BUILD_SETTINGS)
 
 
 def read_canonical_bytes(
@@ -199,6 +220,9 @@ def process_canonical(
         raise IngestError("Не указан проект для загрузки выгрузки.")
 
     algo = algorithm_params(params)
+    # Пороги сборки сюжетов читаются здесь, а не раньше проверок выше: тест
+    # на пустую выгрузку ждёт IngestError без единого обращения к Supabase.
+    story = story_build_params(project_id)
     date_from_text = _as_date_text(date_from)
     date_to_text = _as_date_text(date_to)
 
@@ -214,6 +238,9 @@ def process_canonical(
         similarity_threshold=algo["similarity_threshold"],
         event_gap_hours=algo["event_gap_hours"],
         event_window_hours=algo["event_window_hours"],
+        story_similarity=story["similarity"],
+        story_min_authors=story["min_authors"],
+        story_min_messages=story["min_messages"],
     )
     tables = read_generated_tables(output_dir)
     messages = tables.get("messages", pd.DataFrame())

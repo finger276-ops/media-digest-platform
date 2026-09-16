@@ -233,6 +233,29 @@ def list_projects(include_inactive: bool = False) -> pd.DataFrame:
     return df.sort_values("project_name")
 
 
+def get_project(project_id: str) -> dict[str, Any]:
+    """Одна строка проекта — не через list_projects (она тянет всю таблицу).
+
+    Нужна там, где известен только project_id: например, конвейер импорта
+    читает настройки проекта (пороги сборки инфоповодов), не имея под рукой
+    уже загруженный список проектов.
+    """
+    project_id = str(project_id or "").strip()
+    if not project_id:
+        return {}
+    rows = (
+        get_supabase_client()
+        .table("platform_projects")
+        .select("*")
+        .eq("project_id", project_id)
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    return dict(rows[0]) if rows else {}
+
+
 def create_project(
     *,
     project_name: str,

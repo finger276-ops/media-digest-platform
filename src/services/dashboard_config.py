@@ -9,6 +9,15 @@
 from __future__ import annotations
 
 from .event_titles import DEFAULT_SIMILARITY
+# Алиас обязателен: у story_recovery своя DEFAULT_SIMILARITY (0.45, порог
+# сборки сюжетов), а у event_titles — своя (0.62, порог склейки заголовков,
+# уже подставлен ниже в event_title_merge). Голый импорт под тем же именем
+# молча перезатёр бы одну другой.
+from .story_recovery import (
+    DEFAULT_MIN_AUTHORS as DEFAULT_STORY_MIN_AUTHORS,
+    DEFAULT_MIN_MESSAGES as DEFAULT_STORY_MIN_MESSAGES,
+    DEFAULT_SIMILARITY as DEFAULT_STORY_SIMILARITY,
+)
 
 ALGORITHM_PROFILE_OPTIONS = {
     "universal": "Универсальный",
@@ -78,6 +87,17 @@ DEFAULT_DASHBOARD_VIEW_SETTINGS = {
     # Порог склейки инфоповодов с близкими заголовками. 0 — склейка выключена,
     # остаётся только точное совпадение нормализованного заголовка.
     "event_title_merge": DEFAULT_SIMILARITY,
+}
+
+# Пороги сборки инфоповодов из сообщений выгрузки. Похожесть — только для
+# ветки Brand Analytics (recover_stories, наследование/кластеризация сюжетов);
+# в алгоритмической ветке похожесть — отдельный similarity_threshold,
+# который уже крутится ползунком «Похожесть» на странице загрузки. Минимум
+# авторов/сообщений — планка качества, общая для обеих веток.
+DEFAULT_STORY_BUILD_SETTINGS = {
+    "similarity": DEFAULT_STORY_SIMILARITY,
+    "min_authors": DEFAULT_STORY_MIN_AUTHORS,
+    "min_messages": DEFAULT_STORY_MIN_MESSAGES,
 }
 
 # Разделы аналитики. Они же — пункты бокового меню: до содержимого

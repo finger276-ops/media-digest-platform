@@ -505,6 +505,7 @@ def main() -> None:
             project_id,
             role,
             args.work_dir,
+            current_project_settings,
             _details=show_error_details,
         )
         return

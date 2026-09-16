@@ -8,16 +8,23 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+from typing import Any
+
 from services.cached_store import (
     clear_platform_caches,
     delete_period,
     list_periods,
     update_period_metadata,
+    update_project,
 )
 from services.formatting import fmt_period
 from services.import_report import normalization_lines, summarize_import
 from services.ingest import IngestError, process_canonical, read_canonical_bytes
 from services.metrics_compute import format_int
+from services.project_settings import (
+    story_build_settings_from_project_settings,
+    with_story_build,
+)
 from services.roles import role_rank
 from noise_filter_ui import render_noise_filter_block
 from tag_hierarchy_ui import render_tag_hierarchy_block
@@ -110,13 +117,94 @@ def render_import_report(report: dict) -> None:
         )
 
 
-def render_upload_page(project_id: str, role: str, work_dir: str) -> None:
+def render_story_build_settings(
+    project_id: str, project_settings: dict[str, Any] | None
+) -> None:
+    """Пороги, по которым платформа собирает инфоповоды из сообщений.
+
+    Похожесть текстов и минимум авторов/сообщений — то же самое, что раньше
+    было зашито в коде константами. Настройка применяется к СЛЕДУЮЩИМ
+    загрузкам: инфоповоды считаются один раз при импорте, а не пересчитываются
+    на лету, поэтому смена порога не трогает уже сохранённые периоды.
+    """
+    current = story_build_settings_from_project_settings(project_settings)
+    with st.expander("Что платформа считает инфоповодом", expanded=False):
+        st.caption(
+            "Настройка применяется к следующим загрузкам. Уже сохранённые "
+            "периоды не пересчитываются: чтобы применить новые пороги к "
+            "прошлому периоду, загрузите тот же файл повторно."
+        )
+        with st.form(f"story_build_{project_id}"):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                min_authors = st.number_input(
+                    "Минимум авторов в инфоповоде",
+                    min_value=1,
+                    max_value=20,
+                    value=int(current["min_authors"]),
+                    help=(
+                        "Инфоповод — это когда об одном пишут разные люди. "
+                        "При 3 рассылка одного магазина в список не попадёт."
+                    ),
+                )
+            with c2:
+                min_messages = st.number_input(
+                    "Минимум сообщений в инфоповоде",
+                    min_value=1,
+                    max_value=20,
+                    value=int(current["min_messages"]),
+                    help=(
+                        "Одиночная публикация, которую никто не подхватил, "
+                        "инфоповодом не считается."
+                    ),
+                )
+            with c3:
+                similarity = st.slider(
+                    "Насколько похожими должны быть тексты",
+                    0.20,
+                    0.95,
+                    float(current["similarity"]),
+                    0.05,
+                    help=(
+                        "Ниже — платформа смелее склеивает разные публикации в "
+                        "один сюжет, выше — оставляет их раздельно. Работает на "
+                        "выгрузках Brand Analytics, где часть сюжетов платформа "
+                        "достраивает сама. Это не тот же порог, что «Похожесть» "
+                        "в форме загрузки ниже: тот отвечает за кластеризацию "
+                        "выгрузок без готовых сюжетов."
+                    ),
+                )
+            if st.form_submit_button("Сохранить пороги"):
+                updated = with_story_build(
+                    project_settings,
+                    {
+                        "similarity": similarity,
+                        "min_authors": int(min_authors),
+                        "min_messages": int(min_messages),
+                    },
+                )
+                try:
+                    update_project(project_id, settings=updated)
+                    clear_platform_caches(project_id)
+                    st.success("Пороги сохранены.")
+                    st.rerun()
+                except Exception as exc:  # noqa: BLE001 — ошибка видна пользователю
+                    st.warning(f"Не удалось сохранить: {exc}")
+
+
+def render_upload_page(
+    project_id: str,
+    role: str,
+    work_dir: str,
+    project_settings: dict[str, Any] | None = None,
+) -> None:
     st.header("Загрузка файла")
     if role_rank(role) < role_rank("editor"):
         st.info("Для загрузки файлов нужен доступ редактора или владельца.")
         return
 
     render_tag_hierarchy_block(project_id)
+    render_story_build_settings(project_id, project_settings)
 
     with st.form("upload_form"):
         period_name = st.text_input(

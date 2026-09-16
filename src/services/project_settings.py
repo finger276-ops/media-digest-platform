@@ -20,6 +20,7 @@ from .dashboard_config import (
     DEFAULT_CHART_LABEL_SETTINGS,
     DEFAULT_DASHBOARD_VIEW_SETTINGS,
     DEFAULT_REPORT_BRANDING,
+    DEFAULT_STORY_BUILD_SETTINGS,
     LEGACY_PROFILE_ALIASES,
 )
 
@@ -87,6 +88,58 @@ def dashboard_view_settings_from_project_settings(
     else:
         result["event_title_merge"] = min(0.95, max(0.4, merge_value))
     return result
+
+
+def story_build_settings_from_project_settings(
+    settings: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Пороги сборки инфоповодов: похожесть текстов, минимум авторов/сообщений.
+
+    Как и у всех конвертеров в этом модуле, мусор во входе не роняет функцию —
+    он молча заменяется значением по умолчанию.
+    """
+    raw = {}
+    if isinstance(settings, dict):
+        raw = settings.get("story_build") or {}
+    if not isinstance(raw, dict):
+        raw = {}
+    result = dict(DEFAULT_STORY_BUILD_SETTINGS)
+
+    try:
+        similarity = float(raw.get("similarity", result["similarity"]))
+    except (TypeError, ValueError):
+        similarity = float(result["similarity"])
+    # Нижний зажим — не 0: при similarity=0 сравнение "похожесть >= порог" в
+    # story_recovery верно для любой пары текстов, и весь корпус схлопывается
+    # в один сюжет.
+    result["similarity"] = min(0.95, max(0.2, similarity))
+
+    for key in ("min_authors", "min_messages"):
+        try:
+            value = int(float(raw.get(key, result[key])))
+        except (TypeError, ValueError):
+            value = int(result[key])
+        # Верхний потолок защищает от опечатки вроде "300": такое значение не
+        # "ужесточает" планку, а отключает сборку сюжетов насовсем — min_messages
+        # в recover_stories отсекает не только маленькие кластеры, но и весь
+        # остаток целиком, если тот меньше порога.
+        result[key] = max(1, min(50, value))
+
+    return result
+
+
+def with_story_build(
+    settings: dict[str, Any] | None, values: dict[str, Any]
+) -> dict[str, Any]:
+    """Настройки проекта с заменённым ключом story_build — остальное на месте.
+
+    settings — свободный JSON-столбец без валидации на уровне базы: запись
+    settings={'story_build': {...}} вместо dict(current)+ключ стёрла бы
+    брендирование, соперников бренда и всё остальное разом.
+    """
+    updated = dict(settings or {})
+    updated["story_build"] = dict(values or {})
+    return updated
 
 
 def report_branding_from_project_settings(

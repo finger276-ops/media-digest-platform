@@ -35,6 +35,7 @@ from services.ru_text import tokenize_ru, top_keywords, top_phrases
 from services.story_recovery import (
     DEFAULT_MIN_AUTHORS as DEFAULT_MIN_EVENT_AUTHORS,
     DEFAULT_MIN_MESSAGES as DEFAULT_MIN_EVENT_MESSAGES,
+    DEFAULT_SIMILARITY as DEFAULT_STORY_SIMILARITY,
     RESIDUAL_STORY_TITLE,
     is_residual_title,
     recover_stories,
@@ -2007,6 +2008,10 @@ def build_processed_tables(
     event_gap_hours: float = 3.0,
     event_window_hours: float = 16.0,
     embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+    *,
+    story_similarity: float = DEFAULT_STORY_SIMILARITY,
+    story_min_authors: int = DEFAULT_MIN_EVENT_AUTHORS,
+    story_min_messages: int = DEFAULT_MIN_EVENT_MESSAGES,
 ) -> dict:
     """Build all generated dashboard tables from a raw dataframe and return manifest."""
     output = Path(output)
@@ -2022,7 +2027,12 @@ def build_processed_tables(
         # остальное платформа сваливала в один псевдоповод «Без сюжета», который
         # перевешивал любой настоящий инфоповод. Досчитываем сюжеты до сборки
         # обсуждений: дальше по конвейеру событие собирается именно по ним.
-        recovered = recover_stories(messages)
+        recovered = recover_stories(
+            messages,
+            min_authors=story_min_authors,
+            min_messages=story_min_messages,
+            similarity=story_similarity,
+        )
         messages["source_main_topic"] = recovered["story"]
         messages["story_origin"] = recovered["story_origin"]
         # Сюжет из выгрузки авторитетнее любого досчёта, поэтому список тем
@@ -2095,7 +2105,12 @@ def build_processed_tables(
         # выгрузка Медиалогии за один день давала 1212 «инфоповодов» на 2234
         # сообщения, три четверти из них — из одного сообщения.
         all_labels = apply_event_quality_gate(
-            all_labels, all_discussions, messages, discussion_messages
+            all_labels,
+            all_discussions,
+            messages,
+            discussion_messages,
+            min_messages=story_min_messages,
+            min_authors=story_min_authors,
         )
         events, event_discussions = make_events(all_discussions, all_labels)
         cluster_method_used = cluster_method
@@ -2128,6 +2143,9 @@ def build_processed_tables(
         "similarity_threshold": similarity_threshold,
         "event_gap_hours": event_gap_hours,
         "event_window_hours": event_window_hours,
+        "story_similarity": story_similarity,
+        "story_min_authors": story_min_authors,
+        "story_min_messages": story_min_messages,
         "paths": paths,
     }
     write_manifest(output, manifest)
@@ -2170,6 +2188,10 @@ def run_preprocess_from_dataframe(
     event_gap_hours: float = 3.0,
     event_window_hours: float = 16.0,
     embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+    *,
+    story_similarity: float = DEFAULT_STORY_SIMILARITY,
+    story_min_authors: int = DEFAULT_MIN_EVENT_AUTHORS,
+    story_min_messages: int = DEFAULT_MIN_EVENT_MESSAGES,
 ) -> dict:
     """Generate tables from an already loaded dataframe. Usable for combining uploads."""
     return build_processed_tables(
@@ -2182,6 +2204,9 @@ def run_preprocess_from_dataframe(
         event_gap_hours=event_gap_hours,
         event_window_hours=event_window_hours,
         embedding_model=embedding_model,
+        story_similarity=story_similarity,
+        story_min_authors=story_min_authors,
+        story_min_messages=story_min_messages,
     )
 
 
