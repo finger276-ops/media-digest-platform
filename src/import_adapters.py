@@ -533,6 +533,34 @@ def _normalize_bool_text(value: object) -> str:
     return str(value).strip() if value is not None else ""
 
 
+# Собственные поля Brand Analytics, которые тегами не являются никогда.
+#
+# Позиция маркера «Обработано» не фиксирована: в xlsx-выгрузке RUFLEX после него
+# шли только теги, а в csv-выгрузке того же периода за ним оказались «Место» и
+# «Адрес» — география публикации. Без этого списка они попадали в статистику
+# тегов как теги проекта, и заказчик видел в одном ряду с «Docke» и «Кровля»
+# ярлыки «Руфлекс» и «Россия, Московская область».
+#
+# Список, а не проверка формы значений. У настоящих колонок-тегов ячейка
+# содержит имя самой колонки — в обеих выгрузках RUFLEX это выполняется ровно
+# в 100% случаев, а у «Места» и «Адреса» ровно в 0%. Соблазнительно сделать
+# правилом именно это, но проект, где Brand Analytics пишет в такую ячейку «да»
+# вместо названия, потерял бы разом все теги. Молча потерять тег хуже, чем
+# показать лишнюю колонку.
+BRAND_ANALYTICS_FIELD_COLUMNS = frozenset(
+    {
+        "дата", "время", "hash сообщения", "id сообщения", "заголовок", "текст",
+        "источник", "url", "тип источника", "тип сообщения", "сюжет", "автор",
+        "url автора", "тип автора", "место публикации", "url места публикации",
+        "пол", "возраст", "аудитория", "комментариев", "комментарии",
+        "цитируемость сми", "репостов", "репосты", "лайков", "лайки",
+        "вовлеченность", "просмотры", "просмотров", "оценка", "дублей",
+        "аудитория сми", "тональность", "роль объекта", "агрессия", "страна",
+        "регион", "город", "место", "адрес", "язык", "wom", "обработано",
+    }
+)
+
+
 def _brand_analytics_tag_columns(df: pd.DataFrame) -> list[str]:
     """Return Brand Analytics tag columns located after the `Обработано` marker.
 
@@ -540,6 +568,10 @@ def _brand_analytics_tag_columns(df: pd.DataFrame) -> list[str]:
     the service column `Обработано`. In those columns a non-empty cell usually
     contains the tag label itself. These columns are essential for topic
     grouping and analytics in non-taxi projects.
+
+    Порядок колонок различается между xlsx и csv одной и той же выгрузки,
+    поэтому за маркером могут оказаться и собственные поля системы — их
+    отсеивает BRAND_ANALYTICS_FIELD_COLUMNS.
     """
     if df is None or df.empty:
         return []
@@ -559,6 +591,8 @@ def _brand_analytics_tag_columns(df: pd.DataFrame) -> list[str]:
         label = _clean_col_name(col)
         key = label.lower().replace("ё", "е")
         if not label or key in seen or key.startswith("unnamed"):
+            continue
+        if key in BRAND_ANALYTICS_FIELD_COLUMNS:
             continue
         values = (
             df[col].fillna("").astype(str).str.strip()

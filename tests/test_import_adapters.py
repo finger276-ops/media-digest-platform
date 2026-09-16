@@ -450,6 +450,59 @@ check(
     f"{plain_shape.loc[0, 'Заголовок']!r}, {plain_shape.loc[0, 'Тип площадки']!r}",
 )
 
+print("13. Собственные поля Brand Analytics не становятся тегами")
+# Позиция маркера «Обработано» не фиксирована. В xlsx-выгрузке RUFLEX за август
+# после него шли только теги, а в csv-выгрузке того же периода за ним оказались
+# «Место» и «Адрес» — география публикации. Без отсева заказчик видел бы в
+# статистике тегов «Россия, Московская область» рядом с «Docke».
+tag_layout = pd.DataFrame(
+    [
+        {
+            "Дата": "24.04.2026",
+            "Текст": "Сообщение",
+            "Hash сообщения": "abc",
+            "ID сообщения": "1",
+            "Источник": "vk.com",
+            "Url": "https://vk.com/1",
+            "Тип источника": "Соцсети",
+            "Обработано": "Да",
+            "Место": "Руфлекс",
+            "Адрес": "Россия, Московская область",
+            "Язык": "Русский",
+            "Docke": "Docke",
+            "Кровля": "Кровля",
+        }
+    ]
+)
+found = _brand_analytics_tag_columns(tag_layout)
+check("теги проекта найдены", found == ["Docke", "Кровля"], str(found))
+check("«Место» не попало в теги", "Место" not in found, str(found))
+check("«Адрес» не попал в теги", "Адрес" not in found, str(found))
+check("«Язык» не попал в теги", "Язык" not in found, str(found))
+
+canon_tags = canonicalize_table(tag_layout)
+check(
+    "в каноне тоже только теги проекта",
+    str(canon_tags.loc[0, "source_tag_columns"]) == "Docke|Кровля",
+    str(canon_tags.loc[0, "source_tag_columns"]),
+)
+check(
+    "география не уехала в отдельную колонку канона",
+    "Адрес" not in canon_tags.columns,
+    str([c for c in canon_tags.columns if c in {"Место", "Адрес"}]),
+)
+
+# Порядок колонок между форматами различается — набор тегов меняться не должен.
+reordered = tag_layout[
+    ["Дата", "ID сообщения", "Hash сообщения", "Текст", "Источник", "Url",
+     "Тип источника", "Обработано", "Docke", "Кровля", "Место", "Адрес", "Язык"]
+]
+check(
+    "перестановка колонок не меняет набор тегов",
+    _brand_analytics_tag_columns(reordered) == ["Docke", "Кровля"],
+    str(_brand_analytics_tag_columns(reordered)),
+)
+
 print()
 if failures:
     print(f"ПРОВАЛЕНО: {len(failures)} → {failures}")
