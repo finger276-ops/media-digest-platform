@@ -447,14 +447,44 @@ def render_metric_settings(
 # ---------------------------------------------------------------------------
 
 
+def render_category_source_notice(
+    benchmark: dict[str, Any] | None, brand_map: dict[str, list[str]]
+) -> None:
+    """Сказать, откуда взялась категория для SOV и ReachScore.
+
+    Источников два, и загруженная выгрузка главнее разметки. Без этой подписи
+    аналитик, который только что разметил бренды, видел бы прежние числа и не
+    понимал, почему разметка ничего не изменила: её перебивает выгрузка,
+    загруженная когда-то раньше.
+    """
+    if not benchmark:
+        return
+    brands = benchmark.get("brands") or []
+    if str(benchmark.get("source") or "") == "project_tags":
+        own = ", ".join(benchmark.get("own_brands") or []) or "—"
+        rivals = len(brands) - len(benchmark.get("own_brands") or [])
+        st.caption(
+            f"Категория взята из тегов выгрузки: свои — {own}; "
+            f"конкурентов — {rivals}."
+        )
+        return
+    note = f"Категория взята из загруженной выгрузки: брендов — {len(brands)}."
+    if brand_map.get("own") or brand_map.get("competitors"):
+        note += (
+            " Разметка тегов при этом не используется: загруженная выгрузка "
+            "полнее и потому главнее."
+        )
+    st.caption(note)
+
+
 def render_category_upload(
     project_id: str, periods: pd.DataFrame, period_ids: list[str], role_can_edit: bool
 ) -> None:
-    st.subheader("Выгрузка по категории")
     st.caption(
-        "SOV и ReachScore сравнивают бренд с конкурентами, поэтому им нужна выгрузка "
-        "по всей категории. Платформа сохранит только агрегаты по брендам — "
-        "сообщения конкурентов в базу не попадают."
+        "Если конкурентов нет в выгрузке проекта — например, тема мониторинга "
+        "настроена только на свой бренд, — их можно принести отдельной "
+        "выгрузкой по всей категории. Платформа сохранит только агрегаты по "
+        "брендам: сообщения конкурентов в базу не попадают."
     )
 
     try:
@@ -474,7 +504,10 @@ def render_category_upload(
                 match = periods[periods["period_id"].astype(str) == str(period_id)]
                 if not match.empty:
                     label = str(match.iloc[0].get("period_name") or period_id)
-            with st.expander(f"Категория за период «{label}»", expanded=False):
+            # Рамка, а не раскрывашка: весь блок теперь сам лежит в
+            # раскрывашке, а вложенные Streamlit не допускает.
+            with st.container(border=True):
+                st.markdown(f"**Категория за период «{label}»**")
                 frame = pd.DataFrame(record.get("brands") or [])
                 if not frame.empty:
                     view = frame.rename(
@@ -657,6 +690,7 @@ def render_brand_metrics_page(
     cards = compute_brand_metrics(messages, benchmark=benchmark, settings=settings)
 
     render_metric_cards(cards)
+    render_category_source_notice(benchmark, brand_map)
     render_metric_conclusions(
         project_id, cards, selected_period_ids, role_can_edit=role_can_edit
     )
@@ -669,5 +703,10 @@ def render_brand_metrics_page(
         # проверить цифру нужно, заказчику — нет.
         render_metric_details(cards)
         render_metric_settings(project_id, project_settings, settings)
-    st.divider()
-    render_category_upload(project_id, periods, selected_period_ids, role_can_edit)
+        # Запасной путь, а не основной: у большинства проектов конкуренты уже
+        # размечены тегами в самой выгрузке. Развёрнутым этот блок занимал
+        # экран под задачу, которая возникает редко.
+        with st.expander("Выгрузка по категории отдельным файлом", expanded=False):
+            render_category_upload(
+                project_id, periods, selected_period_ids, role_can_edit
+            )
