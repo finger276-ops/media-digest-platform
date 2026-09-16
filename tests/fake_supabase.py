@@ -120,9 +120,44 @@ class Table:
         return Query(self.db, self.name, "delete")
 
 
+class FakeBucket:
+    """Хранилище файлов: логотип проекта, исходники выгрузок."""
+
+    def __init__(self, files: dict[str, bytes]):
+        self.files = files
+
+    def download(self, path: str) -> bytes:
+        try:
+            return self.files[str(path)]
+        except KeyError as exc:
+            raise FileNotFoundError(f"нет файла {path!r} в хранилище") from exc
+
+    def upload(self, path: str, data, file_options=None):
+        self.files[str(path)] = bytes(data)
+        return {"path": str(path)}
+
+    def remove(self, paths):
+        for path in paths if isinstance(paths, (list, tuple)) else [paths]:
+            self.files.pop(str(path), None)
+        return []
+
+    def get_public_url(self, path: str) -> str:
+        return f"https://test.storage/{path}"
+
+
+class FakeStorage:
+    def __init__(self, files: dict[str, bytes]):
+        self.files = files
+
+    def from_(self, bucket: str) -> FakeBucket:
+        return FakeBucket(self.files)
+
+
 class FakeClient:
     def __init__(self):
         self.db = {}
+        self.files: dict[str, bytes] = {}
+        self.storage = FakeStorage(self.files)
 
     def table(self, name):
         return Table(self.db, name)

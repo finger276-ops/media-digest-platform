@@ -120,6 +120,15 @@ if st is not None:
         ):
             return store.list_manual(project_id, table_name=table_name)
 
+    # Логотип проекта рисуется в шапке на каждой перерисовке страницы, а лежит
+    # в Storage. Без кеша это сетевой запрос на каждое нажатие кнопки. Срок
+    # длинный: логотип меняют раз в жизни проекта, а смена сбрасывает кеш
+    # версией настроек.
+    @st.cache_data(ttl=3600, show_spinner=False, max_entries=8)
+    def _cached_storage_file(storage_path: str, version: int) -> bytes:
+        with perf_block("store.download_storage_file"):
+            return store.download_storage_file(storage_path)
+
     @st.cache_data(ttl=120, show_spinner=False, max_entries=16)
     def _cached_get_manual(
         project_id: str, row_key: str, version: int
@@ -170,6 +179,23 @@ def load_table(project_id: str, period_ids: list[str], table_name: str) -> pd.Da
     return _cached_load_table(
         str(project_id), key, str(table_name), cache_version(project_id, "data")
     )
+
+
+def load_storage_file(storage_path: str, project_id: str | None = None) -> bytes:
+    """Файл из Storage с кешем — для логотипа в шапке проекта.
+
+    Без кеша шапка ходила бы в сеть при каждой перерисовке страницы, то есть
+    на каждое нажатие кнопки в любом разделе.
+    """
+    path = str(storage_path or "").strip()
+    if not path:
+        return b""
+    if st is None:
+        return store.download_storage_file(path)
+    try:
+        return _cached_storage_file(path, cache_version(project_id, "settings"))
+    except Exception:  # noqa: BLE001 — картинка не стоит падения страницы
+        return b""
 
 
 def list_projects(include_inactive: bool = False) -> pd.DataFrame:

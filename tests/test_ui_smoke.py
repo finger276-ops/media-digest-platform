@@ -25,12 +25,28 @@ CLIENT = FakeClient()
 store.get_supabase_client = lambda: CLIENT
 
 now = datetime.now(timezone.utc).isoformat()
+# Однопиксельный PNG: содержимое не важно, важно что шапка его покажет.
+LOGO_PATH = "branding/tn_project/logo.png"
+CLIENT.files[LOGO_PATH] = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06"
+    b"\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05"
+    b"\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+)
+
 CLIENT.db["platform_projects"] = [
     {
         "project_id": "tn_project",
         "project_name": "ТЕХНОНИКОЛЬ",
         "status": "active",
-        "settings": {},
+        # Логотип в шапке — тот же файл, что уходит в отчёт: один логотип на
+        # проект, загружается в настройках.
+        "settings": {
+            "report_branding": {
+                "logo_storage_path": LOGO_PATH,
+                "logo_filename": "logo.png",
+                "logo_mime_type": "image/png",
+            }
+        },
         "created_at": now,
         "updated_at": now,
     }
@@ -333,6 +349,10 @@ check(
     "Нейтрал" in metric_labels,
     str(metric_labels[:8]),
 )
+# Логотип проекта делает рабочее поле брендированным. Берётся тот же файл, что
+# уходит в отчёт, — чтобы на экране и в присланном заказчику документе был один
+# и тот же знак.
+check("логотип проекта в шапке", len(at.image) > 0, f"изображений на странице: {len(at.image)}")
 view_controls = [str(c.label) for c in at.checkbox]
 check(
     "настройки вида спрятаны в панель «Вид», а не в поток страницы",

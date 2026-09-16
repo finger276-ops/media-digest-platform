@@ -28,6 +28,7 @@ from services.cached_store import (
     delete_project,
     save_report_logo_to_storage,
     download_storage_file,
+    load_storage_file,
     delete_storage_file,
     clear_platform_caches,
     cache_version,
@@ -291,6 +292,24 @@ def normalize_text(value: Any) -> str:
 
 
 LOGGER = logging.getLogger("platform.app")
+
+
+def project_logo_bytes(project_id: str, branding: dict[str, Any] | None) -> bytes:
+    """Логотип проекта для шапки — тот же файл, что уходит в отчёт.
+
+    Логотип не обязателен, и его отсутствие не повод ронять страницу: шапка
+    просто остаётся без картинки. Ссылка на внешний адрес в шапку не идёт —
+    страница не должна ждать чужой сервер при каждой перерисовке; для отчёта
+    такая ссылка по-прежнему работает.
+    """
+    storage_path = str((branding or {}).get("logo_storage_path") or "").strip()
+    if not storage_path:
+        return b""
+    try:
+        return load_storage_file(storage_path, project_id)
+    except Exception:  # noqa: BLE001 — картинка не стоит падения страницы
+        LOGGER.warning("Не удалось загрузить логотип проекта %s", project_id)
+        return b""
 
 
 def render_section_safely(title: str, render, *args, _details: bool = False, **kwargs) -> bool:
@@ -571,14 +590,26 @@ def main() -> None:
     else:
         head_left, head_right = st.container(), None
     with head_left:
-        st.markdown(f"### {project_name}")
-        # Профиль алгоритма — техническая деталь, клиенту он ничего не говорит.
-        head_parts = (
-            [page, period_label]
-            if hide_technical
-            else [profile_label, page, period_label]
-        )
-        st.caption(" · ".join(x for x in head_parts if x))
+        # Логотип берётся тот же, что уходит в отчёт: один логотип на проект,
+        # загружается в настройках. Два разных неминуемо разошлись бы, а
+        # заказчик увидел бы на экране одно, в присланном файле другое.
+        logo = project_logo_bytes(project_id, report_branding)
+        if logo:
+            logo_col, name_col = st.columns([1, 6], vertical_alignment="center")
+            with logo_col:
+                st.image(logo, width=110)
+            name_box = name_col
+        else:
+            name_box = st.container()
+        with name_box:
+            st.markdown(f"### {project_name}")
+            # Профиль алгоритма — техническая деталь, клиенту он ничего не говорит.
+            head_parts = (
+                [page, period_label]
+                if hide_technical
+                else [profile_label, page, period_label]
+            )
+            st.caption(" · ".join(x for x in head_parts if x))
 
     # Заголовки, которые аналитик запретил склеивать автоматически.
     blocked_merge_titles = blocked_title_merges(manual_state)
