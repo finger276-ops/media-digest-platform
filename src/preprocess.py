@@ -728,6 +728,7 @@ def normalize_messages(
         "Тип": "message_type",
         "Ссылка": "message_link",
         "Сообщение": "message_raw",
+        "Заголовок": "title",
         "Автораспознанный текст": "recognized_raw",
         "text_clean": "text_clean",
         "text_source": "text_source",
