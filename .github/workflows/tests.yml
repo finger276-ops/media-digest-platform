@@ -41,6 +41,9 @@ jobs:
       - name: Обработка выгрузки (микротемы, заголовки, сборка таблиц)
         run: python tests/test_preprocess.py
 
+      - name: Контракт распила preprocess.py (ре-экспорт, отсутствие циклов)
+        run: python tests/test_preprocess_split.py
+
       - name: Инструмент нагрузочного прогона (генератор синтетики, измеритель)
         run: python tests/test_loadtest_pipeline.py
 
