@@ -33,6 +33,8 @@ from services.event_titles import normalize_event_title
 from services.message_kinds import classify_kinds
 from services.ru_text import tokenize_ru, top_keywords, top_phrases
 from services.story_recovery import (
+    DEFAULT_MIN_AUTHORS as DEFAULT_MIN_EVENT_AUTHORS,
+    DEFAULT_MIN_MESSAGES as DEFAULT_MIN_EVENT_MESSAGES,
     RESIDUAL_STORY_TITLE,
     is_residual_title,
     recover_stories,
@@ -1200,10 +1202,24 @@ def make_discussions(
             if text:
                 rep_messages.append(text[:300])
 
+        # Заголовок обсуждения — материал для названия инфоповода. Без него
+        # название собирается из тега, и список превращается в «пари», «пари»,
+        # «винлайн»: у Медиалогии сюжетов нет, а теги повторяются на десятках
+        # не связанных между собой публикаций.
+        titles = [
+            normalize_spaces(value)
+            for value in group.get("title", pd.Series(dtype=str)).fillna("").astype(str)
+            if normalize_spaces(value)
+        ]
+        discussion_title = (
+            Counter(titles).most_common(1)[0][0] if titles else ""
+        )
+
         rows.append(
             {
                 "discussion_id": did,
                 "discussion_source": group["discussion_source"].iloc[0],
+                "title": discussion_title,
                 "start_date": group["datetime"].min(),
                 "end_date": group["datetime"].max(),
                 "chat_id": (
@@ -1714,19 +1730,90 @@ def make_events_from_source_stories(
     return events, event_discussions
 
 
+RESIDUAL_CLUSTER_LABEL = -1
+
+
+def apply_event_quality_gate(
+    labels: pd.Series,
+    discussions: pd.DataFrame,
+    messages: pd.DataFrame,
+    discussion_messages: pd.DataFrame,
+    *,
+    min_messages: int = DEFAULT_MIN_EVENT_MESSAGES,
+    min_authors: int = DEFAULT_MIN_EVENT_AUTHORS,
+) -> pd.Series:
+    """Слить в остаточную корзину кластеры, которые инфоповодом не являются.
+
+    Планка та же, что у восстановления сюжетов Brand Analytics: инфоповод — это
+    когда о чём-то пишут разные люди, а не когда один автор опубликовал что-то
+    один раз. Без неё выгрузка Медиалогии за один день давала 1212 «инфоповодов»
+    на 2234 сообщения, 72% из них — из единственного сообщения. Списком на
+    тысячу строк пользоваться нельзя.
+
+    Авторы считаются по сообщениям, а не суммированием author_count обсуждений:
+    один и тот же автор в двух обсуждениях кластера — всё ещё один автор.
+    """
+    if labels is None or len(labels) == 0:
+        return labels
+
+    discussion_to_label = pd.Series(
+        list(labels), index=list(discussions.loc[labels.index, "discussion_id"])
+    )
+    link = discussion_messages.copy()
+    link["_label"] = link["discussion_id"].map(discussion_to_label)
+    link = link[link["_label"].notna()]
+    if link.empty:
+        return labels
+
+    author_column = "author" if "author" in messages.columns else None
+    if author_column:
+        authors = messages.set_index("message_id")[author_column].astype(str).str.strip()
+        link["_author"] = link["message_id"].map(authors).fillna("")
+    else:
+        link["_author"] = ""
+
+    stats = link.groupby("_label").agg(
+        messages=("message_id", "nunique"),
+        authors=("_author", lambda s: s[s != ""].nunique()),
+    )
+    # Автор не указан ни у кого — судить по авторам нечем, остаётся объём.
+    if int(stats["authors"].sum()) == 0:
+        weak = stats.index[stats["messages"] < min_messages]
+    else:
+        weak = stats.index[
+            (stats["messages"] < min_messages) | (stats["authors"] < min_authors)
+        ]
+    if not len(weak):
+        return labels
+    return labels.where(~labels.isin(set(weak)), RESIDUAL_CLUSTER_LABEL)
+
+
 def make_events(
     discussions: pd.DataFrame,
     labels: pd.Series,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     d = discussions.copy()
     d["cluster_label"] = labels.values
-    d["event_id"] = d["cluster_label"].apply(lambda x: f"e_{int(x):05d}")
+    d["event_id"] = d["cluster_label"].apply(
+        lambda x: "e_residual" if int(x) == RESIDUAL_CLUSTER_LABEL else f"e_{int(x):05d}"
+    )
 
     event_discussions = d[["event_id", "discussion_id"]].copy()
 
     rows = []
     for event_id, group in d.groupby("event_id", sort=True):
+        is_residual = event_id == "e_residual"
         tag = main_tag(group["main_tags"])
+        # Самый частый заголовок кластера. Если публикации кластера озаглавлены
+        # по-разному, берётся повторяющийся: он и описывает общий сюжет.
+        cluster_titles = [
+            normalize_spaces(value)
+            for value in group.get("title", pd.Series(dtype=str)).fillna("").astype(str)
+            if normalize_spaces(value)
+        ]
+        cluster_title = (
+            Counter(cluster_titles).most_common(1)[0][0] if cluster_titles else ""
+        )
         keywords = top_keywords(
             group["discussion_text"].fillna("").astype(str), top_n=7
         )
@@ -1792,14 +1879,22 @@ def make_events(
         rows.append(
             {
                 "event_id": event_id,
-                "event_title": build_title(
-                    tag,
-                    keywords,
-                    all_tags,
-                    microtopic=microtopic,
-                    phrases=phrases,
-                    source_main_topic=source_main_topic,
-                    source_topics="; ".join(source_topic_values),
+                "event_title": (
+                    RESIDUAL_STORY_TITLE
+                    if is_residual
+                    else build_title(
+                        tag,
+                        keywords,
+                        all_tags,
+                        microtopic=microtopic,
+                        phrases=phrases,
+                        # Заголовок публикации — готовая формулировка события и
+                        # потому лучше тега: тег повторяется на десятках не
+                        # связанных публикаций, и список превращается в «пари»,
+                        # «пари», «винлайн».
+                        source_main_topic=source_main_topic or cluster_title,
+                        source_topics="; ".join(source_topic_values),
+                    )
                 ),
                 "event_summary": summarize_event(
                     group,
@@ -1827,10 +1922,7 @@ def make_events(
                 "importance_score": round(float(importance_score), 2),
                 "status": "новый",
                 "is_hidden": False,
-                # В этом пути каждое событие собрано кластеризацией, остаточной
-                # корзины не возникает — но колонка нужна, чтобы схема таблицы
-                # не зависела от системы-источника.
-                "is_residual": False,
+                "is_residual": is_residual,
             }
         )
 
@@ -1840,8 +1932,12 @@ def make_events(
     # make_events_from_source_stories выше уже защищён так же.
     events = pd.DataFrame(rows)
     if not events.empty:
+        # Остаточная корзина сортируется последней, а не по важности: в ней
+        # сотни сообщений, и вес у неё закономерно наибольший — но это объём
+        # мешка, а не значимость события.
         events = events.sort_values(
-            ["importance_score", "message_count"], ascending=False
+            ["is_residual", "importance_score", "message_count"],
+            ascending=[True, False, False],
         )
     return events, event_discussions
 
@@ -1960,6 +2056,12 @@ def build_processed_tables(
             all_discussions = clusterable
             all_labels = labels
 
+        # Планка качества та же, что у сюжетов Brand Analytics: без неё
+        # выгрузка Медиалогии за один день давала 1212 «инфоповодов» на 2234
+        # сообщения, три четверти из них — из одного сообщения.
+        all_labels = apply_event_quality_gate(
+            all_labels, all_discussions, messages, discussion_messages
+        )
         events, event_discussions = make_events(all_discussions, all_labels)
         cluster_method_used = cluster_method
 

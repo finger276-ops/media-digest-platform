@@ -201,6 +201,91 @@ except IngestError as exc:
 except Exception as exc:  # noqa: BLE001
     check("пустая выгрузка отклонена ожидаемой ошибкой", False, f"{type(exc).__name__}: {exc}")
 
+print("Планка качества для алгоритмической сборки инфоповодов")
+# У выгрузок без разметки сюжетов (Медиалогия, универсальный формат) поводы
+# собираются кластеризацией. Без планки выгрузка за один день давала 1212
+# «инфоповодов» на 2234 сообщения, три четверти из них — из одного сообщения.
+from preprocess import RESIDUAL_CLUSTER_LABEL, apply_event_quality_gate  # noqa: E402
+
+gate_messages = pd.DataFrame(
+    [
+        {"message_id": "m1", "author": "Иван"},
+        {"message_id": "m2", "author": "Пётр"},
+        {"message_id": "m3", "author": "Анна"},
+        {"message_id": "m4", "author": "Иван"},
+        {"message_id": "m5", "author": "Иван"},
+        {"message_id": "m6", "author": "Иван"},
+        {"message_id": "m7", "author": "Мария"},
+    ]
+)
+gate_discussions = pd.DataFrame(
+    [{"discussion_id": f"d{i}"} for i in range(1, 6)]
+)
+gate_links = pd.DataFrame(
+    [
+        # Кластер 0: три сообщения, три автора — настоящий инфоповод.
+        {"discussion_id": "d1", "message_id": "m1"},
+        {"discussion_id": "d1", "message_id": "m2"},
+        {"discussion_id": "d2", "message_id": "m3"},
+        # Кластер 1: три сообщения, но все от одного автора — это рассылка.
+        {"discussion_id": "d3", "message_id": "m4"},
+        {"discussion_id": "d3", "message_id": "m5"},
+        {"discussion_id": "d4", "message_id": "m6"},
+        # Кластер 2: одно сообщение.
+        {"discussion_id": "d5", "message_id": "m7"},
+    ]
+)
+gate_labels = pd.Series([0, 0, 1, 1, 2], index=gate_discussions.index)
+gated = apply_event_quality_gate(
+    gate_labels, gate_discussions, gate_messages, gate_links,
+    min_messages=2, min_authors=3,
+)
+check(
+    "кластер с тремя авторами остался инфоповодом",
+    list(gated.iloc[:2]) == [0, 0],
+    str(list(gated)),
+)
+check(
+    "одноавторская рассылка ушла в остаток",
+    list(gated.iloc[2:4]) == [RESIDUAL_CLUSTER_LABEL] * 2,
+    str(list(gated)),
+)
+check(
+    "одиночное сообщение ушло в остаток",
+    gated.iloc[4] == RESIDUAL_CLUSTER_LABEL,
+    str(list(gated)),
+)
+
+# Выгрузка без авторов не должна лишиться всех поводов разом: судить по
+# авторам там нечем, остаётся объём.
+anon_messages = pd.DataFrame([{"message_id": f"m{i}", "author": ""} for i in range(1, 4)])
+anon_links = pd.DataFrame(
+    [
+        {"discussion_id": "d1", "message_id": "m1"},
+        {"discussion_id": "d1", "message_id": "m2"},
+        {"discussion_id": "d2", "message_id": "m3"},
+    ]
+)
+anon_labels = pd.Series([0, 1], index=[0, 1])
+anon_gated = apply_event_quality_gate(
+    anon_labels,
+    pd.DataFrame([{"discussion_id": "d1"}, {"discussion_id": "d2"}]),
+    anon_messages,
+    anon_links,
+    min_messages=2,
+    min_authors=3,
+)
+check(
+    "без авторов порог считается по числу сообщений",
+    list(anon_gated) == [0, RESIDUAL_CLUSTER_LABEL],
+    str(list(anon_gated)),
+)
+check(
+    "пустой вход не падает",
+    len(apply_event_quality_gate(pd.Series(dtype=int), pd.DataFrame(),
+                                 pd.DataFrame(), pd.DataFrame())) == 0,
+)
+
 print()
 if failures:
     print(f"ПРОВАЛЕНО: {len(failures)} → {failures}")

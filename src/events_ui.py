@@ -29,8 +29,48 @@ from services.metrics_compute import (
     sentiment_counts,
 )
 from services.roles import role_rank
+from services.story_recovery import (
+    ORIGIN_CLUSTERED,
+    ORIGIN_INHERITED,
+    ORIGIN_SOURCE,
+)
 from services.tag_compute import split_pipe_values
 from messages_ui import render_message_list
+
+
+def render_assembly_notice(messages: pd.DataFrame) -> None:
+    """Предупредить, что инфоповоды собраны машиной и требуют проверки.
+
+    Часть поводов приходит размеченными из системы мониторинга, часть платформа
+    досчитывает сама: наследует по совпадению публикации и группирует похожие.
+    У выгрузок без разметки сюжетов — Медиалогия, универсальный формат — весь
+    список собран автоматически.
+
+    Автоматика ошибается предсказуемо: склеивает разное, дробит одно, называет
+    повод первой попавшейся формулировкой. Аналитик это правит здесь же, но
+    сначала должен знать, что правка нужна.
+    """
+    origins: dict[str, int] = {}
+    if isinstance(messages, pd.DataFrame) and "story_origin" in messages.columns:
+        counts = messages["story_origin"].fillna("").astype(str).value_counts()
+        origins = {str(k): int(v) for k, v in counts.items()}
+
+    from_source = origins.get(ORIGIN_SOURCE, 0)
+    assembled = origins.get(ORIGIN_INHERITED, 0) + origins.get(ORIGIN_CLUSTERED, 0)
+
+    st.info(
+        "**Инфоповоды собраны автоматически и требуют проверки аналитика.** "
+        "Перед отправкой заказчику просмотрите список: названия, состав и "
+        "важность правятся вручную — переименовать, объединить или скрыть "
+        "инфоповод можно в блоке правки под таблицей."
+    )
+    if from_source or assembled:
+        parts = []
+        if from_source:
+            parts.append(f"из разметки системы мониторинга — {format_int(from_source)}")
+        if assembled:
+            parts.append(f"собрано платформой — {format_int(assembled)}")
+        st.caption("Сообщений: " + ", ".join(parts) + ".")
 
 
 def render_residual_events(
@@ -424,6 +464,7 @@ def render_events(
     manual_state: dict[str, Any],
 ) -> None:
     st.subheader("Инфоповоды")
+    render_assembly_notice(messages)
     can_edit = role_rank(role) >= role_rank("editor")
 
     if can_edit:
