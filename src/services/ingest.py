@@ -88,9 +88,17 @@ def algorithm_params(params: dict[str, Any] | None) -> dict[str, float]:
 
 
 def read_canonical_bytes(
-    file_bytes: bytes, filename: str, source_system: str = "auto"
+    file_bytes: bytes,
+    filename: str,
+    source_system: str = "auto",
+    report: dict[str, Any] | None = None,
 ) -> pd.DataFrame:
-    """Прочитать выгрузку из байтов и привести к каноническому виду платформы."""
+    """Прочитать выгрузку из байтов и привести к каноническому виду платформы.
+
+    Если передать `report`, в него попадёт сводка разбора: сколько колонок
+    распознано, какие остались непонятыми и что пришлось выправить. Нужна при
+    ручной загрузке, чтобы чужой шаблон был виден сразу, а не через месяцы.
+    """
     if not file_bytes:
         raise IngestError("Пустой файл выгрузки.")
     suffix = safe_suffix(filename)
@@ -100,7 +108,9 @@ def read_canonical_bytes(
             tmp.write(file_bytes)
             tmp_path = tmp.name
         return read_source_table(
-            tmp_path, source_system=normalize_source_system(source_system)
+            tmp_path,
+            source_system=normalize_source_system(source_system),
+            report=report,
         )
     except Exception as exc:  # noqa: BLE001 - пробрасываем понятный текст выше
         raise IngestError(

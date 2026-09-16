@@ -35,6 +35,9 @@ jobs:
       - name: Разбор выгрузок (форматы, канонизация, битый xlsx)
         run: python tests/test_import_adapters.py
 
+      - name: Диагностика импорта (что прочитано, что не понято)
+        run: python tests/test_import_report.py
+
       - name: Обработка выгрузки (микротемы, заголовки, сборка таблиц)
         run: python tests/test_preprocess.py
 

@@ -15,7 +15,9 @@ from services.cached_store import (
     update_period_metadata,
 )
 from services.formatting import fmt_period
+from services.import_report import normalization_lines, summarize_import
 from services.ingest import IngestError, process_canonical, read_canonical_bytes
+from services.metrics_compute import format_int
 from services.roles import role_rank
 from noise_filter_ui import render_noise_filter_block
 from tag_hierarchy_ui import render_tag_hierarchy_block
@@ -44,11 +46,68 @@ def render_period_selector(project_id: str) -> tuple[list[str], pd.DataFrame]:
     return selected, periods
 
 
-def read_uploaded_to_canonical(uploaded_file, source_system: str) -> pd.DataFrame:
+def read_uploaded_to_canonical(
+    uploaded_file, source_system: str, report: dict | None = None
+) -> pd.DataFrame:
     """Чтение загруженного файла тем же кодом, что использует автозагрузка."""
     return read_canonical_bytes(
-        uploaded_file.getvalue(), uploaded_file.name, source_system
+        uploaded_file.getvalue(), uploaded_file.name, source_system, report=report
     )
+
+
+def render_import_report(report: dict) -> None:
+    """Показать, что платформа поняла в выгрузке, а что нет.
+
+    Синонимов имён колонок не хватит никогда: у одной системы они различаются
+    между форматами, а у разных систем совпадают редко. Пока платформа молчит о
+    непонятых колонках, потеря обнаруживается случайно и спустя месяцы —
+    аудитория у проектов на Медиалогии была нулевой ровно поэтому.
+    """
+    if not report:
+        return
+
+    unknown = report.get("unrecognized") or []
+    st.caption(summarize_import(report))
+
+    fixes = normalization_lines(report)
+    if fixes:
+        with st.expander("Что выправлено при чтении", expanded=False):
+            st.caption(
+                "Системы мониторинга пишут одно и то же по-разному: HTML-мнемоники "
+                "вместо знаков, пробелы в разрядах чисел, экранированные переводы "
+                "строки. Это приведено к единому виду, данные не изменились."
+            )
+            for line in fixes:
+                st.write(f"• {line}")
+
+    if not unknown:
+        return
+
+    total = sum(int(item["filled"]) for item in unknown)
+    st.warning(
+        f"Не распознано колонок: {len(unknown)} "
+        f"(значений в них: {format_int(total)}). Данные из них в отчёт не попадут."
+    )
+    with st.expander("Какие колонки не распознаны", expanded=True):
+        st.caption(
+            "Если среди них есть нужные — сообщите, какая колонка что означает: "
+            "добавить её в разбор быстрее, чем искать причину расхождений потом."
+        )
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "Колонка": item["column"],
+                        "Заполнено": item["filled"],
+                        "Доля": f"{item['share'] * 100:.0f}%",
+                        "Примеры значений": item["sample"],
+                    }
+                    for item in unknown
+                ]
+            ),
+            hide_index=True,
+            width="stretch",
+        )
 
 
 def render_upload_page(project_id: str, role: str, work_dir: str) -> None:
@@ -108,9 +167,12 @@ def render_upload_page(project_id: str, role: str, work_dir: str) -> None:
         st.error("Дата начала не может быть позже даты окончания.")
         return
 
+    import_report: dict = {}
     with st.spinner("Читаю файл и привожу к единому формату..."):
         try:
-            canonical = read_uploaded_to_canonical(uploaded, source_system)
+            canonical = read_uploaded_to_canonical(
+                uploaded, source_system, report=import_report
+            )
         except Exception as exc:
             st.error("Не удалось прочитать файл.")
             st.info(
@@ -120,6 +182,7 @@ def render_upload_page(project_id: str, role: str, work_dir: str) -> None:
             st.exception(exc)
             return
     st.success(f"Файл прочитан: {len(canonical):,} строк".replace(",", " "))
+    render_import_report(import_report)
     with st.expander("Предпросмотр распознанных колонок", expanded=False):
         st.dataframe(canonical.head(20), width="stretch")
     render_noise_filter_block(canonical)

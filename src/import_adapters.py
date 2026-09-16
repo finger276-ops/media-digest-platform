@@ -14,8 +14,9 @@ import logging
 import re
 import tempfile
 import zipfile
+from contextvars import ContextVar
 from pathlib import Path
-from typing import Iterable, Iterator
+from typing import Any, Iterable, Iterator
 
 import pandas as pd
 
@@ -184,6 +185,12 @@ CANONICAL_COLUMNS = [
     # заметности и портрет автора подробнее, чем Brand Analytics. Обе аудитории
     # сохраняются раздельно: «Аудитория» сводится из них для сопоставимости
     # проектов, но исходные числа теряться не должны.
+    # Hash сообщения у Brand Analytics — устойчивый идентификатор публикации,
+    # который не меняется между выгрузками. «Id сообщения» занят порядковым
+    # номером внутри темы, поэтому хеш до сих пор пропадал: диагностика импорта
+    # его и обнаружила, пометив колонкой со стопроцентным заполнением, которую
+    # платформа не читает.
+    "Хеш сообщения",
     "Аудитория блога",
     "Аудитория автора",
     "Тип блога",
@@ -270,10 +277,14 @@ def _normalize_source_quirks(values: pd.Series) -> pd.Series:
     проекта из одной системы ведут себя по-разному без всякой причины.
     """
     for marker in (EXCEL_CARRIAGE_RETURN, EXCEL_CARRIAGE_RETURN.upper()):
-        if values.str.contains(marker, regex=False, na=False).any():
+        hits = values.str.contains(marker, regex=False, na=False)
+        if hits.any():
+            _note_normalized("excel_cr", int(hits.sum()))
             values = values.str.replace(marker, "", regex=False)
 
-    if values.str.contains("\r", regex=False, na=False).any():
+    carriage = values.str.contains("\r", regex=False, na=False)
+    if carriage.any():
+        _note_normalized("line_endings", int(carriage.sum()))
         values = values.str.replace("\r\n", "\n", regex=False).str.replace(
             "\r", "\n", regex=False
         )
@@ -286,12 +297,16 @@ def _normalize_source_quirks(values: pd.Series) -> pd.Series:
     candidates = spaced & values.str.len().le(MAX_NUMBER_LENGTH)
     if candidates.any():
         values = values.copy()
-        values.loc[candidates] = [
-            value.replace(" ", "").replace(NBSP, "")
-            if GROUPED_NUMBER.match(value)
-            else value
-            for value in values[candidates]
-        ]
+        fixed = 0
+        repaired = []
+        for value in values[candidates]:
+            if GROUPED_NUMBER.match(value):
+                fixed += 1
+                repaired.append(value.replace(" ", "").replace(NBSP, ""))
+            else:
+                repaired.append(value)
+        values.loc[candidates] = repaired
+        _note_normalized("grouped_numbers", fixed)
     return values
 
 
@@ -315,12 +330,19 @@ def _decode_html_entities(values: pd.Series) -> pd.Series:
     if not marked.any():
         return values
     decoded = values.copy()
-    decoded.loc[marked] = [
+    changed = 0
+    replacements = []
+    for value in values[marked]:
         # Неразрывный пробел из &nbsp; заменяется на обычный: как символ он
         # ничем не помогает, зато ломает поиск и сравнение строк.
-        html.unescape(value).replace(" ", " ")
-        for value in values[marked]
-    ]
+        fixed = html.unescape(value).replace(" ", " ")
+        if fixed != value:
+            changed += 1
+        replacements.append(fixed)
+    decoded.loc[marked] = replacements
+    # Считаются изменённые ячейки, а не содержащие амперсанд: «Иванов &
+    # Партнёры» мнемоник не содержит и в отчёт попадать не должен.
+    _note_normalized("html_entities", changed)
     return decoded
 
 
@@ -571,8 +593,63 @@ def first_existing(df: pd.DataFrame, candidates: Iterable[str]) -> pd.Series:
     for candidate in candidates:
         key = candidate.strip().lower()
         if key in lower_map:
+            _note_consumed(lower_map[key])
             return df[lower_map[key]].fillna("").astype(str)
     return pd.Series([""] * len(df), index=df.index, dtype="object")
+
+
+# Какие исходные колонки платформа действительно использовала при разборе.
+#
+# Отчёт строится из того, что произошло, а не из отдельного списка синонимов.
+# Список пришлось бы держать рядом с шестью десятками вызовов first_existing и
+# следить, чтобы он не разошёлся с ними; разошедшийся список врёт, а врущая
+# диагностика хуже отсутствующей.
+_CONSUMED_COLUMNS: ContextVar[set[str] | None] = ContextVar(
+    "import_consumed_columns", default=None
+)
+_NORMALIZED_CELLS: ContextVar[dict[str, int] | None] = ContextVar(
+    "import_normalized_cells", default=None
+)
+
+
+@contextlib.contextmanager
+def _recording_import() -> Iterator[tuple[set[str], dict[str, int]]]:
+    """Собрать, что было прочитано, пока идёт разбор выгрузки.
+
+    Вложенный вызов переиспользует уже открытый сбор. Чистка кадра случается
+    дважды — при чтении файла и при канонизации, — и без этого счётчики
+    выправленных ячеек оказывались нулевыми: к моменту второй чистки чинить
+    было уже нечего.
+    """
+    existing_consumed = _CONSUMED_COLUMNS.get()
+    existing_normalized = _NORMALIZED_CELLS.get()
+    if existing_consumed is not None and existing_normalized is not None:
+        yield existing_consumed, existing_normalized
+        return
+
+    consumed: set[str] = set()
+    normalized: dict[str, int] = {}
+    consumed_token = _CONSUMED_COLUMNS.set(consumed)
+    normalized_token = _NORMALIZED_CELLS.set(normalized)
+    try:
+        yield consumed, normalized
+    finally:
+        _CONSUMED_COLUMNS.reset(consumed_token)
+        _NORMALIZED_CELLS.reset(normalized_token)
+
+
+def _note_consumed(column: object) -> None:
+    consumed = _CONSUMED_COLUMNS.get()
+    if consumed is not None:
+        consumed.add(str(column))
+
+
+def _note_normalized(kind: str, count: int) -> None:
+    if count <= 0:
+        return
+    normalized = _NORMALIZED_CELLS.get()
+    if normalized is not None:
+        normalized[kind] = normalized.get(kind, 0) + int(count)
 
 
 def _coalesce(df: pd.DataFrame, candidates: Iterable[str]) -> pd.Series:
@@ -591,6 +668,7 @@ def _coalesce(df: pd.DataFrame, candidates: Iterable[str]) -> pd.Series:
         if column is None:
             continue
         values = df[column].fillna("").astype(str)
+        _note_consumed(column)
         result = values if result is None else result.where(result.str.strip() != "", values)
         if result.str.strip().ne("").all():
             break
@@ -742,9 +820,52 @@ def _brand_analytics_tag_columns(df: pd.DataFrame) -> list[str]:
 
 
 def canonicalize_table(
-    raw: pd.DataFrame, source_file: str = "", source_system: str = "auto"
+    raw: pd.DataFrame,
+    source_file: str = "",
+    source_system: str = "auto",
+    report: dict[str, Any] | None = None,
 ) -> pd.DataFrame:
-    df = _clean_dataframe(raw)
+    """Привести выгрузку к каноническому виду платформы.
+
+    Если передать `report`, в него попадёт сводка разбора: сколько колонок
+    распознано, какие остались непонятыми и что пришлось выправить в тексте.
+    Считается попутно, второго прохода по данным не требует.
+    """
+    with _recording_import() as (consumed, normalized):
+        # Чистка идёт здесь, а не внутри: она же считает выправленные ячейки,
+        # и второй прогон удвоил бы счётчики отчёта.
+        df = _clean_dataframe(raw)
+        result = _canonicalize_cleaned(
+            df, source_file=source_file, source_system=source_system
+        )
+        if report is not None:
+            from services.import_report import build_import_report
+
+            detected = (
+                detect_source_system(df)
+                if source_system in {"", "auto", None}
+                else str(source_system)
+            )
+            report.update(
+                build_import_report(
+                    df,
+                    consumed=consumed,
+                    normalized=normalized,
+                    detected_system=detected,
+                    tag_columns=(
+                        _brand_analytics_tag_columns(df)
+                        if detected == "brand_analytics"
+                        else []
+                    ),
+                )
+            )
+    return result
+
+
+def _canonicalize_cleaned(
+    df: pd.DataFrame, source_file: str = "", source_system: str = "auto"
+) -> pd.DataFrame:
+    """Сама канонизация. Кадр приходит уже вычищенным."""
     detected = (
         detect_source_system(df)
         if source_system in {"", "auto", None}
@@ -869,6 +990,9 @@ def canonicalize_table(
     # Поля Медиалогии. Обе аудитории сохраняются как есть: сводная «Аудитория»
     # выше собрана из них, но подмена исходных чисел одним сводным была бы
     # потерей — у площадки и у автора это разные величины.
+    out["Хеш сообщения"] = first_existing(
+        df, ["Хеш сообщения", "Hash сообщения", "Hash", "hash"]
+    )
     out["Аудитория блога"] = first_existing(df, ["Аудитория блога"])
     out["Аудитория автора"] = first_existing(df, ["Аудитория автора"])
     out["Тип блога"] = first_existing(df, ["Тип блога", "Тип сообщества"])
@@ -1005,15 +1129,23 @@ def canonicalize_table(
 
 
 def read_source_table(
-    path: str | Path, source_system: str = "auto", sheet_name: str | int | None = None
+    path: str | Path,
+    source_system: str = "auto",
+    sheet_name: str | int | None = None,
+    report: dict[str, Any] | None = None,
 ) -> pd.DataFrame:
     path = Path(path)
     suffix = path.suffix.lower()
-    if suffix in {".xlsx", ".xls", ".xlsm"}:
-        raw = _read_excel_any(path, sheet_name=sheet_name)
-    else:
-        raw = _read_csv_any(path)
-    return canonicalize_table(raw, source_file=str(path), source_system=source_system)
+    # Сбор открывается до чтения файла: выправление ячеек происходит уже там,
+    # и без этого счётчики отчёта не увидели бы ничего.
+    with _recording_import():
+        if suffix in {".xlsx", ".xls", ".xlsm"}:
+            raw = _read_excel_any(path, sheet_name=sheet_name)
+        else:
+            raw = _read_csv_any(path)
+        return canonicalize_table(
+            raw, source_file=str(path), source_system=source_system, report=report
+        )
 
 
 def get_excel_sheet_names(path: str | Path) -> list[str]:
