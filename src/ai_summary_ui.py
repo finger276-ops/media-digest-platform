@@ -43,9 +43,11 @@ from services.ai_summary import (
 )
 from services.brand_metrics import compute_brand_metrics, merge_settings
 from services.cached_store import (
+    ManualEditConflict,
     clear_platform_caches,
     delete_manual,
     get_manual,
+    get_manual_version,
     save_manual,
     update_project,
 )
@@ -389,11 +391,21 @@ def _render_generated_block(project_id: str, kind: str, period_ids: list[str]) -
     st.divider()
     st.markdown(f"**{KIND_TITLES[kind]}**")
     current = str((draft or saved or {}).get("text") or "")
+    storage_key = ai_text_storage_key(kind, period_ids)
+    widget_key = f"ai_text_{kind}_{project_id}"
+    # Версия замораживается при первом показе поля: пока редактор правит
+    # текст, кеш с TTL может подтянуть чужое сохранение, и запись затёрла бы
+    # его без предупреждения.
+    versions_key = f"manual_versions::{widget_key}"
+    if widget_key not in st.session_state or versions_key not in st.session_state:
+        st.session_state[versions_key] = get_manual_version(
+            project_id, storage_key, "ai_texts"
+        )
     edited = st.text_area(
         "Текст",
         value=current,
         height=260,
-        key=f"ai_text_{kind}_{project_id}",
+        key=widget_key,
         label_visibility="collapsed",
     )
 
@@ -404,12 +416,27 @@ def _render_generated_block(project_id: str, kind: str, period_ids: list[str]) -
         ):
             payload = dict(draft or saved or {})
             payload.update({"text": edited, "kind": kind, "period_ids": period_ids})
-            save_manual(
-                project_id, "ai_texts", ai_text_storage_key(kind, period_ids), payload
-            )
-            st.session_state.pop(f"ai_draft_{kind}_{project_id}", None)
-            st.success("Сохранено. Текст виден в своём разделе дашборда.")
-            st.rerun()
+            try:
+                save_manual(
+                    project_id,
+                    "ai_texts",
+                    storage_key,
+                    payload,
+                    expected_updated_at=st.session_state.get(versions_key),
+                )
+            except ManualEditConflict:
+                st.error(
+                    "Этот текст только что сохранил другой редактор — запись "
+                    "отменена, чтобы не затереть его версию. Ваш текст остался "
+                    "в поле; повторное сохранение запишет его поверх."
+                )
+                clear_platform_caches(project_id)
+                st.session_state.pop(versions_key, None)
+            else:
+                st.session_state.pop(versions_key, None)
+                st.session_state.pop(f"ai_draft_{kind}_{project_id}", None)
+                st.success("Сохранено. Текст виден в своём разделе дашборда.")
+                st.rerun()
     with columns[1]:
         if kind == KIND_SUMMARY and st.button(
             "Сделать саммари периода",

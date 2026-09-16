@@ -13,7 +13,14 @@ import streamlit as st
 from ai_summary_ui import render_ai_summary_panel
 from client_insights_ui import build_client_insights_summary
 from report_export_ui import render_summary_export_buttons
-from services.cached_store import delete_manual, get_manual, save_manual
+from services.cached_store import (
+    ManualEditConflict,
+    clear_platform_caches,
+    delete_manual,
+    get_manual,
+    get_manual_version,
+    save_manual,
+)
 from services.metrics_compute import overview_metrics
 from services.period_comparison import selected_period_label
 from services.roles import role_rank
@@ -157,24 +164,49 @@ def render_period_summary(
 
     if role_rank(role) >= role_rank("editor"):
         with st.expander("Редактировать саммари", expanded=False):
+            # Версия замораживается при первом показе поля: пока редактор
+            # пишет, кеш с TTL может подтянуть чужую правку, и сохранение
+            # затёрло бы её без предупреждения.
+            widget_key = f"summary_{key}"
+            versions_key = f"manual_versions::{widget_key}"
+            if (
+                widget_key not in st.session_state
+                or versions_key not in st.session_state
+            ):
+                st.session_state[versions_key] = get_manual_version(
+                    project_id, key, "summaries"
+                )
             edited = st.text_area(
-                "Текст саммари", value=summary_text, height=220, key=f"summary_{key}"
+                "Текст саммари", value=summary_text, height=220, key=widget_key
             )
             c1, c2 = st.columns(2)
             with c1:
                 if st.button("Сохранить саммари", key=f"save_{key}"):
-                    save_manual(
-                        project_id,
-                        "summaries",
-                        key,
-                        {
-                            "summary": edited,
-                            "period_ids": period_ids,
-                            "profile": profile,
-                        },
-                    )
-                    st.success("Саммари сохранено.")
-                    st.rerun()
+                    try:
+                        save_manual(
+                            project_id,
+                            "summaries",
+                            key,
+                            {
+                                "summary": edited,
+                                "period_ids": period_ids,
+                                "profile": profile,
+                            },
+                            expected_updated_at=st.session_state.get(versions_key),
+                        )
+                    except ManualEditConflict:
+                        st.error(
+                            "Саммари только что изменил другой редактор — "
+                            "сохранение отменено, чтобы не затереть его текст. "
+                            "Ваш текст остался в поле; повторное сохранение "
+                            "запишет его поверх."
+                        )
+                        clear_platform_caches(project_id)
+                        st.session_state.pop(versions_key, None)
+                    else:
+                        st.session_state.pop(versions_key, None)
+                        st.success("Саммари сохранено.")
+                        st.rerun()
             with c2:
                 if st.button("Вернуть автоматическое", key=f"auto_{key}"):
                     delete_manual(project_id, key)

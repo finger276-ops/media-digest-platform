@@ -34,13 +34,19 @@ from metric_cards_ui import (
 )
 from services.brand_metrics import metric_direction
 from services.cached_store import (
+    ManualEditConflict,
     cache_version,
     clear_platform_caches,
     load_table,
     update_project,
 )
 from services.ingest import IngestError, read_canonical_bytes
-from services.metric_notes import load_notes, period_key, save_note
+from services.metric_notes import (
+    load_note_versions,
+    load_notes,
+    period_key,
+    save_note,
+)
 from services.period_comparison import ordered_period_ids, previous_period_id
 from services.project_settings import category_brands_from_project_settings
 
@@ -233,11 +239,19 @@ def render_metric_conclusions(
         "Столбец «Вывод» заполняется вручную: что метрика означает для бренда. "
         "Текст сохраняется для выбранного периода и попадает в выгрузку."
     )
+    editor_key = f"metric_notes_{project_id}_{period_key(period_ids)}"
+    # Версии выводов замораживаются при первом показе таблицы: пока аналитик
+    # пишет, кеш с TTL может подтянуть чужую правку, и проверка версии при
+    # сохранении сравнила бы «свежее со свежим», пропустив перезапись.
+    versions_key = f"manual_versions::{editor_key}"
+    if editor_key not in st.session_state or versions_key not in st.session_state:
+        st.session_state[versions_key] = load_note_versions(project_id, period_ids)
+    versions = st.session_state[versions_key]
     edited = st.data_editor(
         table,
         width="stretch",
         hide_index=True,
-        key=f"metric_notes_{project_id}_{period_key(period_ids)}",
+        key=editor_key,
         column_config={
             "Вывод": st.column_config.TextColumn(
                 "Вывод аналитика",
@@ -252,17 +266,44 @@ def render_metric_conclusions(
     # на каждой перерисовке, и запись всех строк подряд поднимала бы восемь
     # обращений к базе на каждое нажатие в любом месте страницы.
     changed = 0
+    conflict = False
     for _, row in edited.iterrows():
         code = str(row.get("Метрика") or "").strip()
         new_note = str(row.get("Вывод") or "").strip()
         if not code or new_note == str(notes.get(code, "") or "").strip():
             continue
         try:
-            save_note(project_id, period_ids, code, new_note)
+            save_note(
+                project_id,
+                period_ids,
+                code,
+                new_note,
+                expected_updated_at=versions.get(code),
+            )
             changed += 1
+        except ManualEditConflict:
+            conflict = True
         except Exception:  # noqa: BLE001 — вывод не стоит падения раздела
             st.warning(f"Не удалось сохранить вывод по метрике {code}.")
-    if changed:
+    if conflict:
+        st.error(
+            "Вывод только что изменил другой редактор — сохранение отменено, "
+            "чтобы не затереть его текст. Таблица показывает свежую версию "
+            "после обновления."
+        )
+        clear_platform_caches(project_id)
+        st.session_state.pop(versions_key, None)
+        # Несохранённый текст остался бы в состоянии таблицы и ушёл бы в базу
+        # на следующей перерисовке — уже без предупреждения.
+        try:
+            st.session_state.pop(editor_key, None)
+        except Exception:  # noqa: BLE001 — сброс виджета не стоит падения
+            pass
+    elif changed:
+        # Свои сохранения сдвинули версии: замораживаем заново от свежего
+        # снимка, иначе повторная правка той же ячейки увидела бы ложный
+        # конфликт с самим собой.
+        st.session_state.pop(versions_key, None)
         st.caption(f"Сохранено выводов: {changed}.")
 
     _render_metrics_download(edited)

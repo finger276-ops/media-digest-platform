@@ -122,6 +122,25 @@ def get_manual_state(project_id: str) -> dict[str, Any]:
     }
 
 
+def manual_versions(manual_state: dict[str, Any] | None) -> dict[str, Any]:
+    """Версии правок из снимка страницы: row_key → updated_at.
+
+    Нужны для условного сохранения: редактор пишет поверх той версии, которую
+    видел. Отсутствие ключа в словаре означает «записи не было» — при
+    сохранении это ожидание None, и появление строки со стороны считается
+    конфликтом.
+    """
+    df = (manual_state or {}).get("manual_df")
+    if not isinstance(df, pd.DataFrame) or df.empty or "row_key" not in df.columns:
+        return {}
+    versions: dict[str, Any] = {}
+    updated = df["updated_at"] if "updated_at" in df.columns else None
+    for position, row_key in enumerate(df["row_key"].astype(str)):
+        value = updated.iloc[position] if updated is not None else None
+        versions[row_key] = None if pd.isna(value) else value
+    return versions
+
+
 def blocked_title_merges(manual_state: dict[str, Any] | None) -> set[str]:
     """Нормализованные заголовки, которые нельзя склеивать автоматически."""
     raw = (manual_state or {}).get("title_merge_blocks") or set()

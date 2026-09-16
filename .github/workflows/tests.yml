@@ -80,5 +80,8 @@ jobs:
       - name: Границы отказа разделов
         run: python tests/test_section_boundary.py
 
+      - name: Блокировка правок (конфликт двух редакторов)
+        run: python tests/test_manual_conflict.py
+
       - name: Дымовой тест интерфейса
         run: python tests/test_ui_smoke.py

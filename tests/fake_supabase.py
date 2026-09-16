@@ -84,8 +84,11 @@ class Query:
             key = self.on_conflict or (
                 "source_key" if self.table.endswith("sources") else "task_id"
             )
+            # PostgREST принимает составной ключ через запятую
+            # ("project_id,row_key") — совпадать должны все колонки сразу.
+            keys = [k.strip() for k in str(key).split(",") if k.strip()]
             for row in rows:
-                if row.get(key) == self.payload.get(key):
+                if all(row.get(k) == self.payload.get(k) for k in keys):
                     # ON CONFLICT DO UPDATE обновляет только переданные колонки,
                     # остальные (например, started_at с default now()) остаются.
                     row.update(self.payload)

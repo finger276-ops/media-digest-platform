@@ -13,7 +13,13 @@ import streamlit as st
 
 from metric_cards_ui import metric_card, render_metric_row
 
-from services.cached_store import delete_manual, get_manual, save_manual
+from services.cached_store import (
+    ManualEditConflict,
+    clear_platform_caches,
+    delete_manual,
+    get_manual,
+    save_manual,
+)
 from services.event_filter_state import (
     event_series_filter,
     filter_messages_by_selected_event,
@@ -21,7 +27,11 @@ from services.event_filter_state import (
 )
 from services.event_titles import DEFAULT_SIMILARITY, normalize_event_title, preview_merge_levels
 from services.formatting import fmt_date
-from services.manual_moderation import create_manual_event, event_select_options
+from services.manual_moderation import (
+    create_manual_event,
+    event_select_options,
+    manual_versions,
+)
 from services.message_compute import message_link_column, message_text_column
 from services.metrics_compute import (
     format_int,
@@ -42,6 +52,45 @@ from messages_ui import render_message_list
 
 OPEN_COLUMN = "Открыть"
 
+CONFLICT_MESSAGE = (
+    "Эту запись только что изменил другой редактор — сохранение отменено, "
+    "чтобы не затереть его работу. Раздел показывает свежую версию после "
+    "обновления; повторное сохранение запишет ваш текст поверх."
+)
+
+
+def _captured_versions(
+    widget_key: str, manual_state: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Версии правок на момент, когда редактор открыл форму.
+
+    Снимок страницы живёт в кеше с TTL и может незаметно подтянуть чужую
+    правку, пока редактор набирает текст, — тогда проверка версии при
+    сохранении сравнила бы «свежее со свежим» и пропустила перезапись.
+    Поэтому версии замораживаются в session_state вместе с виджетом: пока
+    форма открыта, ожидания не меняются.
+    """
+    store_key = f"manual_versions::{widget_key}"
+    if widget_key not in st.session_state or store_key not in st.session_state:
+        st.session_state[store_key] = manual_versions(manual_state)
+    return st.session_state[store_key]
+
+
+def _forget_captured_versions(widget_key: str) -> None:
+    st.session_state.pop(f"manual_versions::{widget_key}", None)
+
+
+def _on_manual_conflict(project_id: str, widget_key: str | None = None) -> None:
+    """Показать конфликт и сбросить кеши, чтобы перерисовка перечитала базу.
+
+    Замороженные версии тоже сбрасываются: следующее сохранение пойдёт уже от
+    свежей версии — это осознанная перезапись, а не случайная.
+    """
+    st.error(CONFLICT_MESSAGE)
+    clear_platform_caches(project_id)
+    if widget_key:
+        _forget_captured_versions(widget_key)
+
 
 def render_events_table(
     project_id: str,
@@ -49,6 +98,7 @@ def render_events_table(
     events: pd.DataFrame,
     *,
     can_edit: bool,
+    manual_state: dict[str, Any] | None = None,
 ) -> pd.Series | None:
     """Таблица инфоповодов: описание правится прямо здесь.
 
@@ -63,6 +113,10 @@ def render_events_table(
     state_key = f"events_open_row_{project_id}"
     opened = str(st.session_state.get(state_key) or "")
     keys = [str(k) for k in events.get("group_key", pd.Series(dtype=str))]
+    editor_key = f"events_editor_{project_id}"
+    # До создания виджета: версии должны быть заморожены в тот же момент,
+    # когда таблица впервые показана редактору.
+    versions = _captured_versions(editor_key, manual_state) if can_edit else {}
 
     work = show.copy()
     work.insert(0, OPEN_COLUMN, [key == opened for key in keys])
@@ -74,7 +128,7 @@ def render_events_table(
         work,
         hide_index=True,
         width="stretch",
-        key=f"events_editor_{project_id}",
+        key=editor_key,
         column_config={
             OPEN_COLUMN: st.column_config.CheckboxColumn(
                 OPEN_COLUMN, width="small", help="Раскрыть инфоповод под таблицей."
@@ -98,7 +152,9 @@ def render_events_table(
     )
 
     if can_edit:
-        _save_edited_descriptions(project_id, show, edited, events)
+        _save_edited_descriptions(
+            project_id, show, edited, events, versions=versions, editor_key=editor_key
+        )
 
     # Галочек может оказаться несколько: открываем ту, что поставили сейчас.
     checked = [
@@ -121,7 +177,13 @@ def render_events_table(
 
 
 def _save_edited_descriptions(
-    project_id: str, before: pd.DataFrame, after: pd.DataFrame, events: pd.DataFrame
+    project_id: str,
+    before: pd.DataFrame,
+    after: pd.DataFrame,
+    events: pd.DataFrame,
+    *,
+    versions: dict[str, Any],
+    editor_key: str,
 ) -> None:
     """Сохранить изменённые описания.
 
@@ -130,6 +192,7 @@ def _save_edited_descriptions(
     к базе на одно нажатие.
     """
     saved = 0
+    conflict = False
     for position, (old, new) in enumerate(
         zip(before["Описание"].fillna("").astype(str), after["Описание"].fillna("").astype(str))
     ):
@@ -149,11 +212,30 @@ def _save_edited_descriptions(
             payload["event_id"] = event_id
             payload["description"] = new.strip()
             try:
-                save_manual(project_id, "event_edits", row_key, payload)
+                save_manual(
+                    project_id,
+                    "event_edits",
+                    row_key,
+                    payload,
+                    expected_updated_at=versions.get(row_key),
+                )
                 saved += 1
+            except ManualEditConflict:
+                conflict = True
             except Exception:  # noqa: BLE001 — описание не стоит падения раздела
                 st.warning("Не удалось сохранить описание инфоповода.")
+    if conflict:
+        _on_manual_conflict(project_id, editor_key)
+        # Несохранённая правка остаётся в состоянии таблицы и на следующей
+        # перерисовке ушла бы в базу уже без предупреждения — от свежей
+        # версии. Сбрасываем состояние: таблица покажет то, что в базе.
+        try:
+            st.session_state.pop(editor_key, None)
+        except Exception:  # noqa: BLE001 — сброс виджета не стоит падения
+            pass
+        return
     if saved:
+        _forget_captured_versions(editor_key)
         st.rerun()
 
 
@@ -204,6 +286,7 @@ def _residual_messages_table(
     events_agg: pd.DataFrame,
     *,
     can_edit: bool,
+    manual_state: dict[str, Any] | None = None,
 ) -> None:
     """Сообщения вне инфоповодов — с возможностью отнести их к теме.
 
@@ -255,11 +338,13 @@ def _residual_messages_table(
         "Если сообщение относится к одной из тем периода, выберите её в "
         "последнем столбце — сообщение уйдёт в этот инфоповод."
     )
+    editor_key = f"residual_moves_{project_id}"
+    versions = _captured_versions(editor_key, manual_state)
     edited = st.data_editor(
         view,
         hide_index=True,
         width="stretch",
-        key=f"residual_moves_{project_id}",
+        key=editor_key,
         column_config={
             "Ссылка": st.column_config.LinkColumn("Ссылка", display_text="Открыть"),
             "Сообщение": st.column_config.TextColumn("Сообщение", width="large"),
@@ -271,6 +356,7 @@ def _residual_messages_table(
     )
 
     moved = 0
+    conflict = False
     message_ids = [str(x) for x in subset.get("message_id", pd.Series(dtype=str))]
     for position, label in enumerate(edited[MOVE_COLUMN].fillna(MOVE_NONE)):
         target = label_to_event.get(str(label))
@@ -279,17 +365,33 @@ def _residual_messages_table(
         message_id = message_ids[position]
         if not message_id:
             continue
+        row_key = f"message_move::{message_id}"
         try:
             save_manual(
                 project_id,
                 "message_moves",
-                f"message_move::{message_id}",
+                row_key,
                 {"message_id": message_id, "target_event_id": target},
+                # Сообщение видно в списке — значит, в снимке страницы переноса
+                # не было. Если запись уже появилась, его перенёс кто-то другой.
+                expected_updated_at=versions.get(row_key),
             )
             moved += 1
+        except ManualEditConflict:
+            conflict = True
         except Exception:  # noqa: BLE001 — перенос не стоит падения раздела
             st.warning("Не удалось перенести сообщение.")
+    if conflict:
+        _on_manual_conflict(project_id, editor_key)
+        # Иначе выбор в столбце повторил бы сохранение на следующей
+        # перерисовке — уже без предупреждения.
+        try:
+            st.session_state.pop(editor_key, None)
+        except Exception:  # noqa: BLE001 — сброс виджета не стоит падения
+            pass
+        return
     if moved:
+        _forget_captured_versions(editor_key)
         st.success(f"Перенесено сообщений: {moved}.")
         st.rerun()
 
@@ -301,6 +403,7 @@ def render_residual_events(
     events_agg: pd.DataFrame,
     *,
     can_edit: bool = False,
+    manual_state: dict[str, Any] | None = None,
 ) -> None:
     """Показать то, что не собралось в инфоповоды, отдельным блоком.
 
@@ -357,7 +460,11 @@ def render_residual_events(
                     )
                 shown = subset.head(RESIDUAL_MESSAGES_SHOWN)
                 _residual_messages_table(
-                    project_id, shown, events_agg, can_edit=can_edit
+                    project_id,
+                    shown,
+                    events_agg,
+                    can_edit=can_edit,
+                    manual_state=manual_state,
                 )
                 if len(subset) > RESIDUAL_MESSAGES_SHOWN:
                     st.caption(
@@ -681,14 +788,27 @@ def render_title_merge_report(
                             key=f"unmerge_title_{project_id}_{index}_{abs(hash(variant))}",
                             width="stretch",
                         ):
-                            save_manual(
-                                project_id,
-                                "title_merge_blocks",
-                                f"title_merge_block::{normalize_event_title(variant)}",
-                                {"title": variant},
+                            row_key = (
+                                "title_merge_block::"
+                                f"{normalize_event_title(variant)}"
                             )
-                            st.success("Заголовок больше не объединяется.")
-                            st.rerun()
+                            try:
+                                save_manual(
+                                    project_id,
+                                    "title_merge_blocks",
+                                    row_key,
+                                    {"title": variant},
+                                    # Клик мгновенный, формы нет — достаточно
+                                    # версии из снимка страницы.
+                                    expected_updated_at=manual_versions(
+                                        manual_state
+                                    ).get(row_key),
+                                )
+                            except ManualEditConflict:
+                                _on_manual_conflict(project_id)
+                            else:
+                                st.success("Заголовок больше не объединяется.")
+                                st.rerun()
         if len(report) > 40:
             st.caption(f"…и ещё {len(report) - 40} инфоповодов со склейкой.")
 
@@ -849,11 +969,16 @@ def render_events(
         }
     )
     selected_row = render_events_table(
-        project_id, show, filtered_events, can_edit=can_edit
+        project_id, show, filtered_events, can_edit=can_edit, manual_state=manual_state
     )
 
     render_residual_events(
-        project_id, residual_events, messages, filtered_events, can_edit=can_edit
+        project_id,
+        residual_events,
+        messages,
+        filtered_events,
+        can_edit=can_edit,
+        manual_state=manual_state,
     )
 
     if selected_row is None:
@@ -866,10 +991,14 @@ def render_events(
 
     if can_edit:
         with st.expander("Правка выбранного инфоповода", expanded=False):
+            # Версии замораживаются вместе с первым полем формы: пока аналитик
+            # пишет, ожидания не подтянут чужую правку из освежившегося кеша.
+            form_key = f"edit_title_{selected.get('group_key')}"
+            versions = _captured_versions(form_key, manual_state)
             new_title = st.text_input(
                 "Название",
                 value=str(selected.get("title") or ""),
-                key=f"edit_title_{selected.get('group_key')}",
+                key=form_key,
             )
             new_desc = st.text_area(
                 "Описание",
@@ -888,40 +1017,54 @@ def render_events(
                     "Сохранить правки",
                     key=f"save_event_edit_{selected.get('group_key')}",
                 ):
-                    for event_id in selected_ids:
-                        save_manual(
-                            project_id,
-                            "event_edits",
-                            f"event_edit::{event_id}",
-                            {
-                                "event_id": event_id,
-                                "title": new_title,
-                                "description": new_desc,
-                                "tags": new_tags,
-                                "status": "active",
-                            },
-                        )
-                    st.success("Правки сохранены.")
-                    st.rerun()
+                    try:
+                        for event_id in selected_ids:
+                            row_key = f"event_edit::{event_id}"
+                            save_manual(
+                                project_id,
+                                "event_edits",
+                                row_key,
+                                {
+                                    "event_id": event_id,
+                                    "title": new_title,
+                                    "description": new_desc,
+                                    "tags": new_tags,
+                                    "status": "active",
+                                },
+                                expected_updated_at=versions.get(row_key),
+                            )
+                    except ManualEditConflict:
+                        _on_manual_conflict(project_id, form_key)
+                    else:
+                        _forget_captured_versions(form_key)
+                        st.success("Правки сохранены.")
+                        st.rerun()
             with c2:
                 if st.button(
                     "Скрыть инфоповод", key=f"hide_event_{selected.get('group_key')}"
                 ):
-                    for event_id in selected_ids:
-                        save_manual(
-                            project_id,
-                            "event_edits",
-                            f"event_edit::{event_id}",
-                            {
-                                "event_id": event_id,
-                                "title": new_title,
-                                "description": new_desc,
-                                "tags": new_tags,
-                                "status": "hidden",
-                            },
-                        )
-                    st.success("Инфоповод скрыт.")
-                    st.rerun()
+                    try:
+                        for event_id in selected_ids:
+                            row_key = f"event_edit::{event_id}"
+                            save_manual(
+                                project_id,
+                                "event_edits",
+                                row_key,
+                                {
+                                    "event_id": event_id,
+                                    "title": new_title,
+                                    "description": new_desc,
+                                    "tags": new_tags,
+                                    "status": "hidden",
+                                },
+                                expected_updated_at=versions.get(row_key),
+                            )
+                    except ManualEditConflict:
+                        _on_manual_conflict(project_id, form_key)
+                    else:
+                        _forget_captured_versions(form_key)
+                        st.success("Инфоповод скрыт.")
+                        st.rerun()
             with c3:
                 options = event_select_options(
                     events_agg, exclude_event_ids=selected_ids
@@ -937,19 +1080,27 @@ def render_events(
                         "Объединить", key=f"merge_event_{selected.get('group_key')}"
                     ):
                         target_event_id = target[0]
-                        for source_event_id in selected_ids:
-                            if source_event_id != target_event_id:
+                        try:
+                            for source_event_id in selected_ids:
+                                if source_event_id == target_event_id:
+                                    continue
+                                row_key = f"event_merge::{source_event_id}"
                                 save_manual(
                                     project_id,
                                     "event_merges",
-                                    f"event_merge::{source_event_id}",
+                                    row_key,
                                     {
                                         "source_event_id": source_event_id,
                                         "target_event_id": target_event_id,
                                     },
+                                    expected_updated_at=versions.get(row_key),
                                 )
-                        st.success("Инфоповоды объединены.")
-                        st.rerun()
+                        except ManualEditConflict:
+                            _on_manual_conflict(project_id, form_key)
+                        else:
+                            _forget_captured_versions(form_key)
+                            st.success("Инфоповоды объединены.")
+                            st.rerun()
 
     st.caption(
         "Этот же инфоповод сохранен как фильтр для общего раздела «Ключевые сообщения / Вся лента»."

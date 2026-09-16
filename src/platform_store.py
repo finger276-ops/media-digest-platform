@@ -872,19 +872,86 @@ def list_manual(project_id: str, table_name: str | None = None) -> pd.DataFrame:
     return df
 
 
+class ManualEditConflict(RuntimeError):
+    """Строку правки успел изменить другой редактор.
+
+    Возникает при сохранении с проверкой версии: версия записи, которую видел
+    редактор, уже не последняя. Писать поверх нельзя — upsert заменяет payload
+    целиком, и слепая запись молча стёрла бы чужую работу. Вызывающий код
+    показывает конфликт и сбрасывает кеши, чтобы перечитать свежую версию.
+    """
+
+
+# «Версию не проверять» — отдельный сентинел, потому что None занят: None
+# означает «я создаю новую запись, строки в базе быть не должно».
+UNCHECKED_VERSION = object()
+
+
+def same_manual_version(current: Any, expected: Any) -> bool:
+    """Одна ли это версия записи.
+
+    Версия — это updated_at, но представления разные: база отдаёт ISO-строку,
+    снимок страницы после list_manual — pd.Timestamp, отсутствие строки — None.
+    Приведение через to_datetime уравнивает их; отсутствие совпадает только
+    с отсутствием.
+    """
+    cur = pd.to_datetime(current, errors="coerce", utc=True)
+    exp = pd.to_datetime(expected, errors="coerce", utc=True)
+    if pd.isna(cur) or pd.isna(exp):
+        return bool(pd.isna(cur) and pd.isna(exp))
+    return cur == exp
+
+
 def save_manual(
-    project_id: str, table_name: str, row_key: str, payload: dict[str, Any]
-) -> None:
-    get_supabase_client().table("platform_manual_rows").upsert(
+    project_id: str,
+    table_name: str,
+    row_key: str,
+    payload: dict[str, Any],
+    *,
+    expected_updated_at: Any = UNCHECKED_VERSION,
+) -> str:
+    """Сохранить ручную правку; вернуть записанный updated_at.
+
+    С expected_updated_at запись становится условной: она проходит, только
+    если строка в базе всё ещё той версии, которую видел редактор (None —
+    строки быть не должно вовсе). Иначе — ManualEditConflict, и база не
+    меняется. Без параметра — безусловная запись, как раньше: для мест, где
+    правки не соревнуются (создание с уникальным ключом, служебные записи).
+
+    Проверка и запись — два запроса, а не транзакция: PostgREST не умеет
+    сравнить updated_at внутри upsert. Окно гонки сжимается с «минут, пока
+    редактор набирает текст» до миллисекунд между запросами — для двух
+    аналитиков этого достаточно.
+    """
+    client = get_supabase_client()
+    if expected_updated_at is not UNCHECKED_VERSION:
+        rows = (
+            client.table("platform_manual_rows")
+            .select("updated_at")
+            .eq("project_id", project_id)
+            .eq("row_key", row_key)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        current = rows[0].get("updated_at") if rows else None
+        if not same_manual_version(current, expected_updated_at):
+            raise ManualEditConflict(
+                f"Запись {row_key} изменил другой редактор."
+            )
+    written = now_iso()
+    client.table("platform_manual_rows").upsert(
         {
             "project_id": project_id,
             "table_name": table_name,
             "row_key": row_key,
             "payload": payload,
-            "updated_at": now_iso(),
+            "updated_at": written,
         },
         on_conflict="project_id,row_key",
     ).execute()
+    return written
 
 
 def get_manual(project_id: str, row_key: str) -> dict[str, Any] | None:

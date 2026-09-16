@@ -14,7 +14,12 @@ from __future__ import annotations
 
 import pandas as pd
 
-from services.cached_store import get_manual, list_manual, save_manual
+from services.cached_store import (
+    UNCHECKED_VERSION,
+    get_manual,
+    list_manual,
+    save_manual,
+)
 
 TABLE = "brand_metric_notes"
 MAX_NOTE_LENGTH = 2000
@@ -65,8 +70,50 @@ def load_notes(project_id: str, period_ids) -> dict[str, str]:
     return notes
 
 
-def save_note(project_id: str, period_ids, metric_code: str, note: str) -> None:
-    """Сохранить вывод по одной метрике."""
+def load_note_versions(project_id: str, period_ids) -> dict[str, str]:
+    """Версии выводов выбранного периода: код метрики → updated_at.
+
+    В отличие от load_notes, сюда попадают и строки с пустым текстом: запись
+    существует — значит, у неё есть версия, и стёртый вывод тоже защищён от
+    перезаписи вслепую.
+    """
+    key = period_key(period_ids)
+    if not project_id:
+        return {}
+    try:
+        rows = list_manual(project_id, table_name=TABLE)
+    except Exception:  # noqa: BLE001 — раздел работает и без сохранённых выводов
+        return {}
+    if rows is None or not isinstance(rows, pd.DataFrame) or rows.empty:
+        return {}
+
+    versions: dict[str, str] = {}
+    for _, row in rows.iterrows():
+        payload = row.get("payload") or {}
+        if not isinstance(payload, dict):
+            continue
+        if str(payload.get("period_key", "")) != key:
+            continue
+        code = str(payload.get("metric") or "").strip()
+        value = row.get("updated_at")
+        if code and not pd.isna(value):
+            versions[code] = value
+    return versions
+
+
+def save_note(
+    project_id: str,
+    period_ids,
+    metric_code: str,
+    note: str,
+    *,
+    expected_updated_at=UNCHECKED_VERSION,
+) -> None:
+    """Сохранить вывод по одной метрике.
+
+    С expected_updated_at сохранение условное: если вывод успел изменить
+    другой редактор, поднимается ManualEditConflict и запись не происходит.
+    """
     code = str(metric_code or "").strip()
     if not project_id or not code:
         return
@@ -79,6 +126,7 @@ def save_note(project_id: str, period_ids, metric_code: str, note: str) -> None:
             "note": str(note or "").strip()[:MAX_NOTE_LENGTH],
             "period_key": period_key(period_ids),
         },
+        expected_updated_at=expected_updated_at,
     )
 
 

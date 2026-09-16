@@ -13,6 +13,8 @@ import platform_store as store
 from services.perf import perf_block
 
 # Pure re-exports that do not need Streamlit caching.
+ManualEditConflict = store.ManualEditConflict
+UNCHECKED_VERSION = store.UNCHECKED_VERSION
 supabase_configured = store.supabase_configured
 make_period_id = store.make_period_id
 save_uploaded_file_to_storage = store.save_uploaded_file_to_storage
@@ -279,11 +281,43 @@ def delete_project(project_id: str, **kwargs):
 
 
 def save_manual(
-    project_id: str, table_name: str, row_key: str, payload: dict[str, Any]
-) -> None:
+    project_id: str,
+    table_name: str,
+    row_key: str,
+    payload: dict[str, Any],
+    *,
+    expected_updated_at: Any = store.UNCHECKED_VERSION,
+) -> str:
+    # При конфликте версий store бросает ManualEditConflict до записи: база
+    # не менялась, поэтому и кеш не сбрасывается — bump не выполняется.
     with perf_block("store.save_manual", project_id=project_id, table_name=table_name):
-        store.save_manual(project_id, table_name, row_key, payload)
+        written = store.save_manual(
+            project_id,
+            table_name,
+            row_key,
+            payload,
+            expected_updated_at=expected_updated_at,
+        )
     bump_cache(project_id, namespaces=("manual", "data"))
+    return written
+
+
+def get_manual_version(
+    project_id: str, row_key: str, table_name: str | None = None
+):
+    """updated_at строки правки — версия для условного сохранения.
+
+    Читает через кешированный list_manual, то есть отдаёт версию из того же
+    снимка, который видит страница. None — записи нет.
+    """
+    df = list_manual(project_id, table_name)
+    if df is None or df.empty or "row_key" not in df.columns:
+        return None
+    rows = df[df["row_key"].astype(str) == str(row_key)]
+    if rows.empty or "updated_at" not in rows.columns:
+        return None
+    value = rows.iloc[-1]["updated_at"]
+    return None if pd.isna(value) else value
 
 
 def delete_manual(project_id: str, row_key: str) -> None:
