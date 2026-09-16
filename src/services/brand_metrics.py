@@ -29,7 +29,7 @@ from typing import Any, Iterable
 
 import pandas as pd
 
-from services.metrics_compute import numeric_series
+from services.metrics_compute import audience_total, numeric_series
 
 POSITIVE_PATTERN = "позит|positive|полож"
 NEGATIVE_PATTERN = "нег|negative|отриц"
@@ -37,9 +37,12 @@ NEGATIVE_PATTERN = "нег|negative|отриц"
 REACH_COLUMNS = ["views", "Просмотры", "Просмотров", "reach", "Охват"]
 AUDIENCE_COLUMNS = ["audience", "Аудитория"]
 ENGAGEMENT_COLUMNS = ["engagement", "Вовлечённость", "Вовлеченность", "engagement_count"]
-LIKE_COLUMNS = ["likes", "Лайки", "Likes"]
+# Родительный падеж — как эти колонки называет Brand Analytics. Здесь обычно
+# приходит уже канонический кадр, но список синонимов должен совпадать с тем,
+# что понимает импорт: расхождение однажды уже стоило платформе всех лайков.
+LIKE_COLUMNS = ["likes", "Лайки", "Лайков", "Likes"]
 COMMENT_COLUMNS = ["comments", "Комментарии", "Комментариев", "Comments"]
-REPOST_COLUMNS = ["reposts", "Репосты", "Reposts", "Shares"]
+REPOST_COLUMNS = ["reposts", "Репосты", "Репостов", "Reposts", "Shares"]
 
 EVENT_TITLE_COLUMNS = ["event_title", "title", "Сюжет / инфоповод", "Сюжет"]
 
@@ -373,7 +376,9 @@ def compute_er(messages: pd.DataFrame) -> dict[str, Any]:
         return _card("ER", value=None, formula=formula, hint=hint, reason="Нет сообщений за период.")
 
     reactions, source = reaction_series(messages)
-    audience = float(numeric_series(messages, AUDIENCE_COLUMNS).sum())
+    # Площадка считается один раз: иначе знаменатель раздут числом публикаций,
+    # и ER выходит во столько же раз заниженным.
+    audience = float(audience_total(messages))
     total_reactions = float(reactions.sum())
 
     if audience <= 0:

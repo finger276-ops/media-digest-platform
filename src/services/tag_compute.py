@@ -5,7 +5,7 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
-from .metrics_compute import numeric_series
+from .metrics_compute import audience_by_group, numeric_series
 
 AUTO_GENERATED_TAGS_TO_HIDE = {
     "коэффициент",
@@ -171,12 +171,17 @@ def build_tag_statistics_compute(messages: pd.DataFrame) -> pd.DataFrame:
                 if "message_id" in work.columns
                 else ("_tag", "size")
             ),
-            Аудитория=("_audience", "sum"),
             Охват=("_reach", "sum"),
             Вовлеченность=("_engagement", "sum"),
             Негатив=("_negative", "sum"),
         )
         .rename(columns={"_tag": "Тег"})
+    )
+    # Аудитория считается отдельно от остальных: её нельзя складывать по
+    # строкам, площадка должна попасть в тег один раз, сколько бы сообщений
+    # она с этим тегом ни опубликовала.
+    stats["Аудитория"] = (
+        stats["Тег"].map(audience_by_group(work, work["_tag"])).fillna(0)
     )
     for col in ["Сообщений", "Аудитория", "Охват", "Вовлеченность", "Негатив"]:
         if col in stats.columns:

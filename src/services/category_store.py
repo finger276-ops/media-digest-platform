@@ -17,7 +17,11 @@ from typing import Any
 import pandas as pd
 
 from platform_store import get_supabase_client, now_iso
-from services.metrics_compute import numeric_series
+from services.metrics_compute import (
+    audience_by_group,
+    audience_place_key,
+    numeric_series,
+)
 from services.brand_metrics import (
     AUDIENCE_COLUMNS,
     ENGAGEMENT_COLUMNS,
@@ -77,6 +81,13 @@ def aggregate_by_brand_columns(
     audience = numeric_series(table, AUDIENCE_COLUMNS)
     reach = numeric_series(table, REACH_COLUMNS)
     engagement = numeric_series(table, ENGAGEMENT_COLUMNS)
+    # Площадка должна попасть в бренд один раз, сколько бы сообщений о нём
+    # ни опубликовала: у поста и комментариев под ним одна аудитория.
+    place = (
+        table["_audience_place"]
+        if "_audience_place" in table.columns
+        else audience_place_key(table)
+    )
 
     rows = []
     for column in brand_columns:
@@ -85,11 +96,17 @@ def aggregate_by_brand_columns(
         mask = table[column].fillna("").astype(str).str.strip().ne("")
         if not bool(mask.any()):
             continue
+        brand_audience = (
+            pd.DataFrame({"_a": audience[mask].values, "_k": list(place[mask])})
+            .groupby("_k")["_a"]
+            .max()
+            .sum()
+        )
         rows.append(
             {
                 "brand": str(column),
                 "messages": int(mask.sum()),
-                "audience": int(audience[mask].sum()),
+                "audience": int(brand_audience),
                 "reach": int(reach[mask].sum()),
                 "engagement": int(engagement[mask].sum()),
                 "is_own": False,
@@ -119,7 +136,6 @@ def aggregate_by_brand_values(
         work.groupby("_brand")
         .agg(
             messages=("_brand", "size"),
-            audience=("_audience", "sum"),
             reach=("_reach", "sum"),
             engagement=("_engagement", "sum"),
         )
@@ -127,6 +143,10 @@ def aggregate_by_brand_values(
         .rename(columns={"_brand": "brand"})
         .sort_values("messages", ascending=False)
         .head(int(top_n))
+    )
+    # Аудитория — единственная метрика, которую нельзя складывать по строкам.
+    grouped["audience"] = (
+        grouped["brand"].map(audience_by_group(work, work["_brand"])).fillna(0)
     )
     for col in ["messages", "audience", "reach", "engagement"]:
         grouped[col] = grouped[col].astype(int)

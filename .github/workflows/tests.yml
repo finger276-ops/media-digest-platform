@@ -38,6 +38,9 @@ jobs:
       - name: Обработка выгрузки (микротемы, заголовки, сборка таблиц)
         run: python tests/test_preprocess.py
 
+      - name: Аудитория по площадкам, а не по строкам
+        run: python tests/test_audience_metrics.py
+
       - name: Индексы бренда (формулы против примеров из гайда)
         run: python tests/test_brand_metrics.py
 

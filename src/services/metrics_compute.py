@@ -66,6 +66,8 @@ def prepare_dashboard_messages(messages: pd.DataFrame) -> pd.DataFrame:
     work = messages.copy()
     if "_audience" not in work.columns:
         work["_audience"] = numeric_series(work, ["audience", "Аудитория"]).astype(int)
+    if "_audience_place" not in work.columns:
+        work["_audience_place"] = audience_place_key(work)
     if "_reach" not in work.columns:
         work["_reach"] = numeric_series(
             work, ["views", "Просмотры", "Просмотров", "reach", "Охват"]
@@ -95,6 +97,78 @@ def prepare_dashboard_messages(messages: pd.DataFrame) -> pd.DataFrame:
     if "_period_id_str" not in work.columns and "period_id" in work.columns:
         work["_period_id_str"] = work["period_id"].astype(str)
     return work
+
+
+# Аудитория — свойство площадки, а не сообщения: у поста и десяти комментариев
+# под ним одно и то же число подписчиков. Суммирование по строкам считает
+# площадку столько раз, сколько она опубликовала. На выгрузках Brand Analytics
+# это давало завышение в 1,5–2,3 раза против сводки самой системы, и заказчик,
+# держащий в руках отчёт BA, увидел бы у нас вдвое больший охват.
+#
+# Личность площадки несёт её адрес, а не название: названия совпадают у разных
+# сообществ и меняются между периодами. Порядок колонок проверен на выгрузках
+# RUFLEX за июль и август 2026 — воспроизводит число Brand Analytics с точностью
+# 0,02% в обоих месяцах. Идентификаторы chat_id/author_id намеренно не
+# используются: они заполнены всегда, но различают сообщения, а не площадки.
+AUDIENCE_PLACE_COLUMNS = ("chat_profile", "author_profile", "chat_title", "author")
+
+
+def audience_place_key(messages: pd.DataFrame) -> pd.Series:
+    """Ключ площадки для дедупликации аудитории."""
+    index = messages.index
+    key = pd.Series([""] * len(messages), index=index, dtype="object")
+    for column in AUDIENCE_PLACE_COLUMNS:
+        if column not in messages.columns:
+            continue
+        values = messages[column].fillna("").astype(str).str.strip()
+        key = key.where(key != "", values)
+    # Строка, у которой не нашлось ни адреса, ни названия, считается отдельной
+    # площадкой. Слить такие строки в одну — значит занизить аудиторию, а это
+    # хуже, чем не сдедуплицировать: недосчёт объяснить нечем.
+    return key.where(key != "", pd.Series(index.astype(str), index=index))
+
+
+def audience_values(messages: pd.DataFrame) -> pd.Series:
+    """Числовая аудитория сообщений, с опорой на подготовленную колонку."""
+    if "_audience" in messages.columns:
+        return pd.to_numeric(messages["_audience"], errors="coerce").fillna(0)
+    return numeric_series(messages, ["audience", "Аудитория"])
+
+
+def audience_total(messages: pd.DataFrame) -> int:
+    """Суммарная аудитория площадок — каждая площадка учтена один раз."""
+    if messages is None or len(messages) == 0:
+        return 0
+    values = audience_values(messages)
+    if values.empty:
+        return 0
+    key = (
+        messages["_audience_place"]
+        if "_audience_place" in messages.columns
+        else audience_place_key(messages)
+    )
+    frame = pd.DataFrame({"_a": values.values, "_k": list(key)})
+    return int(frame.groupby("_k")["_a"].max().sum())
+
+
+def audience_by_group(messages: pd.DataFrame, group: pd.Series) -> pd.Series:
+    """Аудитория по группам — площадка учтена один раз внутри каждой группы.
+
+    Сумма по группам может превышать общую аудиторию: площадка, попавшая в два
+    тега, честно считается в обоих. Так же устроены и срезы Brand Analytics.
+    """
+    if messages is None or len(messages) == 0:
+        return pd.Series(dtype=float)
+    values = audience_values(messages)
+    key = (
+        messages["_audience_place"]
+        if "_audience_place" in messages.columns
+        else audience_place_key(messages)
+    )
+    frame = pd.DataFrame(
+        {"_g": list(group), "_k": list(key), "_a": values.values}
+    )
+    return frame.groupby(["_g", "_k"])["_a"].max().groupby(level=0).sum()
 
 
 def format_int(value: Any) -> str:
@@ -157,11 +231,7 @@ def overview_metrics(messages: pd.DataFrame) -> dict[str, Any]:
     total_messages = int(len(messages)) if isinstance(messages, pd.DataFrame) else 0
     return {
         "messages": total_messages,
-        "audience": (
-            int(numeric_series(messages, ["audience", "Аудитория"]).sum())
-            if total_messages
-            else 0
-        ),
+        "audience": audience_total(messages) if total_messages else 0,
         "reach": (
             int(
                 numeric_series(
