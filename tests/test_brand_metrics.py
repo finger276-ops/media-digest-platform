@@ -285,6 +285,37 @@ check("собраны только отмеченные бренды", set(brand
 check("неотмеченный тег брендом не стал", "Монтаж" not in set(brands["brand"]), str(list(brands["brand"])))
 own_rows = brands[brands["is_own"]]
 check("свои бренды отмечены оба", set(own_rows["brand"]) == {"Ruflex", "Quiet Tile"}, str(list(own_rows["brand"])))
+# Одна и та же марка приходит в тегах то «Knauf Nord», то «knauf nord».
+# Точное сравнение засчитало бы только выбранное написание, и часть упоминаний
+# бренда молча выпала бы из доли голоса.
+mixed_case = pd.DataFrame(
+    [
+        {"tags": "Knauf Nord", "audience": 100, "views": 10, "engagement": 1,
+         "author": "a", "chat_profile": "https://vk.com/1"},
+        {"tags": "knauf nord", "audience": 100, "views": 10, "engagement": 1,
+         "author": "b", "chat_profile": "https://vk.com/2"},
+        {"tags": "КНАУФ НОРД", "audience": 100, "views": 10, "engagement": 1,
+         "author": "c", "chat_profile": "https://vk.com/3"},
+        {"tags": "Rockwool", "audience": 100, "views": 10, "engagement": 1,
+         "author": "d", "chat_profile": "https://vk.com/4"},
+    ]
+)
+case_brands = category_store.brands_from_messages(mixed_case, ["knauf nord"], ["Rockwool"])
+knauf = case_brands[case_brands["brand"] == "knauf nord"]
+check(
+    "разное написание считается одним брендом",
+    not knauf.empty and int(knauf.iloc[0]["messages"]) == 2,
+    str(case_brands.to_dict("records")),
+)
+check("и остаётся своим", not knauf.empty and bool(knauf.iloc[0]["is_own"]),
+      str(case_brands.to_dict("records")))
+# Кириллическое написание — другой бренд, а не то же слово латиницей.
+check(
+    "кириллица латиницей не подменяется",
+    int(case_brands["messages"].sum()) == 3,
+    str(case_brands.to_dict("records")),
+)
+
 check(
     "сообщение с двумя брендами засчитано обоим",
     int(brands[brands["brand"] == "Docke"].iloc[0]["messages"]) == 2

@@ -162,6 +162,11 @@ def mark_own_brand(brands: pd.DataFrame, own_brand: str) -> pd.DataFrame:
     return work
 
 
+def _brand_key(name: object) -> str:
+    """Ключ бренда для сравнения: без регистра, ё и лишних пробелов."""
+    return " ".join(str(name or "").split()).casefold().replace("ё", "е")
+
+
 def brand_counts_from_tags(messages: pd.DataFrame) -> pd.Series:
     """Сколько сообщений у каждого тега периода.
 
@@ -204,7 +209,15 @@ def brands_from_messages(
     tags = messages["tags"].fillna("").astype(str) if "tags" in messages.columns else None
     if tags is None:
         return pd.DataFrame()
-    tag_sets = tags.map(lambda value: {t.strip() for t in value.split("|") if t.strip()})
+    # Сравнение без учёта регистра и ё: одна и та же марка приходит в тегах то
+    # «Knauf Nord», то «knauf nord», то «ТИСМА» против «Тисма». Точное
+    # сравнение засчитало бы только выбранное написание, и часть упоминаний
+    # бренда молча выпала бы из доли голоса.
+    tag_sets = tags.map(
+        lambda value: {
+            _brand_key(part) for part in value.split("|") if part.strip()
+        }
+    )
 
     audience = numeric_series(messages, AUDIENCE_COLUMNS)
     reach = numeric_series(messages, REACH_COLUMNS)
@@ -215,10 +228,11 @@ def brands_from_messages(
         else audience_place_key(messages)
     )
 
-    own_lower = {x.casefold() for x in own}
+    own_lower = {_brand_key(x) for x in own}
     rows = []
     for name in names:
-        mask = tag_sets.map(lambda values, n=name: n in values)
+        key = _brand_key(name)
+        mask = tag_sets.map(lambda values, k=key: k in values)
         if not bool(mask.any()):
             continue
         # Площадка учитывается один раз на бренд: у поста и комментариев под
@@ -236,7 +250,7 @@ def brands_from_messages(
                 "audience": int(brand_audience),
                 "reach": int(reach[mask].sum()),
                 "engagement": int(engagement[mask].sum()),
-                "is_own": name.casefold() in own_lower,
+                "is_own": key in own_lower,
             }
         )
     if not rows:
@@ -256,14 +270,14 @@ def benchmark_from_messages(
     if not bool(brands["is_own"].any()):
         return None
     own = [str(x) for x in brands.loc[brands["is_own"], "brand"]]
-    found = {str(x).casefold() for x in brands["brand"]}
+    found = {_brand_key(x) for x in brands["brand"]}
     # Отмеченный конкурент, не встретившийся в периоде, выпадает из агрегатов.
     # Если выпали все, метрика должна сказать именно это, а не «конкуренты не
     # отмечены»: человек их отметил и будет искать ошибку не там.
     missing = [
         str(x).strip()
         for x in (competitor_brands or [])
-        if str(x).strip() and str(x).strip().casefold() not in found
+        if str(x).strip() and _brand_key(x) not in found
     ]
     return {
         "own_brand": own[0] if own else "",
