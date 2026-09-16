@@ -355,23 +355,23 @@ def render_metric_details(cards: dict[str, dict[str, Any]]) -> None:
 
 
 def render_metrics_dynamics(
+    project_id: str,
     messages: pd.DataFrame,
     periods: pd.DataFrame,
     period_ids: list[str],
     benchmarks: dict[str, dict[str, Any]],
     settings: dict[str, Any],
 ) -> None:
-    if len(period_ids) < 2:
-        return
-
-    # Хронологический порядок, а не порядок выбора в боковой панели. График
-    # динамики рисует линию между соседними точками, и при выборе «3 апреля,
-    # 1 апреля, 2 апреля» эта линия показывает движение, которого не было.
-    ordered = ordered_period_ids(periods, period_ids)
-    frame = metrics_by_period(
-        messages, ordered, benchmarks=benchmarks, settings=settings
+    all_period_ids = (
+        [str(x) for x in periods["period_id"].tolist()]
+        if not periods.empty and "period_id" in periods.columns
+        else list(period_ids)
     )
-    if frame.empty:
+    # Динамика по умолчанию — только по периодам, выбранным в боковой панели:
+    # так дешевле (не тянет messages периодов, которые аналитик сейчас не
+    # смотрит) и предсказуемее (график не меняется сам по себе от того, что
+    # в проект добавили период). Полную историю можно включить явно — ниже.
+    if len(period_ids) < 2 and len(all_period_ids) < 2:
         return
 
     labels = {}
@@ -380,18 +380,62 @@ def render_metrics_dynamics(
             str(row["period_id"]): str(row.get("period_name") or row["period_id"])
             for _, row in periods.iterrows()
         }
-    frame["Период"] = frame["period_id"].map(lambda pid: labels.get(pid, pid))
-
-    metric_columns = [
-        col for col in frame.columns if col not in {"period_id", "Период"}
-    ]
-    available = [col for col in metric_columns if frame[col].notna().any()]
-    if not available:
-        return
 
     # Динамика нужна не всегда: на экране с карточками и выводами она занимает
     # место, а смотрят её, когда вопрос именно в движении.
     with st.expander("Динамика индексов", expanded=False):
+        use_all_periods = False
+        if len(all_period_ids) > len(period_ids):
+            use_all_periods = st.checkbox(
+                f"Учесть все периоды проекта ({len(all_period_ids)}), а не только "
+                f"выбранные в боковой панели ({len(period_ids)})",
+                value=False,
+                key=f"brand_metrics_chart_all_periods_{project_id}",
+                help=(
+                    "Подгрузит сообщения периодов, которых сейчас нет в боковой "
+                    "панели — первый раз это займёт время, дальше берётся из кеша."
+                ),
+            )
+
+        if use_all_periods:
+            work_messages = messages
+            missing = [pid for pid in all_period_ids if pid not in set(period_ids)]
+            if missing:
+                with st.spinner(f"Загружаю сообщения ещё {len(missing)} периодов..."):
+                    extra = load_table(project_id, missing, "messages")
+                if not extra.empty:
+                    work_messages = pd.concat(
+                        [work_messages, extra], ignore_index=True, sort=False
+                    )
+            active_period_ids = all_period_ids
+        else:
+            work_messages = messages
+            active_period_ids = period_ids
+
+        if len(active_period_ids) < 2:
+            st.caption("Нужно минимум два периода, чтобы построить динамику.")
+            return
+
+        # Хронологический порядок, а не порядок выбора в боковой панели. График
+        # динамики рисует линию между соседними точками, и при выборе «3 апреля,
+        # 1 апреля, 2 апреля» эта линия показывает движение, которого не было.
+        ordered = ordered_period_ids(periods, active_period_ids)
+        frame = metrics_by_period(
+            work_messages, ordered, benchmarks=benchmarks, settings=settings
+        )
+        if frame.empty:
+            st.caption("Недостаточно данных для динамики.")
+            return
+        frame["Период"] = frame["period_id"].map(lambda pid: labels.get(pid, pid))
+
+        metric_columns = [
+            col for col in frame.columns if col not in {"period_id", "Период"}
+        ]
+        available = [col for col in metric_columns if frame[col].notna().any()]
+        if not available:
+            st.caption("Недостаточно данных для динамики.")
+            return
+
         default = (
             [col for col in ["BPI", "NSS", "SES"] if col in available] or available[:3]
         )
@@ -857,7 +901,9 @@ def render_brand_metrics_page(
         project_id, cards, selected_period_ids, role_can_edit=role_can_edit
     )
 
-    render_metrics_dynamics(messages, periods, selected_period_ids, benchmarks, settings)
+    render_metrics_dynamics(
+        project_id, messages, periods, selected_period_ids, benchmarks, settings
+    )
 
     if role_can_edit:
         render_brand_map_settings(project_id, project_settings, messages, brand_map)

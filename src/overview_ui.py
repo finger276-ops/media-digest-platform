@@ -400,9 +400,14 @@ def render_period_comparison_charts(
             ],
         )
         if sentiment_chart_type == "Столбчатая":
+            # 100%-накопленный столбец, а не сгруппированные рядом: три доли
+            # одного периода в сумме дают целое, и композицию читают именно
+            # так — одной полосой, а не тремя соседними разной высоты.
+            # stack="normalize" считает пропорции сам, не полагаясь на то,
+            # что округлённые проценты дадут ровно 100.
             sentiment_bars = (
                 alt.Chart(sentiment_long)
-                .mark_bar(size=18)
+                .mark_bar(size=28)
                 .encode(
                     x=alt.X(
                         "Период:N",
@@ -410,8 +415,16 @@ def render_period_comparison_charts(
                         title="Период",
                         axis=alt.Axis(labelAngle=0, labelLimit=120),
                     ),
-                    xOffset=alt.XOffset("Тональность:N"),
-                    y=alt.Y("Доля, %:Q", title="Доля, %"),
+                    y=alt.Y(
+                        "Доля, %:Q",
+                        title="Доля, %",
+                        stack="normalize",
+                        axis=alt.Axis(format="%"),
+                    ),
+                    order=alt.Order(
+                        "Тональность:N",
+                        sort="ascending",
+                    ),
                     color=alt.Color(
                         "Тональность:N",
                         scale=alt.Scale(

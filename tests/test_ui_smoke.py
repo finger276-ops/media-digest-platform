@@ -3,6 +3,7 @@
 Supabase подменен поддельным клиентом, поэтому тест не ходит в сеть.
 """
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -437,6 +438,46 @@ if period_multiselect:
     check("сравнительная таблица отрисована", bool(at.dataframe))
     metric_deltas = [str(m.delta) for m in at.metric if m.delta]
     check("у метрик есть дельта к предыдущему периоду", bool(metric_deltas), str(metric_deltas)[:200])
+
+    print("2.6. Динамика тональности: 100%-накопленный столбец")
+    sentiment_type_select = [
+        s for s in at.selectbox if str(s.label) == "Вид тональности"
+    ]
+    check("селектор вида тональности найден", bool(sentiment_type_select))
+    if sentiment_type_select:
+        sentiment_type_select[0].set_value("Столбчатая").run()
+        check("выбор вида не роняет раздел", not at.exception, str(at.exception))
+        bar_specs = [
+            json.loads(el.proto.spec)
+            for el in at.get("vega_lite_chart")
+            if getattr(el, "proto", None) is not None
+        ]
+        stacked = [
+            spec
+            for spec in bar_specs
+            if spec.get("mark", {}).get("type") == "bar"
+            and spec.get("encoding", {}).get("y", {}).get("stack") == "normalize"
+        ]
+        check(
+            "хотя бы один столбец нормализован в 100% (доли, а не сгруппированные рядом)",
+            bool(stacked),
+            str([spec.get("mark") for spec in bar_specs])[:300],
+        )
+        if stacked:
+            color_domain = (
+                stacked[0].get("encoding", {}).get("color", {}).get("scale", {}).get("domain")
+            )
+            check(
+                "цвет закреплён за тональностью в фиксированном порядке (Позитив/Нейтрал/Негатив)",
+                color_domain == ["Позитив", "Нейтрал", "Негатив"],
+                str(color_domain),
+            )
+        sentiment_type_select = [
+            s for s in at.selectbox if str(s.label) == "Вид тональности"
+        ]
+        if sentiment_type_select:
+            sentiment_type_select[0].set_value("График").run()
+
     # Возвращаем выбор к одному периоду и на «Обзор» — дальше тест проверяет
     # разделы в исходном однопериодном состоянии.
     period_multiselect = [m for m in at.sidebar.multiselect if str(m.label) == "Периоды"]
@@ -530,6 +571,54 @@ if period_multiselect:
     period_multiselect = [m for m in at.sidebar.multiselect if str(m.label) == "Периоды"]
     period_multiselect[0].set_value([PERIOD_ID]).run()
 
+    print("3.15. Динамика индексов: опциональная подгрузка всех периодов проекта")
+    # В боковой панели выбран один период из двух — чекбокс «все периоды»
+    # должен появиться (тянуть данные лишнего периода без спроса нельзя) и,
+    # при включении, честно посчитать динамику по обоим.
+    open_section("Индексы бренда")
+    check("раздел открылся без исключений", not at.exception, str(at.exception))
+    all_periods_checkbox = [
+        c for c in at.checkbox if "Учесть все периоды проекта" in str(c.label)
+    ]
+    check(
+        "чекбокс появляется, когда выбран не весь проект",
+        len(all_periods_checkbox) == 1,
+        str([str(c.label) for c in at.checkbox]),
+    )
+    if all_periods_checkbox:
+        check(
+            "подпись честно называет числа (2 всего, 1 выбран)",
+            "(2)" in str(all_periods_checkbox[0].label)
+            and "(1)" in str(all_periods_checkbox[0].label),
+            str(all_periods_checkbox[0].label),
+        )
+        all_periods_checkbox[0].set_value(True).run()
+        check(
+            "включение не роняет раздел",
+            not at.exception,
+            str(at.exception),
+        )
+        dynamics_all = [
+            list(d.value["Период"])
+            for d in at.dataframe
+            if "Период" in getattr(d.value, "columns", [])
+        ]
+        check(
+            "динамика теперь по обоим периодам, а не только по выбранному",
+            any(
+                len(rows) >= 2 and "24.04" in str(rows[0]) and "01.05" in str(rows[1])
+                for rows in dynamics_all
+            ),
+            str(dynamics_all)[:220],
+        )
+        # Возвращаем чекбокс в исходное состояние — дальше тест снова
+        # рассчитывает на один выбранный период.
+        all_periods_checkbox = [
+            c for c in at.checkbox if "Учесть все периоды проекта" in str(c.label)
+        ]
+        if all_periods_checkbox:
+            all_periods_checkbox[0].set_value(False).run()
+
 print("3.2. Раздел «Теги»: статистика и карточка тега")
 open_section("Теги")
 check("раздел открылся без исключений", not at.exception, str(at.exception))
@@ -569,6 +658,37 @@ check(
     any("переименовать" in text or "объединить" in text for text in infos),
     str(infos)[:220],
 )
+
+print("3.55. Топ инфоповодов: горизонтальный бар с долей негатива по цвету")
+event_bar_specs = [
+    json.loads(el.proto.spec)
+    for el in at.get("vega_lite_chart")
+    if getattr(el, "proto", None) is not None
+]
+top_events_specs = [
+    spec
+    for spec in event_bar_specs
+    if spec.get("mark", {}).get("type") == "bar"
+    and spec.get("encoding", {}).get("color", {}).get("field") == "Доля негатива"
+]
+check(
+    "график топ-инфоповодов отрисован",
+    bool(top_events_specs),
+    str([spec.get("mark") for spec in event_bar_specs])[:300],
+)
+if top_events_specs:
+    color_scale = top_events_specs[0]["encoding"]["color"].get("scale", {})
+    check(
+        "доля негатива — один оттенок (последовательная шкала), не радуга",
+        color_scale.get("scheme") == "reds",
+        str(color_scale),
+    )
+    check(
+        "домен цвета зафиксирован 0..1 — периоды сравнимы между собой по цвету",
+        color_scale.get("domain") == [0, 1],
+        str(color_scale),
+    )
+
 expanders = [str(e.label) for e in at.expander]
 check(
     "блок со склейкой заголовков на месте",

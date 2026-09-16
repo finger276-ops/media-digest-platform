@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 
@@ -813,6 +814,65 @@ def render_title_merge_report(
             st.caption(f"…и ещё {len(report) - 40} инфоповодов со склейкой.")
 
 
+# Меньше трёх столбцов — график рядом с таблицей на пару строк не даёт
+# ничего, кроме лишнего скролла: сама таблица уже читается с одного взгляда.
+TOP_EVENTS_CHART_MIN_ROWS = 3
+TOP_EVENTS_CHART_MAX_ROWS = 10
+
+
+def _render_top_events_chart(events: pd.DataFrame) -> None:
+    """Топ инфоповодов по важности — горизонтальный бар, цвет — доля негатива.
+
+    Таблица ниже даёт точные числа по каждому инфоповоду, а этот график —
+    ответ на вопрос с одного взгляда: что было главным в периоде и где из
+    этого главного был негатив. Обе величины уже посчитаны в aggregate_events,
+    здесь только отрисовка.
+    """
+    top = events.head(TOP_EVENTS_CHART_MAX_ROWS).copy()
+    if len(top) < TOP_EVENTS_CHART_MIN_ROWS:
+        return
+    top["Сюжет / инфоповод"] = top["title"].astype(str).str.slice(0, 70)
+    top["Сообщений"] = pd.to_numeric(top["message_count"], errors="coerce").fillna(0)
+    top["Источников"] = pd.to_numeric(top["chat_count"], errors="coerce").fillna(0).astype(int)
+    top["Важность"] = pd.to_numeric(top["importance_score"], errors="coerce").fillna(0)
+    top["Доля негатива"] = (
+        pd.to_numeric(top.get("negative_share", 0), errors="coerce").fillna(0)
+    )
+
+    chart = (
+        alt.Chart(top)
+        .mark_bar()
+        .encode(
+            x=alt.X("Важность:Q", title="Важность"),
+            y=alt.Y(
+                "Сюжет / инфоповод:N",
+                sort=alt.EncodingSortField(field="Важность", order="descending"),
+                title=None,
+                axis=alt.Axis(labelLimit=260),
+            ),
+            # Доля негатива — величина, а не категория: один оттенок от
+            # светлого к тёмному, не радуга. Домен зафиксирован 0..1, а не по
+            # данным периода — иначе одинаковая доля в разных периодах
+            # красилась бы разным цветом и графики нельзя было бы сравнивать.
+            color=alt.Color(
+                "Доля негатива:Q",
+                title="Доля негатива",
+                scale=alt.Scale(scheme="reds", domain=[0, 1]),
+                legend=alt.Legend(format=".0%"),
+            ),
+            tooltip=[
+                alt.Tooltip("Сюжет / инфоповод:N", title="Инфоповод"),
+                alt.Tooltip("Сообщений:Q", format=","),
+                alt.Tooltip("Источников:Q"),
+                alt.Tooltip("Доля негатива:Q", format=".0%"),
+                alt.Tooltip("Важность:Q", format=".1f"),
+            ],
+        )
+        .properties(height=alt.Step(28))
+    )
+    st.altair_chart(chart, width="stretch")
+
+
 def render_events(
     project_id: str,
     role: str,
@@ -928,6 +988,8 @@ def render_events(
             project_id, residual_events, messages, filtered_events, can_edit=False
         )
         return
+
+    _render_top_events_chart(filtered_events)
 
     table = filtered_events.copy()
     table["Период"] = table.apply(
