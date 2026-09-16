@@ -28,6 +28,7 @@ from services.brand_metrics import (
 from services.cached_store import clear_platform_caches, update_project
 from services.ingest import IngestError, read_canonical_bytes
 from services.metric_notes import load_notes, period_key, save_note
+from services.project_settings import category_brands_from_project_settings
 
 METRIC_ORDER = ["BPI", "NSS", "SES", "TVS", "SOV", "ReachScore", "ER", "ERR"]
 
@@ -278,6 +279,89 @@ def render_metrics_dynamics(
 # ---------------------------------------------------------------------------
 # Настройки
 # ---------------------------------------------------------------------------
+
+
+def render_brand_map_settings(
+    project_id: str,
+    project_settings: dict[str, Any],
+    messages: pd.DataFrame,
+    brand_map: dict[str, list[str]],
+) -> None:
+    """Разметка тегов: где свои бренды, где конкуренты, где не бренд.
+
+    SOV и ReachScore сравнивают бренд с категорией, и до сих пор для этого
+    требовалась отдельная выгрузка по всей категории. В категорийном
+    мониторинге она избыточна: конкуренты уже размечены тегами в той же
+    выгрузке. Не хватало одного — знания, какой тег бренд, а какой
+    аналитический разрез. Отличить «Docke» от «Монтажа» по названию машина не
+    может, это знание о рынке.
+
+    Своих брендов несколько: головной, дочерние, отдельные марки. Доля голоса
+    считается для группы целиком.
+    """
+    with st.expander("Бренды категории: свои и конкуренты", expanded=False):
+        counts = category_store.brand_counts_from_tags(messages)
+        if counts.empty:
+            st.caption(
+                "В выгрузке нет тегов, по которым можно разделить бренды. "
+                "Для SOV и ReachScore загрузите выгрузку по категории ниже."
+            )
+            return
+
+        st.caption(
+            "Теги выгрузки, отмеченные как бренды, заменяют отдельную выгрузку "
+            "по категории: SOV и ReachScore считаются прямо по этим данным. "
+            "Неотмеченные теги остаются аналитическими разрезами и в расчёт "
+            "не идут."
+        )
+        options = [str(x) for x in counts.index]
+        labels = {name: f"{name} — {int(counts[name])}" for name in options}
+
+        with st.form(f"brand_map_{project_id}"):
+            own = st.multiselect(
+                "Наши бренды",
+                options,
+                default=[x for x in brand_map["own"] if x in options],
+                format_func=lambda x: labels.get(x, x),
+                help=(
+                    "Головной бренд и всё, что относится к группе: дочерние "
+                    "компании, отдельные марки. Их упоминания складываются."
+                ),
+            )
+            competitors = st.multiselect(
+                "Бренды конкурентов",
+                [x for x in options if x not in set(own)],
+                default=[
+                    x
+                    for x in brand_map["competitors"]
+                    if x in options and x not in set(own)
+                ],
+                format_func=lambda x: labels.get(x, x),
+                help="Остальные бренды категории — знаменатель доли голоса.",
+            )
+            if st.form_submit_button("Сохранить разметку брендов"):
+                updated = dict(project_settings or {})
+                updated["category_brands"] = {
+                    "own": list(own),
+                    "competitors": list(competitors),
+                }
+                try:
+                    update_project(project_id, settings=updated)
+                    clear_platform_caches(project_id)
+                    st.success("Разметка сохранена.")
+                    st.rerun()
+                except Exception as exc:  # noqa: BLE001
+                    st.warning(f"Не удалось сохранить: {exc}")
+
+        if brand_map["own"] and not brand_map["competitors"]:
+            st.caption(
+                "Отмечены только свои бренды: доля голоса выйдет 100%, пока не "
+                "отмечены конкуренты."
+            )
+        elif brand_map["competitors"] and not brand_map["own"]:
+            st.caption(
+                "Не отмечен ни один свой бренд — SOV и ReachScore считать не от чего."
+            )
 
 
 def render_metric_settings(
@@ -558,11 +642,19 @@ def render_brand_metrics_page(
     except Exception:  # noqa: BLE001 - раздел работает и без категорийных данных
         benchmarks = {}
 
-    cards = compute_brand_metrics(
-        messages,
-        benchmark=category_store.merged_benchmark(benchmarks),
-        settings=settings,
+    # Бренды конкурентов чаще всего уже размечены тегами в самой выгрузке
+    # проекта: у RUFLEX это Docke и Tegola, у Кнауфа свои. Тогда отдельная
+    # загрузка по категории не нужна — она просила бы те же данные второй раз.
+    brand_map = category_brands_from_project_settings(project_settings)
+    benchmark = category_store.benchmark_from_messages(
+        messages, brand_map["own"], brand_map["competitors"]
     )
+    # Загруженная выгрузка по категории главнее: в ней есть бренды, которых нет
+    # в теговой разметке проекта, то есть картина рынка шире.
+    if benchmarks:
+        benchmark = category_store.merged_benchmark(benchmarks) or benchmark
+
+    cards = compute_brand_metrics(messages, benchmark=benchmark, settings=settings)
 
     render_metric_cards(cards)
     render_metric_conclusions(
@@ -572,6 +664,7 @@ def render_brand_metrics_page(
     render_metrics_dynamics(messages, periods, selected_period_ids, benchmarks, settings)
 
     if role_can_edit:
+        render_brand_map_settings(project_id, project_settings, messages, brand_map)
         # Формулы остались доступны там, где настраиваются веса: аналитику
         # проверить цифру нужно, заказчику — нет.
         render_metric_details(cards)

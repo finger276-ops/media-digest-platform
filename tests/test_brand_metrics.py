@@ -230,6 +230,97 @@ check("пустые значения отбрасываются", period_key(["a
 check("повторы схлопываются", period_key(["a", "a"]) == "a", period_key(["a", "a"]))
 check("пустой список даёт пустой ключ", period_key([]) == "" and period_key(None) == "")
 
+print("Бренды категории берутся из тегов самой выгрузки")
+# SOV и ReachScore сравнивают бренд с категорией, и до сих пор для этого
+# требовалась отдельная выгрузка по всей категории. В категорийном мониторинге
+# она избыточна: конкуренты уже размечены тегами в той же выгрузке. Не хватало
+# знания, какой тег бренд, а какой аналитический разрез.
+from services import category_store  # noqa: E402
+from services.project_settings import (  # noqa: E402
+    category_brands_from_project_settings,
+)
+
+tagged = pd.DataFrame(
+    [
+        {"tags": "Ruflex|Монтаж", "audience": 100, "views": 50, "engagement": 5,
+         "author": "a", "chat_profile": "https://vk.com/1"},
+        {"tags": "Ruflex", "audience": 100, "views": 30, "engagement": 3,
+         "author": "b", "chat_profile": "https://vk.com/2"},
+        {"tags": "Quiet Tile|PR", "audience": 200, "views": 20, "engagement": 1,
+         "author": "c", "chat_profile": "https://vk.com/3"},
+        {"tags": "Docke", "audience": 700, "views": 400, "engagement": 40,
+         "author": "d", "chat_profile": "https://vk.com/4"},
+        {"tags": "Docke|Tegola", "audience": 300, "views": 100, "engagement": 10,
+         "author": "e", "chat_profile": "https://vk.com/5"},
+        {"tags": "Монтаж", "audience": 50, "views": 10, "engagement": 1,
+         "author": "f", "chat_profile": "https://vk.com/6"},
+    ]
+)
+
+counts = category_store.brand_counts_from_tags(tagged)
+check("теги посчитаны", int(counts.get("Docke", 0)) == 2 and int(counts.get("Ruflex", 0)) == 2,
+      str(dict(counts)))
+check("аналитический разрез тоже виден в списке", int(counts.get("Монтаж", 0)) == 2, str(dict(counts)))
+
+brands = category_store.brands_from_messages(tagged, ["Ruflex", "Quiet Tile"], ["Docke", "Tegola"])
+check("собраны только отмеченные бренды", set(brands["brand"]) == {"Ruflex", "Quiet Tile", "Docke", "Tegola"},
+      str(list(brands["brand"])))
+check("неотмеченный тег брендом не стал", "Монтаж" not in set(brands["brand"]), str(list(brands["brand"])))
+own_rows = brands[brands["is_own"]]
+check("свои бренды отмечены оба", set(own_rows["brand"]) == {"Ruflex", "Quiet Tile"}, str(list(own_rows["brand"])))
+check(
+    "сообщение с двумя брендами засчитано обоим",
+    int(brands[brands["brand"] == "Docke"].iloc[0]["messages"]) == 2
+    and int(brands[brands["brand"] == "Tegola"].iloc[0]["messages"]) == 1,
+    str(brands.to_dict("records")),
+)
+
+benchmark = category_store.benchmark_from_messages(tagged, ["Ruflex", "Quiet Tile"], ["Docke", "Tegola"])
+check("бенчмарк собран", benchmark is not None)
+check("группа своих брендов сохранена", benchmark["own_brands"] == ["Ruflex", "Quiet Tile"],
+      str(benchmark.get("own_brands")))
+
+sov = compute_sov(benchmark)
+# Свои: Ruflex 2 + Quiet Tile 1 = 3. Вся категория: 3 + Docke 2 + Tegola 1 = 6.
+check("SOV считает группу целиком", close(sov["value"], 50.0, 0.01), str(sov["value"]))
+check(
+    "в разборе показаны оба своих бренда",
+    "Ruflex" in str(sov["inputs"]["Бренд"]) and "Quiet Tile" in str(sov["inputs"]["Бренд"]),
+    str(sov["inputs"]["Бренд"]),
+)
+
+reach = compute_reach_score(benchmark)
+# Свой охват 50+30+20 = 100, максимум в категории — Docke 400+100 = 500.
+check("ReachScore считает группу целиком", close(reach["value"], 20.0, 0.01), str(reach["value"]))
+check("лидер категории назван", reach["inputs"]["Лидер по охвату"] == "Docke", str(reach["inputs"]))
+
+print("Без отмеченных брендов метрики честно молчат")
+empty_benchmark = category_store.benchmark_from_messages(tagged, [], ["Docke"])
+check("без своих брендов бенчмарк не собирается", empty_benchmark is None)
+silent = compute_sov(None)
+check("SOV без данных пуст", silent["value"] is None)
+check(
+    "причина подсказывает, что делать",
+    "Отметьте бренды категории" in silent["reason"],
+    silent["reason"],
+)
+
+print("Разметка брендов в настройках проекта")
+parsed = category_brands_from_project_settings(
+    {"category_brands": {"own": ["Кнауф", " Тисма ", "Кнауф", ""],
+                         "competitors": ["Rockwool", "Кнауф"]}}
+)
+check("свои бренды очищены от пустых и повторов", parsed["own"] == ["Кнауф", "Тисма"], str(parsed["own"]))
+check(
+    "бренд не может быть одновременно своим и конкурентом",
+    parsed["competitors"] == ["Rockwool"],
+    str(parsed["competitors"]),
+)
+check("пустые настройки дают пустые списки",
+      category_brands_from_project_settings({}) == {"own": [], "competitors": []})
+check("None не падает",
+      category_brands_from_project_settings(None) == {"own": [], "competitors": []})
+
 print()
 if failures:
     print(f"ПРОВАЛЕНО: {len(failures)} → {failures}")

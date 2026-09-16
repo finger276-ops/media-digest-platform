@@ -472,7 +472,10 @@ def compute_sov(benchmark: dict[str, Any] | None, basis: str = "messages") -> di
     if basis == "reach":
         formula = "Охват бренда / Охват всех брендов × 100%"
     hint = "Громкость бренда в категории. Высокий SOV не всегда хорош — смотрите вместе с тональностью."
-    no_data = "Нет выгрузки по категории: загрузите её в разделе «Индексы бренда»."
+    no_data = (
+        "Не с чем сравнивать. Отметьте бренды категории в блоке «Бренды "
+        "категории» или загрузите выгрузку по всей категории."
+    )
 
     frame = benchmark_frame(benchmark)
     if frame.empty:
@@ -485,7 +488,7 @@ def compute_sov(benchmark: dict[str, Any] | None, basis: str = "messages") -> di
             value=None,
             formula=formula,
             hint=hint,
-            reason="В выгрузке по категории не отмечен собственный бренд.",
+            reason="Не отмечен ни один свой бренд — считать долю не от чего.",
         )
 
     column = "reach" if basis == "reach" else "messages"
@@ -517,7 +520,9 @@ def compute_sov(benchmark: dict[str, Any] | None, basis: str = "messages") -> di
         formula=formula,
         hint=hint,
         inputs={
-            "Бренд": str(own["brand"].iloc[0]),
+            # Своих брендов может быть несколько — головной, дочерние, марки.
+            # Показать только первый значило бы соврать: доля посчитана по всем.
+            "Бренд": " + ".join(str(x) for x in own["brand"]),
             "Показатель бренда": int(own_value),
             "Показатель категории": int(total_value),
             "Брендов в категории": int(len(frame)),
@@ -531,7 +536,10 @@ def compute_reach_score(benchmark: dict[str, Any] | None) -> dict[str, Any]:
     """ReachScore = охват бренда / максимальный охват в категории × 100%."""
     formula = "Охват бренда / Максимальный охват в категории × 100%"
     hint = "Заметность бренда на фоне самого громкого игрока категории."
-    no_data = "Нет выгрузки по категории: загрузите её в разделе «Индексы бренда»."
+    no_data = (
+        "Не с чем сравнивать. Отметьте бренды категории в блоке «Бренды "
+        "категории» или загрузите выгрузку по всей категории."
+    )
 
     frame = benchmark_frame(benchmark)
     if frame.empty:
@@ -544,7 +552,7 @@ def compute_reach_score(benchmark: dict[str, Any] | None) -> dict[str, Any]:
             value=None,
             formula=formula,
             hint=hint,
-            reason="В выгрузке по категории не отмечен собственный бренд.",
+            reason="Не отмечен ни один свой бренд — сравнивать нечего.",
         )
 
     own_reach = float(own["reach"].sum())

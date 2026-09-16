@@ -125,6 +125,43 @@ def report_branding_from_project_settings(
     return result
 
 
+def category_brands_from_project_settings(
+    settings: dict[str, Any] | None,
+) -> dict[str, list[str]]:
+    """Какие теги проекта считать брендами и какие из них свои.
+
+    Отличить бренд от аналитического разреза машина не может: в одних и тех же
+    теговых колонках лежат и «Docke», и «Монтаж», и «PR». Это знание о рынке, и
+    его задаёт аналитик один раз на проект.
+
+    Своих брендов бывает несколько — головной, дочерние, отдельные марки. Доля
+    голоса считается для группы целиком, поэтому здесь список, а не строка.
+    """
+    raw = {}
+    if isinstance(settings, dict):
+        raw = settings.get("category_brands") or {}
+    if not isinstance(raw, dict):
+        raw = {}
+
+    def _names(key: str) -> list[str]:
+        values = raw.get(key) or []
+        if isinstance(values, str):
+            values = [values]
+        result: list[str] = []
+        for value in values:
+            name = str(value or "").strip()
+            if name and name not in result:
+                result.append(name)
+        return result
+
+    own = _names("own")
+    # Бренд не может быть одновременно своим и конкурентом: своя разметка
+    # главнее, иначе он попал бы в знаменатель дважды.
+    own_lower = {x.casefold() for x in own}
+    competitors = [x for x in _names("competitors") if x.casefold() not in own_lower]
+    return {"own": own, "competitors": competitors}
+
+
 def project_topic_profile(project_row: pd.Series | None) -> str:
     settings = project_settings_from_row(project_row) if project_row is not None else {}
     profile = str(settings.get("topic_profile") or "universal")

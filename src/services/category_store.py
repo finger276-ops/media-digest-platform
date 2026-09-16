@@ -162,6 +162,108 @@ def mark_own_brand(brands: pd.DataFrame, own_brand: str) -> pd.DataFrame:
     return work
 
 
+def brand_counts_from_tags(messages: pd.DataFrame) -> pd.Series:
+    """Сколько сообщений у каждого тега периода.
+
+    Нужно, чтобы аналитик видел, из чего выбирает: в теговых колонках лежат и
+    бренды, и аналитические разрезы («PR», «Монтаж», «Статья»), и отличить их
+    по названию машина не может — это знание о рынке.
+    """
+    if messages is None or messages.empty or "tags" not in messages.columns:
+        return pd.Series(dtype=int)
+    exploded = (
+        messages["tags"].fillna("").astype(str).str.split("|").explode().str.strip()
+    )
+    exploded = exploded[exploded != ""]
+    if exploded.empty:
+        return pd.Series(dtype=int)
+    return exploded.value_counts()
+
+
+def brands_from_messages(
+    messages: pd.DataFrame,
+    own_brands: list[str],
+    competitor_brands: list[str],
+) -> pd.DataFrame:
+    """Собрать категорийные агрегаты прямо из выгрузки проекта.
+
+    Отдельная выгрузка по категории нужна не всегда. В категорийном мониторинге
+    конкуренты уже размечены тегами в той же выгрузке: у RUFLEX это Docke,
+    Tegola, Roofshield, Faracs, у Кнауфа — свои. Требовать вторую загрузку тех
+    же данных значит просить работу, которая уже сделана.
+
+    Своих брендов может быть несколько: головной, дочерние, отдельные марки.
+    SOV считает их вместе — доля голоса у группы компаний общая.
+    """
+    own = [str(x).strip() for x in (own_brands or []) if str(x).strip()]
+    competitors = [str(x).strip() for x in (competitor_brands or []) if str(x).strip()]
+    names = list(dict.fromkeys(own + competitors))
+    if messages is None or messages.empty or not names:
+        return pd.DataFrame()
+
+    tags = messages["tags"].fillna("").astype(str) if "tags" in messages.columns else None
+    if tags is None:
+        return pd.DataFrame()
+    tag_sets = tags.map(lambda value: {t.strip() for t in value.split("|") if t.strip()})
+
+    audience = numeric_series(messages, AUDIENCE_COLUMNS)
+    reach = numeric_series(messages, REACH_COLUMNS)
+    engagement = numeric_series(messages, ENGAGEMENT_COLUMNS)
+    place = (
+        messages["_audience_place"]
+        if "_audience_place" in messages.columns
+        else audience_place_key(messages)
+    )
+
+    own_lower = {x.casefold() for x in own}
+    rows = []
+    for name in names:
+        mask = tag_sets.map(lambda values, n=name: n in values)
+        if not bool(mask.any()):
+            continue
+        # Площадка учитывается один раз на бренд: у поста и комментариев под
+        # ним одна аудитория.
+        brand_audience = (
+            pd.DataFrame({"_a": audience[mask].values, "_k": list(place[mask])})
+            .groupby("_k")["_a"]
+            .max()
+            .sum()
+        )
+        rows.append(
+            {
+                "brand": name,
+                "messages": int(mask.sum()),
+                "audience": int(brand_audience),
+                "reach": int(reach[mask].sum()),
+                "engagement": int(engagement[mask].sum()),
+                "is_own": name.casefold() in own_lower,
+            }
+        )
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values("messages", ascending=False).reset_index(drop=True)
+
+
+def benchmark_from_messages(
+    messages: pd.DataFrame,
+    own_brands: list[str],
+    competitor_brands: list[str],
+) -> dict[str, Any] | None:
+    """Бенчмарк из выгрузки проекта — в том же виде, что из отдельной загрузки."""
+    brands = brands_from_messages(messages, own_brands, competitor_brands)
+    if brands is None or brands.empty:
+        return None
+    if not bool(brands["is_own"].any()):
+        return None
+    own = [str(x) for x in brands.loc[brands["is_own"], "brand"]]
+    return {
+        "own_brand": own[0] if own else "",
+        "own_brands": own,
+        "brands": brands.to_dict("records"),
+        "source": "project_tags",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Чтение и запись
 # ---------------------------------------------------------------------------
