@@ -101,5 +101,8 @@ jobs:
       - name: Гигиена except (молчание должно быть обосновано)
         run: python tests/test_except_hygiene.py
 
+      - name: Аналитика по уровням тегов (own/subtree, покрытие, UI без дублей)
+        run: python tests/test_tag_tier_analytics.py
+
       - name: Дымовой тест интерфейса
         run: python tests/test_ui_smoke.py
