@@ -468,9 +468,9 @@ def benchmark_frame(benchmark: dict[str, Any] | None) -> pd.DataFrame:
 
 def compute_sov(benchmark: dict[str, Any] | None, basis: str = "messages") -> dict[str, Any]:
     """SOV = показатель бренда / сумма по всем брендам категории × 100%."""
-    formula = "Упоминания бренда / Упоминания всех брендов × 100%"
+    formula = "Упоминания наших брендов / Упоминания всех брендов категории × 100%"
     if basis == "reach":
-        formula = "Охват бренда / Охват всех брендов × 100%"
+        formula = "Охват наших брендов / Охват всех брендов категории × 100%"
     hint = "Громкость бренда в категории. Высокий SOV не всегда хорош — смотрите вместе с тональностью."
     no_data = (
         "Не с чем сравнивать. Отметьте бренды категории в блоке «Бренды "
@@ -489,6 +489,20 @@ def compute_sov(benchmark: dict[str, Any] | None, basis: str = "messages") -> di
             formula=formula,
             hint=hint,
             reason="Не отмечен ни один свой бренд — считать долю не от чего.",
+        )
+    # Без конкурентов в знаменателе доля голоса равна ста процентам по
+    # определению. Показать это как результат значило бы выдать за измерение
+    # то, что измерением не является.
+    if not bool((~frame["is_own"]).any()):
+        return _card(
+            "SOV",
+            value=None,
+            formula=formula,
+            hint=hint,
+            reason=(
+                "Отмечены только свои бренды. Доля голоса считается на фоне "
+                "конкурентов — отметьте их в блоке «Бренды категории»."
+            ),
         )
 
     column = "reach" if basis == "reach" else "messages"
@@ -534,8 +548,11 @@ def compute_sov(benchmark: dict[str, Any] | None, basis: str = "messages") -> di
 
 def compute_reach_score(benchmark: dict[str, Any] | None) -> dict[str, Any]:
     """ReachScore = охват бренда / максимальный охват в категории × 100%."""
-    formula = "Охват бренда / Максимальный охват в категории × 100%"
-    hint = "Заметность бренда на фоне самого громкого игрока категории."
+    formula = "Охват наших брендов / Охват самого громкого игрока категории × 100%"
+    hint = (
+        "Заметность бренда на фоне самого громкого игрока категории. Своя "
+        "группа брендов сравнивается как один участник."
+    )
     no_data = (
         "Не с чем сравнивать. Отметьте бренды категории в блоке «Бренды "
         "категории» или загрузите выгрузку по всей категории."
@@ -554,19 +571,39 @@ def compute_reach_score(benchmark: dict[str, Any] | None) -> dict[str, Any]:
             hint=hint,
             reason="Не отмечен ни один свой бренд — сравнивать нечего.",
         )
+    if not bool((~frame["is_own"]).any()):
+        return _card(
+            "ReachScore",
+            value=None,
+            formula=formula,
+            hint=hint,
+            reason=(
+                "Отмечены только свои бренды. Заметность считается на фоне "
+                "конкурентов — отметьте их в блоке «Бренды категории»."
+            ),
+        )
 
+    # Своя группа сравнивается с игроками категории как один участник. Иначе
+    # сумма нескольких своих брендов делилась бы на охват одного чужого, и
+    # индекс выходил больше ста процентов: на выгрузке Кнауфа так и вышло —
+    # 103,39% при охвате группы 19 539 против 18 899 у лидера.
     own_reach = float(own["reach"].sum())
-    max_reach = float(frame["reach"].max())
+    rivals = frame[~frame["is_own"]]
+    rival_reach = float(rivals["reach"].max()) if not rivals.empty else 0.0
+    max_reach = max(own_reach, rival_reach)
     if max_reach <= 0:
         return _card(
             "ReachScore",
             value=None,
             formula=formula,
             hint=hint,
-            reason="В выгрузке по категории нет данных об охвате.",
+            reason="Нет данных об охвате ни у одного бренда категории.",
         )
 
-    leader_row = frame.loc[frame["reach"].idxmax()]
+    if own_reach >= rival_reach:
+        leader = " + ".join(str(x) for x in own["brand"])
+    else:
+        leader = str(rivals.loc[rivals["reach"].idxmax()].get("brand", ""))
     return _card(
         "ReachScore",
         value=own_reach / max_reach * 100,
@@ -575,7 +612,8 @@ def compute_reach_score(benchmark: dict[str, Any] | None) -> dict[str, Any]:
         inputs={
             "Охват бренда": int(own_reach),
             "Максимальный охват в категории": int(max_reach),
-            "Лидер по охвату": str(leader_row.get("brand", "")),
+            "Лидер по охвату": leader,
+            "Конкурентов в категории": int(len(rivals)),
         },
     )
 

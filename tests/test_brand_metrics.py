@@ -294,6 +294,68 @@ reach = compute_reach_score(benchmark)
 check("ReachScore считает группу целиком", close(reach["value"], 20.0, 0.01), str(reach["value"]))
 check("лидер категории назван", reach["inputs"]["Лидер по охвату"] == "Docke", str(reach["inputs"]))
 
+print("Группа своих брендов сравнивается с категорией как один участник")
+# На выгрузке Кнауфа это и сломалось: охват группы (19 539) делился на охват
+# одного чужого бренда (18 899), и индекс охвата выходил 103,39% — величина,
+# которой не бывает.
+group_bench = {
+    "brands": [
+        {"brand": "Knauf Insulation", "messages": 60, "reach": 18899,
+         "audience": 0, "engagement": 0, "is_own": True},
+        {"brand": "ТИСМА", "messages": 17, "reach": 640,
+         "audience": 0, "engagement": 0, "is_own": True},
+        {"brand": "ROCKWOOL", "messages": 90, "reach": 15000,
+         "audience": 0, "engagement": 0, "is_own": False},
+    ]
+}
+lead = compute_reach_score(group_bench)
+check("индекс охвата не превышает ста процентов", lead["value"] <= 100.0, str(lead["value"]))
+check("своя группа громче — значит сто процентов", close(lead["value"], 100.0, 0.01), str(lead["value"]))
+check(
+    "лидером названа вся группа, а не один бренд",
+    "Knauf Insulation" in lead["inputs"]["Лидер по охвату"]
+    and "ТИСМА" in lead["inputs"]["Лидер по охвату"],
+    str(lead["inputs"]["Лидер по охвату"]),
+)
+
+behind = compute_reach_score(
+    {
+        "brands": [
+            {"brand": "Knauf Insulation", "messages": 60, "reach": 18899,
+             "audience": 0, "engagement": 0, "is_own": True},
+            {"brand": "ТИСМА", "messages": 17, "reach": 640,
+             "audience": 0, "engagement": 0, "is_own": True},
+            {"brand": "ROCKWOOL", "messages": 90, "reach": 40000,
+             "audience": 0, "engagement": 0, "is_own": False},
+        ]
+    }
+)
+check("отставание считается от конкурента", close(behind["value"], 48.85, 0.01), str(behind["value"]))
+check("лидер назван верно", behind["inputs"]["Лидер по охвату"] == "ROCKWOOL",
+      str(behind["inputs"]["Лидер по охвату"]))
+check("число конкурентов показано", behind["inputs"]["Конкурентов в категории"] == 1,
+      str(behind["inputs"]))
+
+print("Без конкурентов доля голоса не считается")
+# Сто процентов по определению — это не измерение, а его отсутствие.
+own_only = {
+    "brands": [
+        {"brand": "Knauf Insulation", "messages": 60, "reach": 18899,
+         "audience": 0, "engagement": 0, "is_own": True},
+        {"brand": "ТИСМА", "messages": 17, "reach": 640,
+         "audience": 0, "engagement": 0, "is_own": True},
+    ]
+}
+sov_own = compute_sov(own_only)
+reach_own = compute_reach_score(own_only)
+check("SOV не выдаёт сто процентов", sov_own["value"] is None, str(sov_own["value"]))
+check("ReachScore не выдаёт сто процентов", reach_own["value"] is None, str(reach_own["value"]))
+check(
+    "причина объясняет, чего не хватает",
+    "отметьте их" in sov_own["reason"].lower(),
+    sov_own["reason"],
+)
+
 print("Без отмеченных брендов метрики честно молчат")
 empty_benchmark = category_store.benchmark_from_messages(tagged, [], ["Docke"])
 check("без своих брендов бенчмарк не собирается", empty_benchmark is None)
