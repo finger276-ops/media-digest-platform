@@ -328,6 +328,11 @@ check("заголовок приложения ушёл со страницы", 
 check("подзаголовка «Период и основные метрики» больше нет", "Период и основные метрики" not in joined)
 metric_labels = [str(m.label) for m in at.metric]
 check("полоса метрик на месте", "Сообщений" in metric_labels, str(metric_labels[:6]))
+check(
+    "карточки тональности есть в «Обзоре»",
+    "Нейтрал" in metric_labels,
+    str(metric_labels[:8]),
+)
 view_controls = [str(c.label) for c in at.checkbox]
 check(
     "настройки вида спрятаны в панель «Вид», а не в поток страницы",
@@ -385,6 +390,21 @@ check("раздел открылся без исключений", not at.except
 texts = [m.value for m in at.markdown] + [h.value for h in at.subheader]
 check("заголовок раздела на месте", any("Статистика тегов" in str(t) for t in texts))
 check("таблица статистики тегов отрисована", bool(at.dataframe))
+# Полоса из семи карточек уместна в «Обзоре», где показатели периода и есть
+# содержание. В рабочих разделах она занимала треть экрана и отодвигала вниз
+# таблицы, ради которых раздел и открывают.
+work_metrics = [str(m.label) for m in at.metric]
+check(
+    "полосы тональности в рабочем разделе нет",
+    "Нейтрал" not in work_metrics,
+    str(work_metrics[:8]),
+)
+captions = [str(c.value) for c in at.caption]
+check(
+    "но числа периода остались одной строкой",
+    any("сообщений" in c and "аудитория" in c for c in captions),
+    str(captions)[:220],
+)
 
 print("3.5. Раздел «Инфоповоды»: склейка похожих заголовков видна аналитику")
 open_section("Инфоповоды")

@@ -92,7 +92,11 @@ from services.period_comparison import (
     build_comparison_metrics,
     selected_period_label,
 )
-from overview_ui import render_project_intro, render_period_comparison_metrics
+from overview_ui import (
+    render_period_comparison_metrics,
+    render_period_metrics_line,
+    render_project_intro,
+)
 from services.event_filter_state import (
     set_selected_event_filter,
     get_selected_event_filter,
@@ -596,7 +600,11 @@ def main() -> None:
                     "Метрики периода в шапке",
                     value=("metrics" in saved_blocks),
                     key="view_show_metrics",
-                    help="Полоса из четырёх показателей и тональности под названием проекта.",
+                    help=(
+                        "В «Обзоре» — полоса из четырёх показателей и тональности. "
+                        "В остальных разделах те же числа одной строкой, чтобы не "
+                        "отодвигать таблицы вниз."
+                    ),
                 )
                 if hide_technical:
                     min_event_messages = int(
@@ -675,29 +683,36 @@ def main() -> None:
         # Полоса метрик — надстройка над разделом, а не сам раздел: её падение
         # не должно стоить пользователю содержимого страницы.
         try:
-            # Дельты в шапке: сравниваем с периодом, который идёт перед выбранными.
-            prev_id = previous_period_id(periods, selected_period_ids)
-            prev_metrics = period_overview_metrics(project_id, prev_id)
-            prev_label = ""
-            if prev_metrics and prev_id and not periods.empty:
-                prev_row = periods[periods["period_id"].astype(str) == str(prev_id)]
-                if not prev_row.empty:
-                    prev_label = str(prev_row.iloc[0].get("period_name") or prev_id)
-            metrics = render_project_intro(
-                project_name,
-                enriched_messages,
-                periods,
-                selected_period_ids,
-                profile_label=profile_label,
-                chart_label_settings=chart_label_settings,
-                comparison_visible_charts=dashboard_view_settings.get(
-                    "comparison_visible_charts"
-                ),
-                show_comparison=False,
-                show_title=False,
-                previous_metrics=prev_metrics,
-                previous_label=prev_label,
-            )
+            if page == "Обзор":
+                # В «Обзоре» показатели периода и есть содержание раздела,
+                # поэтому здесь полная полоса с динамикой к прошлому периоду.
+                prev_id = previous_period_id(periods, selected_period_ids)
+                prev_metrics = period_overview_metrics(project_id, prev_id)
+                prev_label = ""
+                if prev_metrics and prev_id and not periods.empty:
+                    prev_row = periods[periods["period_id"].astype(str) == str(prev_id)]
+                    if not prev_row.empty:
+                        prev_label = str(prev_row.iloc[0].get("period_name") or prev_id)
+                metrics = render_project_intro(
+                    project_name,
+                    enriched_messages,
+                    periods,
+                    selected_period_ids,
+                    profile_label=profile_label,
+                    chart_label_settings=chart_label_settings,
+                    comparison_visible_charts=dashboard_view_settings.get(
+                        "comparison_visible_charts"
+                    ),
+                    show_comparison=False,
+                    show_title=False,
+                    previous_metrics=prev_metrics,
+                    previous_label=prev_label,
+                )
+            else:
+                # В рабочих разделах те же числа нужны как ориентир, а не как
+                # содержание: полоса из семи карточек занимала треть экрана и
+                # отодвигала вниз таблицы, ради которых раздел и открывают.
+                metrics = render_period_metrics_line(enriched_messages)
         except Exception:  # noqa: BLE001 — граница отказа
             LOGGER.exception("Метрики в шапке не отрисовались")
             st.caption("Метрики периода сейчас недоступны.")

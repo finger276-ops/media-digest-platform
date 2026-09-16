@@ -693,6 +693,33 @@ def render_period_comparison_metrics(
     return aggregate_metrics
 
 
+def render_period_metrics_line(messages: pd.DataFrame) -> dict[str, Any]:
+    """Метрики периода одной строкой — для рабочих разделов.
+
+    Полоса из семи карточек уместна в «Обзоре», где показатели периода и есть
+    содержание. В разделах, где аналитик работает с таблицами, она занимает
+    треть экрана и отодвигает работу вниз, а те же числа нужны там лишь как
+    ориентир: с каким объёмом имеем дело и есть ли негатив.
+
+    Динамика к прошлому периоду сюда не идёт намеренно: со стрелками и
+    процентами строка перестаёт читаться с одного взгляда, а за подробностями
+    есть «Обзор».
+    """
+    metrics = overview_metrics(messages)
+    sentiment = metrics.get("sentiment") or {}
+    total = int(sentiment.get("total", 0))
+    parts = [
+        f"{format_int(metrics.get('messages', 0))} сообщений",
+        f"аудитория {format_int(metrics.get('audience', 0))}",
+        f"охват {format_int(metrics.get('reach', 0))}",
+        f"вовлечённость {format_int(metrics.get('engagement', 0))}",
+    ]
+    if total:
+        parts.append(f"негатив {percent_text(int(sentiment.get('negative', 0)), total)}")
+    st.caption(" · ".join(parts))
+    return metrics
+
+
 def render_project_intro(
     project_name: str,
     messages: pd.DataFrame,
