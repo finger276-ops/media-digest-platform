@@ -57,6 +57,8 @@ streamlit_app.py
 `platform_manual_rows`, `platform_project_members`, очередь автозагрузки,
 иерархию тегов, категорийные бенчмарки и живые сессии.
 
+Отдельное окружение для проверки изменений перед продом — `docs/STAGING.md`.
+
 Они не пересекаются со старыми таблицами `dashboard_periods`, `dashboard_table_rows`, `dashboard_manual_rows`.
 
 ## Secrets в Streamlit Cloud
