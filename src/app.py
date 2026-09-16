@@ -65,6 +65,7 @@ from services.ai_summary import (
 )
 from tag_hierarchy_ui import render_tag_hierarchy_block
 from tag_tier_analytics_ui import render_tier_analytics_block
+from services.observability import report_failure
 from services.perf import perf_block, render_perf_sidebar, reset_perf_events
 from services.formatting import fmt_date, fmt_period
 from services.roles import role_rank
@@ -308,6 +309,9 @@ def render_section_safely(title: str, render, *args, _details: bool = False, **k
         return True
     except Exception as exc:  # noqa: BLE001 — это и есть граница отказа
         LOGGER.exception("Раздел «%s» не отрисовался", title)
+        # Заказчик видит вежливое сообщение, а владелец платформы — событие
+        # в настроенном канале (Sentry или вебхук). Без настройки — только лог.
+        report_failure(f"раздел «{title}»", exc)
         st.error(f"Не удалось отобразить раздел «{title}».")
         st.caption(
             "Остальные разделы продолжают работать. Попробуйте обновить "

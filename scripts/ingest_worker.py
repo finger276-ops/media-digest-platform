@@ -44,6 +44,7 @@ for path in (ROOT, SRC):
 import platform_store as store  # noqa: E402
 from services import ingest_queue as queue  # noqa: E402
 from services.ingest import IngestError, file_sha256, ingest_file_bytes  # noqa: E402
+from services.observability import report_failure  # noqa: E402
 
 LOG = logging.getLogger("ingest_worker")
 
@@ -200,12 +201,16 @@ def run(args: argparse.Namespace) -> int:
             LOG.error("Задача %s: %s", task_id, exc)
             queue.mark_error(task_id, str(exc), retry=False)
             failed.append({"task_id": task_id, "error": str(exc)})
+            # Задача не будет повторяться — про такую владелец должен узнать
+            # сразу, а не при следующем заходе в панель.
+            report_failure("воркер: задача автозагрузки", exc, task_id=task_id)
             continue
         except Exception as exc:  # noqa: BLE001 - технические сбои повторяем
             details = f"{exc}\n{traceback.format_exc(limit=5)}"
             LOG.error("Задача %s упала: %s", task_id, details)
             queue.mark_error(task_id, details, retry=True)
             failed.append({"task_id": task_id, "error": str(exc)})
+            report_failure("воркер: технический сбой задачи", exc, task_id=task_id)
             continue
 
         elapsed = round(time.monotonic() - started, 1)

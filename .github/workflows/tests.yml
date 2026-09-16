@@ -83,5 +83,8 @@ jobs:
       - name: Блокировка правок (конфликт двух редакторов)
         run: python tests/test_manual_conflict.py
 
+      - name: Доставка ошибок владельцу (Sentry/вебхук)
+        run: python tests/test_observability.py
+
       - name: Дымовой тест интерфейса
         run: python tests/test_ui_smoke.py
