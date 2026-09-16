@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import csv
+import html
 import logging
 import re
 import tempfile
@@ -165,6 +166,20 @@ CANONICAL_COLUMNS = [
     # всех отзывов и ровно ни у чего другого — это их собственная метрика, и
     # без неё раздел репутации товара показывать нечего.
     "Оценка",
+    # Поля, которые система отдаёт, а платформа до сих пор выбрасывала. Сверка
+    # csv и xlsx одной выгрузки показала, что мимо канона проходит девять
+    # колонок с данными, и «Роль объекта» с «Языком» заполнены у всех строк.
+    # Роль отвечает на вопрос, о бренде ли сообщение или он там упомянут
+    # вскользь, — для конкурентного обзора это первая линия отсечения шума.
+    "Роль объекта",
+    "Язык",
+    "Тип автора",
+    "Пол",
+    "Возраст",
+    "Место",
+    "Адрес",
+    "Цитируемость СМИ",
+    "Аудитория СМИ",
     "Тональность",
     "Токсичность",
     "WOM",
@@ -215,13 +230,42 @@ def _clean_col_name(value: object) -> str:
     return value
 
 
+def _decode_html_entities(values: pd.Series) -> pd.Series:
+    """Вернуть тексту нормальные символы вместо HTML-мнемоник.
+
+    Brand Analytics отдаёт часть текстов так, как они лежали в разметке
+    страницы: «Свежее поступление&#33;» вместо восклицательного знака, «&gt;»
+    вместо угловой скобки, «&nbsp;» вместо пробела. Это не особенность формата —
+    мнемоники нашлись во всех проверенных выгрузках RUFLEX, и в xlsx, и в csv,
+    в 3–5% строк.
+
+    Чинится один раз на входе, а не при показе: иначе одно и то же сообщение
+    выглядит по-разному в ленте, в заголовке инфоповода и в поиске, а склейка
+    похожих заголовков считает «— Строительная газета» и «&#8212; Строительная
+    газета» разными сюжетами. Один такой случай в выгрузке за август и был.
+    """
+    # Дешёвая проверка перед дорогим разбором: амперсанд есть у считанных
+    # процентов ячеек, а кадр может быть на десятки тысяч строк.
+    marked = values.str.contains("&", regex=False, na=False)
+    if not marked.any():
+        return values
+    decoded = values.copy()
+    decoded.loc[marked] = [
+        # Неразрывный пробел из &nbsp; заменяется на обычный: как символ он
+        # ничем не помогает, зато ломает поиск и сравнение строк.
+        html.unescape(value).replace(" ", " ")
+        for value in values[marked]
+    ]
+    return decoded
+
+
 def _clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [_clean_col_name(c) for c in df.columns]
     df = df.loc[:, [bool(str(c).strip()) for c in df.columns]]
     df = df.dropna(how="all")
     for col in df.columns:
-        df[col] = df[col].fillna("").astype(str)
+        df[col] = _decode_html_entities(df[col].fillna("").astype(str))
     df = df.loc[
         ~df.apply(lambda r: all(str(v).strip() == "" for v in r), axis=1)
     ].reset_index(drop=True)
@@ -715,6 +759,21 @@ def canonicalize_table(
     # поэтому колонка остаётся текстовой и разбирается числом уже в аналитике.
     out["Оценка"] = first_existing(
         df, ["Оценка", "Рейтинг", "Оценка товара", "Rating", "Score"]
+    )
+    out["Роль объекта"] = first_existing(
+        df, ["Роль объекта", "Роль", "Object role", "Object Role"]
+    )
+    out["Язык"] = first_existing(df, ["Язык", "Language", "lang"])
+    out["Тип автора"] = first_existing(df, ["Тип автора", "Author type", "Тип аккаунта"])
+    out["Пол"] = first_existing(df, ["Пол", "Gender", "Sex"])
+    out["Возраст"] = first_existing(df, ["Возраст", "Age"])
+    out["Место"] = first_existing(df, ["Место", "Place", "Локация"])
+    out["Адрес"] = first_existing(df, ["Адрес", "Address"])
+    out["Цитируемость СМИ"] = first_existing(
+        df, ["Цитируемость СМИ", "Цитируемость", "Media citation"]
+    )
+    out["Аудитория СМИ"] = first_existing(
+        df, ["Аудитория СМИ", "Media audience", "Аудитория издания"]
     )
     out["Тональность"] = _normalize_sentiment(
         first_existing(df, ["Тональность", "Sentiment", "Окраска", "Тон"])
