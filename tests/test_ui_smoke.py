@@ -201,6 +201,56 @@ CLIENT.db["platform_table_rows"] += [
     for i, (sentiment, theme) in enumerate(_THEMES)
 ]
 
+# Остаток: сообщения, которые не сложились в инфоповод. Аналитик должен иметь
+# возможность отнести такое сообщение к теме — автоматика видит одиночную
+# публикацию, человек видит, что она про ту же историю.
+CLIENT.db["platform_table_rows"] += [
+    {
+        "project_id": "tn_project",
+        "period_id": PERIOD_ID,
+        "table_name": "events",
+        "row_id": "e_residual",
+        "payload": {
+            "event_id": "e_residual",
+            "period_id": PERIOD_ID,
+            "event_title": "Без сюжета",
+            "event_summary": "Публикации, не сложившиеся в общий сюжет",
+            "message_count": 2,
+            "negative_count": 0,
+            "chat_count": 2,
+            "importance_score": 30,
+            "start_date": "2026-04-24",
+            "end_date": "2026-04-30",
+            "main_tags": "",
+            "is_residual": True,
+        },
+    }
+] + [
+    {
+        "project_id": "tn_project",
+        "period_id": PERIOD_ID,
+        "table_name": "messages",
+        "row_id": f"{PERIOD_ID}_res{i}",
+        "payload": {
+            "message_id": f"{PERIOD_ID}_res{i}",
+            "period_id": PERIOD_ID,
+            "date": "26.04.2026",
+            "datetime": "2026-04-26T10:00:00",
+            "sentiment": "нейтрал",
+            "views": 100,
+            "audience": 500,
+            "engagement": 5,
+            "text_clean": f"Одиночная публикация номер {i} про кровельные работы",
+            "message_link": f"https://example.com/res{i}",
+            "platform": "vk.com",
+            "author": f"одиночка{i}",
+            "tags": "Кровля",
+            "event_title": "Без сюжета",
+        },
+    }
+    for i in range(2)
+]
+
 # Отзывы с маркетплейса: своя природа сообщения, своя метрика (оценка товара)
 # и почти весь негатив периода. В ленте инфоповодов им места нет — у них
 # отдельный раздел.
@@ -479,6 +529,24 @@ check(
     "таблица инфоповодов даёт править описание",
     any({"Описание", "Открыть"} <= cols for cols in event_tables),
     str(event_tables)[:260],
+)
+# То, что не сложилось в инфоповод, показывается отдельным блоком — и не как
+# тупик: автоматика видит одиночную публикацию, аналитик видит, что она про ту
+# же историю, и должен иметь возможность отнести её к теме.
+check(
+    "блок «Вне инфоповодов» на месте",
+    any("Вне инфоповодов" in str(e.label) for e in at.expander),
+    str([e.label for e in at.expander]),
+)
+check(
+    "сообщение из остатка можно отнести к инфоповоду",
+    any("Отнести к инфоповоду" in cols for cols in event_tables),
+    str(event_tables)[:300],
+)
+check(
+    "остаток не встал первым в списке инфоповодов",
+    not any("Без сюжета" in str(t) for t in texts[:3]),
+    str(texts[:3])[:200],
 )
 view_mode = [r for r in at.sidebar.radio if str(r.label) == "Вид дашборда"]
 if view_mode:

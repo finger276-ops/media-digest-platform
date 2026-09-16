@@ -190,8 +190,115 @@ def render_assembly_notice(messages: pd.DataFrame) -> None:
         st.caption("Сообщений: " + ", ".join(parts) + ".")
 
 
+MOVE_COLUMN = "Отнести к инфоповоду"
+MOVE_NONE = "— оставить вне инфоповодов —"
+# Дальше этого списка превращается в ленту, которую не разбирают.
+RESIDUAL_MESSAGES_SHOWN = 50
+
+
+def _residual_messages_table(
+    project_id: str,
+    subset: pd.DataFrame,
+    events_agg: pd.DataFrame,
+    *,
+    can_edit: bool,
+) -> None:
+    """Сообщения вне инфоповодов — с возможностью отнести их к теме.
+
+    Автоматика собирает инфоповод там, где о чём-то пишут разные люди. Одиночное
+    сообщение по её меркам событием не является, но аналитик видит смысл: пост
+    про ту же аварию, тот же запуск, ту же претензию. Отправить его в готовую
+    тему одним выбором — дешевле, чем заводить ради него отдельный инфоповод.
+    """
+    text_col = message_text_column(subset)
+    link_col = message_link_column(subset)
+    options = [MOVE_NONE] + [label for _, label in event_select_options(events_agg)]
+    label_to_event = {
+        label: event_id for event_id, label in event_select_options(events_agg)
+    }
+
+    view = pd.DataFrame(
+        {
+            "Дата": subset.get("date", pd.Series([""] * len(subset))).astype(str),
+            "Сообщение": (
+                subset[text_col].fillna("").astype(str).str.slice(0, 300)
+                if text_col
+                else ""
+            ),
+            "Автор": subset.get("author", pd.Series([""] * len(subset))).astype(str),
+            "Ссылка": (
+                subset[link_col].fillna("").astype(str) if link_col else ""
+            ),
+            MOVE_COLUMN: MOVE_NONE,
+        },
+        index=subset.index,
+    )
+
+    if not can_edit or len(options) <= 1:
+        if len(options) <= 1 and can_edit:
+            st.caption(
+                "Отнести сообщение некуда: в периоде нет ни одного инфоповода."
+            )
+        st.dataframe(
+            view.drop(columns=[MOVE_COLUMN]),
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "Ссылка": st.column_config.LinkColumn("Ссылка", display_text="Открыть")
+            },
+        )
+        return
+
+    st.caption(
+        "Если сообщение относится к одной из тем периода, выберите её в "
+        "последнем столбце — сообщение уйдёт в этот инфоповод."
+    )
+    edited = st.data_editor(
+        view,
+        hide_index=True,
+        width="stretch",
+        key=f"residual_moves_{project_id}",
+        column_config={
+            "Ссылка": st.column_config.LinkColumn("Ссылка", display_text="Открыть"),
+            "Сообщение": st.column_config.TextColumn("Сообщение", width="large"),
+            MOVE_COLUMN: st.column_config.SelectboxColumn(
+                MOVE_COLUMN, options=options, width="medium", required=False
+            ),
+        },
+        disabled=["Дата", "Сообщение", "Автор", "Ссылка"],
+    )
+
+    moved = 0
+    message_ids = [str(x) for x in subset.get("message_id", pd.Series(dtype=str))]
+    for position, label in enumerate(edited[MOVE_COLUMN].fillna(MOVE_NONE)):
+        target = label_to_event.get(str(label))
+        if not target or position >= len(message_ids):
+            continue
+        message_id = message_ids[position]
+        if not message_id:
+            continue
+        try:
+            save_manual(
+                project_id,
+                "message_moves",
+                f"message_move::{message_id}",
+                {"message_id": message_id, "target_event_id": target},
+            )
+            moved += 1
+        except Exception:  # noqa: BLE001 — перенос не стоит падения раздела
+            st.warning("Не удалось перенести сообщение.")
+    if moved:
+        st.success(f"Перенесено сообщений: {moved}.")
+        st.rerun()
+
+
 def render_residual_events(
-    residual_events: pd.DataFrame, messages: pd.DataFrame
+    project_id: str,
+    residual_events: pd.DataFrame,
+    messages: pd.DataFrame,
+    events_agg: pd.DataFrame,
+    *,
+    can_edit: bool = False,
 ) -> None:
     """Показать то, что не собралось в инфоповоды, отдельным блоком.
 
@@ -246,11 +353,15 @@ def render_residual_events(
                         key=lambda s: pd.to_numeric(s, errors="coerce").fillna(0),
                         ascending=False,
                     )
-                render_message_list(
-                    subset.head(50),
-                    text_col=message_text_column(subset),
-                    link_col=message_link_column(subset),
+                shown = subset.head(RESIDUAL_MESSAGES_SHOWN)
+                _residual_messages_table(
+                    project_id, shown, events_agg, can_edit=can_edit
                 )
+                if len(subset) > RESIDUAL_MESSAGES_SHOWN:
+                    st.caption(
+                        f"Показаны первые {RESIDUAL_MESSAGES_SHOWN} из "
+                        f"{format_int(len(subset))} — сначала самые заметные."
+                    )
 
 
 def _event_tags_text(selected: pd.Series, event_messages: pd.DataFrame) -> str:
@@ -692,7 +803,10 @@ def render_events(
             "За выбранный период не собралось ни одного инфоповода. "
             "Сообщения периода — в блоке ниже и в разделе «Сообщения»."
         )
-        render_residual_events(residual_events, messages)
+        # Переносить некуда: инфоповодов в периоде нет вовсе.
+        render_residual_events(
+            project_id, residual_events, messages, filtered_events, can_edit=False
+        )
         return
 
     table = filtered_events.copy()
@@ -738,7 +852,9 @@ def render_events(
         project_id, show, filtered_events, can_edit=can_edit
     )
 
-    render_residual_events(residual_events, messages)
+    render_residual_events(
+        project_id, residual_events, messages, filtered_events, can_edit=can_edit
+    )
 
     if selected_row is None:
         return

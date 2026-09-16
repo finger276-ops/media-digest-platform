@@ -166,6 +166,11 @@ def filter_small_events(
     work = events_agg.copy()
     counts = pd.to_numeric(work["message_count"], errors="coerce").fillna(0).astype(int)
     keep_mask = counts >= int(min_messages)
+    # Остаточная корзина под этот фильтр не попадает: она не инфоповод, а отчёт
+    # о том, что осталось за кадром. Скрыв её за «мало сообщений», платформа
+    # умолчала бы ровно о тех публикациях, о которых обещала рассказать.
+    if "is_residual" in work.columns:
+        keep_mask = keep_mask | work["is_residual"].fillna(False).astype(bool)
     hidden_events = int((~keep_mask).sum())
     hidden_messages = int(counts[~keep_mask].sum())
     return work[keep_mask].copy(), hidden_events, hidden_messages
