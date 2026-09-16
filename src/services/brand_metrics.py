@@ -466,6 +466,27 @@ def benchmark_frame(benchmark: dict[str, Any] | None) -> pd.DataFrame:
     return frame
 
 
+def _no_rivals_reason(benchmark: dict[str, Any] | None, what: str) -> str:
+    """Почему сравнивать не с кем — по-разному для двух разных причин.
+
+    Отмеченный конкурент, которого нет в сообщениях периода, выпадает из
+    агрегатов. Сказать человеку «конкуренты не отмечены», когда он их отметил,
+    значит отправить его искать ошибку не там.
+    """
+    configured = int((benchmark or {}).get("configured_competitors", 0) or 0)
+    if configured:
+        missing = [str(x) for x in (benchmark or {}).get("missing_competitors", [])]
+        names = ", ".join(missing[:5]) if missing else "ни один"
+        return (
+            f"{what} считается на фоне конкурентов, но в выбранном периоде их "
+            f"упоминаний нет ({names}). Проверьте период или разметку брендов."
+        )
+    return (
+        f"Отмечены только свои бренды. {what} считается на фоне конкурентов — "
+        "отметьте их в блоке «Бренды категории»."
+    )
+
+
 def compute_sov(benchmark: dict[str, Any] | None, basis: str = "messages") -> dict[str, Any]:
     """SOV = показатель бренда / сумма по всем брендам категории × 100%."""
     formula = "Упоминания наших брендов / Упоминания всех брендов категории × 100%"
@@ -499,10 +520,7 @@ def compute_sov(benchmark: dict[str, Any] | None, basis: str = "messages") -> di
             value=None,
             formula=formula,
             hint=hint,
-            reason=(
-                "Отмечены только свои бренды. Доля голоса считается на фоне "
-                "конкурентов — отметьте их в блоке «Бренды категории»."
-            ),
+            reason=_no_rivals_reason(benchmark, "Доля голоса"),
         )
 
     column = "reach" if basis == "reach" else "messages"
@@ -577,10 +595,7 @@ def compute_reach_score(benchmark: dict[str, Any] | None) -> dict[str, Any]:
             value=None,
             formula=formula,
             hint=hint,
-            reason=(
-                "Отмечены только свои бренды. Заметность считается на фоне "
-                "конкурентов — отметьте их в блоке «Бренды категории»."
-            ),
+            reason=_no_rivals_reason(benchmark, "Заметность"),
         )
 
     # Своя группа сравнивается с игроками категории как один участник. Иначе

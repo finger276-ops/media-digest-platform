@@ -256,11 +256,24 @@ def benchmark_from_messages(
     if not bool(brands["is_own"].any()):
         return None
     own = [str(x) for x in brands.loc[brands["is_own"], "brand"]]
+    found = {str(x).casefold() for x in brands["brand"]}
+    # Отмеченный конкурент, не встретившийся в периоде, выпадает из агрегатов.
+    # Если выпали все, метрика должна сказать именно это, а не «конкуренты не
+    # отмечены»: человек их отметил и будет искать ошибку не там.
+    missing = [
+        str(x).strip()
+        for x in (competitor_brands or [])
+        if str(x).strip() and str(x).strip().casefold() not in found
+    ]
     return {
         "own_brand": own[0] if own else "",
         "own_brands": own,
         "brands": brands.to_dict("records"),
         "source": "project_tags",
+        "configured_competitors": len(
+            [x for x in (competitor_brands or []) if str(x).strip()]
+        ),
+        "missing_competitors": missing,
     }
 
 

@@ -356,6 +356,25 @@ check(
     sov_own["reason"],
 )
 
+# Отмеченный конкурент, которого нет в сообщениях периода, выпадает из
+# агрегатов. Сказать человеку «конкуренты не отмечены», когда он их отметил,
+# значит отправить его искать ошибку не там.
+marked_but_absent = dict(own_only)
+marked_but_absent["configured_competitors"] = 2
+marked_but_absent["missing_competitors"] = ["ROCKWOOL", "ТЕХНОНИКОЛЬ"]
+absent = compute_sov(marked_but_absent)
+check("метрика всё равно не считается", absent["value"] is None, str(absent["value"]))
+check(
+    "причина другая: конкуренты отмечены, но не встретились",
+    "упоминаний нет" in absent["reason"] and "ROCKWOOL" in absent["reason"],
+    absent["reason"],
+)
+check(
+    "не советует отмечать то, что уже отмечено",
+    "отметьте их" not in absent["reason"].lower(),
+    absent["reason"],
+)
+
 print("Без отмеченных брендов метрики честно молчат")
 empty_benchmark = category_store.benchmark_from_messages(tagged, [], ["Docke"])
 check("без своих брендов бенчмарк не собирается", empty_benchmark is None)
