@@ -41,6 +41,9 @@ jobs:
       - name: Природа сообщений (отзыв, комментарий, репост, публикация)
         run: python tests/test_message_kinds.py
 
+      - name: Восстановление сюжетов (наследование и кластеризация)
+        run: python tests/test_story_recovery.py
+
       - name: Аудитория по площадкам, а не по строкам
         run: python tests/test_audience_metrics.py
 

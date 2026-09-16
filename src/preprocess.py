@@ -31,6 +31,8 @@ from settings import (
 from io_utils import read_source_csv, write_table, write_manifest
 from services.event_titles import normalize_event_title
 from services.message_kinds import classify_kinds
+from services.ru_text import tokenize_ru, top_keywords, top_phrases
+from services.story_recovery import recover_stories
 
 
 def stable_hash(value: str, prefix: str = "") -> str:
@@ -1217,39 +1219,6 @@ def make_discussions(
     return discussions, discussion_messages
 
 
-def tokenize_ru(text: str, *, for_keywords: bool = False) -> list[str]:
-    text = str(text).lower().replace("ё", "е")
-    text = re.sub(r"https?://\S+|t\.me/\S+", " ", text)
-    tokens = re.findall(r"[а-яa-z0-9]{3,}", text)
-    stop = KEYWORD_STOPWORDS if for_keywords else RUSSIAN_STOPWORDS
-    return [t for t in tokens if t not in stop and not t.isdigit()]
-
-
-def top_keywords(texts: Iterable[str], top_n: int = 7) -> list[str]:
-    """
-    Возвращает чистые ключевые слова для карточки инфоповода.
-    В отличие от TF-IDF токенизации, здесь жестче режем мат, бренды и слишком общие слова.
-    """
-    counter: Counter[str] = Counter()
-    for text in texts:
-        counter.update(tokenize_ru(str(text)[:3500], for_keywords=True))
-    return [w for w, _ in counter.most_common(top_n)]
-
-
-def top_phrases(texts: Iterable[str], top_n: int = 5) -> list[str]:
-    """
-    Простая вытяжка устойчивых 2-словных фраз.
-    Нужна не для ML, а для более понятного названия/описания.
-    """
-    counter: Counter[str] = Counter()
-    for text in texts:
-        tokens = tokenize_ru(str(text)[:3500], for_keywords=True)
-        for a, b in zip(tokens, tokens[1:]):
-            if a != b:
-                counter[f"{a} {b}"] += 1
-    return [p for p, c in counter.most_common(top_n) if c >= 2]
-
-
 def main_tag(tags_series: Iterable[str]) -> str:
     counter: Counter[str] = Counter()
     for tags in tags_series:
@@ -1873,6 +1842,23 @@ def build_processed_tables(
     is_brand_analytics = is_brand_analytics_dataframe(raw)
 
     messages, message_tags = normalize_messages(raw, tag_cols)
+
+    if is_brand_analytics:
+        # Сюжетами Brand Analytics размечена примерно четверть сообщений;
+        # остальное платформа сваливала в один псевдоповод «Без сюжета», который
+        # перевешивал любой настоящий инфоповод. Досчитываем сюжеты до сборки
+        # обсуждений: дальше по конвейеру событие собирается именно по ним.
+        recovered = recover_stories(messages)
+        messages["source_main_topic"] = recovered["story"]
+        messages["story_origin"] = recovered["story_origin"]
+        # Сюжет из выгрузки авторитетнее любого досчёта, поэтому список тем
+        # обновляется только там, где он пустовал.
+        if "source_topics" in messages.columns:
+            missing_topics = messages["source_topics"].fillna("").astype(str).str.strip() == ""
+            messages.loc[missing_topics, "source_topics"] = messages.loc[
+                missing_topics, "source_main_topic"
+            ]
+
     discussions, discussion_messages = make_discussions(
         messages, window_minutes=window_minutes
     )
