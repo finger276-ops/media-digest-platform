@@ -30,6 +30,7 @@ from settings import (
 )
 from io_utils import read_source_csv, write_table, write_manifest
 from services.event_titles import normalize_event_title
+from services.message_kinds import classify_kinds
 
 
 def stable_hash(value: str, prefix: str = "") -> str:
@@ -776,6 +777,10 @@ def normalize_messages(
     messages = df[list(available.keys())].rename(columns=available)
     messages["date"] = messages["date"].fillna("")
     messages["datetime"] = pd.to_datetime(messages["datetime"], errors="coerce")
+    # Природа сообщения считается здесь, а не при сборке инфоповодов: она
+    # нужна и разделу отзывов, и фильтрам ленты, а зависит только от колонок,
+    # которые уже приехали. Считать её дважды незачем.
+    messages["kind"] = classify_kinds(messages)
 
     tag_rows = []
     for message_id, tags in zip(messages["message_id"], messages["tags"]):

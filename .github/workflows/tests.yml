@@ -38,6 +38,9 @@ jobs:
       - name: Обработка выгрузки (микротемы, заголовки, сборка таблиц)
         run: python tests/test_preprocess.py
 
+      - name: Природа сообщений (отзыв, комментарий, репост, публикация)
+        run: python tests/test_message_kinds.py
+
       - name: Аудитория по площадкам, а не по строкам
         run: python tests/test_audience_metrics.py
 
