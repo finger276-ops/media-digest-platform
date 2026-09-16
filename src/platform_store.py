@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import unicodedata
@@ -45,6 +46,8 @@ ROW_KEY_COLUMNS = {
 PAGE_SIZE = 1000
 CHUNK_SIZE = 400
 
+LOGGER = logging.getLogger("platform.store")
+
 
 def _secret_value(*names: str) -> str:
     for name in names:
@@ -52,14 +55,14 @@ def _secret_value(*names: str) -> str:
             try:
                 if name in st.secrets:
                     return str(st.secrets[name])
-            except Exception:
+            except Exception:  # noqa: BLE001 — файла секретов может не быть вовсе
                 pass
             try:
                 # Support [supabase] url/key too.
                 section_key = name.lower().replace("supabase_", "")
                 if "supabase" in st.secrets and section_key in st.secrets["supabase"]:
                     return str(st.secrets["supabase"][section_key])
-            except Exception:
+            except Exception:  # noqa: BLE001 — секция необязательна
                 pass
         value = os.getenv(name)
         if value:
@@ -152,7 +155,8 @@ def normalize_json_value(value: Any) -> Any:
     try:
         if pd.isna(value):
             return None
-    except Exception:
+    except (TypeError, ValueError):
+        # pd.isna на массиве или несравнимом объекте — значит, это не NaN.
         pass
     if isinstance(value, (pd.Timestamp, datetime)):
         if pd.isna(value):
@@ -163,7 +167,9 @@ def normalize_json_value(value: Any) -> Any:
     if hasattr(value, "item"):
         try:
             return value.item()
-        except Exception:
+        except (TypeError, ValueError):
+            # .item() падает на numpy-массиве из нескольких элементов —
+            # тогда значение уходит как есть.
             pass
     return value
 
@@ -603,7 +609,7 @@ def _api_error_message(exc: Exception) -> str:
         raw = getattr(exc, "args", None)
         if raw:
             return str(raw[0])[:1200]
-    except Exception:
+    except Exception:  # noqa: BLE001 — падение здесь заменяется общим str(exc)
         pass
     return str(exc)[:1200]
 
@@ -716,19 +722,53 @@ def delete_period(
         ).execute()
         mode = "hard"
     except Exception as exc:
+        hidden = True
         try:
             update_period_metadata(project_id, period_id, status="hidden")
-        except Exception:
-            pass
+        except Exception as hide_exc:  # noqa: BLE001 — двойной отказ фиксируем честно
+            # Период не удалился и не скрылся: раньше это молча выдавалось за
+            # «скрыт», и владелец узнавал правду от клиента. Теперь ответ
+            # честный, а событие уходит в канал ошибок.
+            hidden = False
+            LOGGER.error(
+                "Период %s/%s не удалён и не скрыт: %s",
+                project_id,
+                period_id,
+                _api_error_message(hide_exc),
+            )
+            try:
+                from services.observability import report_failure
+
+                report_failure(
+                    "хранилище: период не удалён и не скрыт",
+                    hide_exc,
+                    project_id=project_id,
+                    period_id=period_id,
+                )
+            except Exception:  # noqa: BLE001 — доставка не важнее самого ответа
+                pass
+        if hidden:
+            return {
+                "mode": "soft_fallback",
+                "manual_rows_deleted": manual_deleted,
+                "table_rows_deleted": table_rows_deleted,
+                "storage_deleted": False,
+                "storage_path": storage_path,
+                "warnings": warnings
+                + [
+                    "Supabase не разрешил физически удалить строки выгрузки; период скрыт из интерфейса. "
+                    f"Детали: {_api_error_message(exc)}"
+                ],
+            }
         return {
-            "mode": "soft_fallback",
+            "mode": "failed",
             "manual_rows_deleted": manual_deleted,
             "table_rows_deleted": table_rows_deleted,
             "storage_deleted": False,
             "storage_path": storage_path,
             "warnings": warnings
             + [
-                "Supabase не разрешил физически удалить строки выгрузки; период скрыт из интерфейса. "
+                "Supabase не разрешил ни удалить, ни скрыть период — он остался как был. "
                 f"Детали: {_api_error_message(exc)}"
             ],
         }
@@ -1025,7 +1065,9 @@ def delete_uploaded_file_from_storage(storage_path: str) -> bool:
     try:
         client.storage.from_(bucket).remove([storage_path])
         return True
-    except Exception:
+    except Exception:  # noqa: BLE001 — вызывающий получает False и решает сам
+        # Файл остаётся сиротой в Storage — след в логе, чтобы находить такие.
+        LOGGER.warning("Не удалось удалить файл из Storage: %s", storage_path)
         return False
 
 
@@ -1063,7 +1105,8 @@ def storage_public_url(storage_path: str) -> str:
         client = get_supabase_client()
         url = client.storage.from_(storage_bucket_name()).get_public_url(storage_path)
         return str(url or "")
-    except Exception:
+    except Exception:  # noqa: BLE001 — ссылка не критична, но след нужен
+        LOGGER.warning("Не удалось получить публичную ссылку: %s", storage_path)
         return ""
 
 

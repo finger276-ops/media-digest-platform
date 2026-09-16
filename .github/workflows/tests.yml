@@ -86,5 +86,8 @@ jobs:
       - name: Доставка ошибок владельцу (Sentry/вебхук)
         run: python tests/test_observability.py
 
+      - name: Гигиена except (молчание должно быть обосновано)
+        run: python tests/test_except_hygiene.py
+
       - name: Дымовой тест интерфейса
         run: python tests/test_ui_smoke.py

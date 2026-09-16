@@ -174,7 +174,9 @@ def audience_by_group(messages: pd.DataFrame, group: pd.Series) -> pd.Series:
 def format_int(value: Any) -> str:
     try:
         return f"{int(float(value)):,}".replace(",", " ")
-    except Exception:
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError — это int(inf): бесконечность из деления на ноль
+        # показывается нулём, как и любое несчитаемое значение.
         return "0"
 
 

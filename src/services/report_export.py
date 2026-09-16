@@ -8,6 +8,7 @@ Framework-independent (без Streamlit), как services/brand_metrics.py — �
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import textwrap
@@ -21,8 +22,11 @@ import pandas as pd
 from .dashboard_config import REPORT_TEMPLATE_OPTIONS
 from .cached_store import download_storage_file
 from .metrics_compute import format_int, numeric_series, percent_text
+from .observability import report_failure
 from .project_settings import report_branding_from_project_settings, valid_hex_color
 from .tag_compute import build_tag_statistics
+
+LOGGER = logging.getLogger("platform.report_export")
 
 
 def first_existing_col(df: pd.DataFrame, columns: list[str | None]) -> str | None:
@@ -54,7 +58,8 @@ def export_top_tags(
         return []
     try:
         stats = build_tag_statistics(messages).head(limit).copy()
-    except Exception:
+    except Exception:  # noqa: BLE001 — выгрузка без топ-тегов лучше, чем никакая
+        LOGGER.warning("Топ-теги для выгрузки не посчитались", exc_info=True)
         return []
     result: list[dict[str, Any]] = []
     for _, row in stats.iterrows():
@@ -146,8 +151,8 @@ def _load_report_logo_bytes(branding: dict[str, Any] | None) -> bytes:
     if storage_path:
         try:
             return download_storage_file(storage_path)
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 — ниже есть запасной путь по ссылке
+            LOGGER.warning("Логотип из Storage не скачался: %s", storage_path)
     url = str(branding.get("logo_url") or "").strip()
     if url.startswith(("http://", "https://")):
         try:
@@ -157,7 +162,8 @@ def _load_report_logo_bytes(branding: dict[str, Any] | None) -> bytes:
                 url, timeout=6
             ) as response:  # nosec - user-provided report asset URL
                 return response.read()
-        except Exception:
+        except Exception:  # noqa: BLE001 — отчёт без логотипа лучше, чем без отчёта
+            LOGGER.warning("Логотип по ссылке не скачался: %s", url)
             return b""
     return b""
 
@@ -170,7 +176,8 @@ def _logo_image_from_payload(payload: dict[str, Any]):
         from PIL import Image as PILImage
 
         return PILImage.open(BytesIO(logo_bytes)).convert("RGBA")
-    except Exception:
+    except Exception:  # noqa: BLE001 — битая картинка не должна ломать выгрузку
+        LOGGER.warning("Логотип не открылся как изображение", exc_info=True)
         return None
 
 
@@ -239,7 +246,7 @@ def _metric_delta_for_export(current: Any, previous: Any) -> str:
     try:
         cur = float(current or 0)
         prev = float(previous or 0)
-    except Exception:
+    except (TypeError, ValueError):
         return ""
     diff = cur - prev
     if prev:
@@ -764,8 +771,11 @@ def generate_summary_docx(payload: dict[str, Any]) -> bytes:
         run = pic_p.add_run()
         run.add_picture(BytesIO(infographic_png), width=Inches(6.4))
         doc.add_page_break()
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 — Word без инфографики лучше, чем без Word
+        # Клиент получит документ и не узнает, что страницы не хватает, —
+        # поэтому владелец должен узнать вместо него.
+        LOGGER.warning("Инфографика для Word не собралась", exc_info=True)
+        report_failure("выгрузка Word: инфографика не собралась", exc)
 
     total = max(1, int(payload.get("total", 0) or 0))
     doc.add_heading("Основные метрики", level=2)
@@ -879,7 +889,7 @@ def _pdf_font_candidates() -> list[tuple[str, str | None]]:
         candidates.append(
             (str(mpl_fonts / "DejaVuSans.ttf"), str(mpl_fonts / "DejaVuSans-Bold.ttf"))
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 — matplotlib необязателен, это запасной шрифт
         pass
 
     return candidates
@@ -911,10 +921,10 @@ def _pdf_font_name() -> str:
                         italic="PlatformSans",
                         boldItalic="PlatformSans-Bold",
                     )
-                except Exception:
+                except Exception:  # noqa: BLE001 — без семейства жирный заменится обычным
                     pass
             return "PlatformSans"
-        except Exception:
+        except Exception:  # noqa: BLE001 — кандидат не подошёл, пробуем следующий
             continue
 
     raise RuntimeError(
@@ -987,8 +997,9 @@ def generate_summary_pdf(payload: dict[str, Any]) -> bytes:
         story.append(Image(infographic_io, width=17.2 * cm, height=24.35 * cm))
         story.append(PageBreak())
         infographic_added = True
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 — PDF без инфографики лучше, чем без PDF
+        LOGGER.warning("Инфографика для PDF не собралась", exc_info=True)
+        report_failure("выгрузка PDF: инфографика не собралась", exc)
 
     total = max(1, int(payload.get("total", 0) or 0))
     if not infographic_added:

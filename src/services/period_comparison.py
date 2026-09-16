@@ -231,7 +231,7 @@ def metric_delta(current: float, previous: float) -> str:
     try:
         current = float(current or 0)
         previous = float(previous or 0)
-    except Exception:
+    except (TypeError, ValueError):
         return "0"
     diff = current - previous
     sign = "+" if diff > 0 else ""

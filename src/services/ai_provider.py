@@ -65,7 +65,7 @@ def _secret_value(*names: str) -> str:
             try:
                 if name in st.secrets:
                     return str(st.secrets[name]).strip()
-            except Exception:
+            except Exception:  # noqa: BLE001 — файла секретов может не быть вовсе
                 pass
             try:
                 if "ai" in st.secrets:
@@ -74,7 +74,7 @@ def _secret_value(*names: str) -> str:
                         section_key = section_key.replace(prefix, "", 1)
                     if section_key in st.secrets["ai"]:
                         return str(st.secrets["ai"][section_key]).strip()
-            except Exception:
+            except Exception:  # noqa: BLE001 — секция [ai] необязательна
                 pass
         value = os.getenv(name)
         if value:
@@ -194,7 +194,7 @@ def _is_ca_cert(cert: Any) -> bool:
 
         constraints = cert.extensions.get_extension_for_class(x509.BasicConstraints)
         return bool(constraints.value.ca)
-    except Exception:
+    except Exception:  # noqa: BLE001 — нет расширения или cryptography: не CA
         return False
 
 

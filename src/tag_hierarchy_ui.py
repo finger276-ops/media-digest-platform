@@ -134,6 +134,10 @@ def render_tag_hierarchy_block(project_id: str) -> None:
                     f"глубина {saved.max_depth()}. Аналитика по уровням станет "
                     f"доступна после следующего этапа."
                 )
-    except Exception:
-        # мягкая деградация: блок тегов не должен ломать экран загрузки
+    except Exception as exc:  # noqa: BLE001 — своя граница отказа блока
+        # Мягкая деградация: блок тегов не должен ломать экран загрузки.
+        # Но исчезать молча тоже нельзя — владелец узнаёт через канал ошибок.
+        from services.observability import report_failure
+
+        report_failure("блок «Система тегов проекта»", exc)
         return

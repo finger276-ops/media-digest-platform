@@ -14,14 +14,15 @@ def fmt_date(value: Any) -> str:
     try:
         if pd.isna(value):
             return ""
-    except Exception:
+    except (TypeError, ValueError):
+        # pd.isna на массиве или несравнимом объекте — значит, это не NaN.
         pass
     try:
         ts = pd.to_datetime(value, errors="coerce", dayfirst=True)
         if pd.isna(ts):
             return ""
         return ts.strftime("%d.%m.%Y")
-    except Exception:
+    except Exception:  # noqa: BLE001 — непонятная дата в ленте показывается пустой
         return ""
 
 

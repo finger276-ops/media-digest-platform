@@ -505,7 +505,10 @@ def _read_excel_sheets(
             if preview_df.empty:
                 return pd.DataFrame()
             return preview_df
-        except Exception:
+        except Exception:  # noqa: BLE001 — нечитаемый лист выбывает из выбора
+            # Молчать полностью нельзя: если «выпал» лист с сообщениями,
+            # платформа возьмёт не тот — след в логе объяснит, почему.
+            LOGGER.warning("Лист Excel не прочитался при предпросмотре", exc_info=True)
             return pd.DataFrame()
 
     preferred_sheet_names = {"сообщения", "messages", "публикации", "mentions"}
@@ -1155,5 +1158,6 @@ def get_excel_sheet_names(path: str | Path) -> list[str]:
     try:
         with _open_excel_file_resilient(path) as xls:
             return list(xls.sheet_names)
-    except Exception:
+    except Exception:  # noqa: BLE001 — файл прочитается (или нет) дальше по конвейеру
+        LOGGER.warning("Не удалось перечислить листы Excel: %s", path.name)
         return []

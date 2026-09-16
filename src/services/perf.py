@@ -19,7 +19,7 @@ def _state_get(key: str, default: Any) -> Any:
         return default
     try:
         return st.session_state.get(key, default)
-    except Exception:
+    except Exception:  # noqa: BLE001 — вне рантайма Streamlit состояния нет
         return default
 
 
@@ -28,7 +28,7 @@ def _state_set(key: str, value: Any) -> None:
         return
     try:
         st.session_state[key] = value
-    except Exception:
+    except Exception:  # noqa: BLE001 — вне рантайма Streamlit состояния нет
         pass
 
 
@@ -78,5 +78,5 @@ def render_perf_sidebar() -> None:
             df = pd.DataFrame(events)
             if not df.empty:
                 st.dataframe(df.tail(15), hide_index=True, width="stretch")
-    except Exception:
+    except Exception:  # noqa: BLE001 — диагностика скорости не стоит падения
         pass

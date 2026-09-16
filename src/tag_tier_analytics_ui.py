@@ -197,6 +197,10 @@ def render_tier_analytics_block(
                     coverage["outside_tags"], columns=["Тег (нормализован)", "Сообщений"]
                 )
                 st.dataframe(outside_df, hide_index=True, width="stretch")
-    except Exception:
-        # мягкая деградация: аналитика по тирам не должна ломать раздел «Теги»
+    except Exception as exc:  # noqa: BLE001 — своя граница отказа блока
+        # Мягкая деградация: аналитика по тирам не должна ломать раздел «Теги».
+        # Но исчезать молча тоже нельзя — владелец узнаёт через канал ошибок.
+        from services.observability import report_failure
+
+        report_failure("блок «Аналитика по уровням тегов»", exc)
         return
