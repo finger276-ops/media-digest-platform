@@ -230,15 +230,21 @@ check("пустые значения отбрасываются", period_key(["a
 check("повторы схлопываются", period_key(["a", "a"]) == "a", period_key(["a", "a"]))
 check("пустой список даёт пустой ключ", period_key([]) == "" and period_key(None) == "")
 
-print("Направление метрики: где цвет утверждает «лучше», а где нет")
-# Цвет у изменения утверждает «стало лучше» или «стало хуже». Для доли голоса
-# такого утверждения нет: громкость бывает и скандальной, о чём говорит
-# подсказка самой метрики.
-from services.brand_metrics import metric_direction  # noqa: E402
+print("Направление метрики задаёт цвет изменения")
+# Цвет показывает направление движения, а не приговор: толкование даёт аналитик
+# в столбце «Вывод», он же смотрит тональность рядом. Доля голоса красится
+# наравне с остальными, хотя рост громкости бывает и скандальным.
+from services.brand_metrics import METRIC_DIRECTION, metric_direction  # noqa: E402
 
-for code in ("BPI", "NSS", "SES", "TVS", "ReachScore", "ER", "ERR"):
+for code in ("BPI", "NSS", "SES", "TVS", "SOV", "ReachScore", "ER", "ERR"):
     check(f"у {code} направление вверх", metric_direction(code) == "up", metric_direction(code))
-check("у SOV направление не задано", metric_direction("SOV") == "neutral", metric_direction("SOV"))
+check(
+    "направление задано у всех восьми метрик",
+    len(METRIC_DIRECTION) == 8,
+    str(sorted(METRIC_DIRECTION)),
+)
+# Метрика без заданного направления не красится: платформа не берётся судить о
+# том, чего не знает.
 check("незнакомая метрика не красится", metric_direction("WHATEVER") == "neutral")
 
 print("Бренды категории берутся из тегов самой выгрузки")
