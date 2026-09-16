@@ -1,7 +1,4 @@
--- Перенесено в sql/migrations/0003_tag_hierarchy_schema.sql — новые изменения
--- схемы вносятся туда пронумерованными файлами, см. sql/migrations/README.md.
--- Этот файл оставлен как есть для истории.
---
+-- Перенесено из sql/tag_hierarchy_schema.sql без изменений содержимого.
 -- Система иерархических тегов проекта (Этап 2).
 -- Одна строка на проект: вся структура хранится целиком в jsonb.
 -- Загрузка/замена атомарны; при удалении проекта структура удаляется каскадно.
@@ -11,8 +8,6 @@
 --            или группирующий тег, которого в выгрузке нет)
 --   tier   — уровень (1 = верхний)
 --   parent — родительский тег ("" для корней)
---
--- Применение: выполнить в Supabase SQL Editor один раз.
 
 create table if not exists public.platform_tag_hierarchies (
     project_id text primary key references public.platform_projects(project_id) on delete cascade,
@@ -26,3 +21,7 @@ create table if not exists public.platform_tag_hierarchies (
 
 comment on table public.platform_tag_hierarchies is
     'Иерархия тегов проекта (дерево tag/tier/parent), загружается аналитиком из Excel';
+
+insert into public.schema_migrations (version, name)
+values ('0003', 'tag_hierarchy_schema')
+on conflict (version) do nothing;

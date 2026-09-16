@@ -1,9 +1,5 @@
--- Перенесено в sql/migrations/0004_platform_ingest_schema.sql — новые изменения
--- схемы вносятся туда пронумерованными файлами, см. sql/migrations/README.md.
--- Этот файл оставлен как есть для истории.
---
+-- Перенесено из sql/platform_ingest_schema.sql без изменений содержимого.
 -- Автозагрузка выгрузок (n8n → Supabase → воркер платформы).
--- Выполнить один раз в Supabase SQL Editor. Скрипт идемпотентный.
 --
 -- Схема состоит из двух таблиц:
 --   platform_ingest_sources — маппинг внешнего источника (отчет Brand Analytics,
@@ -108,3 +104,7 @@ drop trigger if exists trg_platform_ingest_sources_touch on public.platform_inge
 create trigger trg_platform_ingest_sources_touch
     before update on public.platform_ingest_sources
     for each row execute function public.platform_touch_updated_at();
+
+insert into public.schema_migrations (version, name)
+values ('0004', 'platform_ingest_schema')
+on conflict (version) do nothing;

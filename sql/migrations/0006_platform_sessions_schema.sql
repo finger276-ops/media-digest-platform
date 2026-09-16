@@ -1,9 +1,5 @@
--- Перенесено в sql/migrations/0006_platform_sessions_schema.sql — новые
--- изменения схемы вносятся туда пронумерованными файлами, см.
--- sql/migrations/README.md. Этот файл оставлен как есть для истории.
---
+-- Перенесено из sql/platform_sessions_schema.sql без изменений содержимого.
 -- Живые сессии платформы: кто сейчас онлайн, в каком проекте, с какой ролью.
--- Выполнить один раз в Supabase SQL Editor. Скрипт идемпотентный.
 --
 -- У платформы нет системы логинов (доступ — общие коды на проект), поэтому
 -- сессия анонимна: это случайный ID браузерной вкладки, сгенерированный при
@@ -35,3 +31,7 @@ create index if not exists idx_platform_sessions_project
 
 -- RLS: доступ только у service_role, как и у остальных platform_* таблиц.
 alter table public.platform_sessions enable row level security;
+
+insert into public.schema_migrations (version, name)
+values ('0006', 'platform_sessions_schema')
+on conflict (version) do nothing;

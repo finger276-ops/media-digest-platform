@@ -1,9 +1,5 @@
--- Перенесено в sql/migrations/0005_platform_brand_metrics_schema.sql — новые
--- изменения схемы вносятся туда пронумерованными файлами, см.
--- sql/migrations/README.md. Этот файл оставлен как есть для истории.
---
+-- Перенесено из sql/platform_brand_metrics_schema.sql без изменений содержимого.
 -- Категорийные бенчмарки для метрик SOV и ReachScore.
--- Выполнить один раз в Supabase SQL Editor. Скрипт идемпотентный.
 --
 -- Одна строка на период проекта. Вся разбивка по брендам лежит в jsonb:
 --   brands: [{"brand": "...", "messages": 0, "audience": 0, "reach": 0,
@@ -31,3 +27,7 @@ comment on table public.platform_category_benchmarks is
 
 create index if not exists idx_platform_category_benchmarks_project
     on public.platform_category_benchmarks(project_id, updated_at desc);
+
+insert into public.schema_migrations (version, name)
+values ('0005', 'platform_brand_metrics_schema')
+on conflict (version) do nothing;

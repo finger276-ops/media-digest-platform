@@ -1,7 +1,4 @@
--- Перенесено в sql/migrations/0001_dashboard_schema.sql — новые изменения
--- схемы вносятся туда пронумерованными файлами, см. sql/migrations/README.md.
--- Этот файл оставлен как есть для истории.
---
+-- Перенесено из sql/supabase_schema.sql без изменений содержимого.
 -- Supabase schema for taxi chat dashboard persistence.
 -- Run this once in Supabase SQL Editor.
 
@@ -51,3 +48,7 @@ create index if not exists idx_dashboard_periods_status_uploaded
 
 create index if not exists idx_dashboard_manual_rows_table_updated
     on public.dashboard_manual_rows(table_name, updated_at desc);
+
+insert into public.schema_migrations (version, name)
+values ('0001', 'dashboard_schema')
+on conflict (version) do nothing;

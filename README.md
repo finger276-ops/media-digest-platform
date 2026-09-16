@@ -45,27 +45,17 @@ streamlit_app.py
 
 ## SQL в Supabase
 
-В Supabase открой:
+Схема ведётся как пронумерованные миграции в `sql/migrations/` — каждый файл
+идемпотентен и сам отмечается в журнале `schema_migrations`, поэтому не нужно
+помнить, что уже применялось. Подробности и как проверить статус —
+`sql/migrations/README.md`.
 
-```text
-SQL Editor → New query
-```
-
-Вставь и выполни содержимое файла:
-
-```text
-sql/platform_schema.sql
-```
-
-Будут созданы таблицы:
-
-```text
-platform_projects
-platform_periods
-platform_table_rows
-platform_manual_rows
-platform_project_members
-```
+Коротко: в Supabase открой `SQL Editor → New query`, выполни
+`sql/migrations/0000_schema_migrations.sql`, затем файлы `0001_...` и далее
+по порядку номеров. Будут созданы все таблицы платформы, включая
+`platform_projects`, `platform_periods`, `platform_table_rows`,
+`platform_manual_rows`, `platform_project_members`, очередь автозагрузки,
+иерархию тегов, категорийные бенчмарки и живые сессии.
 
 Они не пересекаются со старыми таблицами `dashboard_periods`, `dashboard_table_rows`, `dashboard_manual_rows`.
 

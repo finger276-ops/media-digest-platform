@@ -1,7 +1,4 @@
--- Перенесено в sql/migrations/0002_platform_schema.sql — новые изменения
--- схемы вносятся туда пронумерованными файлами, см. sql/migrations/README.md.
--- Этот файл оставлен как есть для истории.
---
+-- Перенесено из sql/platform_schema.sql без изменений содержимого.
 -- Multi-project digest platform schema.
 -- Uses platform_* tables so the current taxi-chat dashboard dashboard_* tables remain untouched.
 
@@ -78,3 +75,7 @@ create index if not exists idx_platform_table_rows_project_period_table
 
 create index if not exists idx_platform_manual_rows_project_table_updated
     on public.platform_manual_rows(project_id, table_name, updated_at desc);
+
+insert into public.schema_migrations (version, name)
+values ('0002', 'platform_schema')
+on conflict (version) do nothing;
