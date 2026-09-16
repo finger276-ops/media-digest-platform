@@ -468,6 +468,18 @@ check(
     any("Склеено похожих заголовков" in label for label in expanders),
     str(expanders),
 )
+# Описание правилось и раньше, но в свёрнутом блоке под таблицей: выбрать
+# строку, прокрутить, раскрыть, сохранить — и так для каждого из двадцати
+# инфоповодов дайджеста. Теперь правка идёт прямо в таблице.
+event_tables = [
+    set(str(c) for c in getattr(d.value, "columns", []))
+    for d in at.dataframe
+]
+check(
+    "таблица инфоповодов даёт править описание",
+    any({"Описание", "Открыть"} <= cols for cols in event_tables),
+    str(event_tables)[:260],
+)
 view_mode = [r for r in at.sidebar.radio if str(r.label) == "Вид дашборда"]
 if view_mode:
     view_mode[0].set_value("analyst").run()

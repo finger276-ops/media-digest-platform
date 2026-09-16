@@ -11,7 +11,7 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
-from services.cached_store import delete_manual, save_manual
+from services.cached_store import delete_manual, get_manual, save_manual
 from services.event_filter_state import (
     event_series_filter,
     filter_messages_by_selected_event,
@@ -36,6 +36,123 @@ from services.story_recovery import (
 )
 from services.tag_compute import split_pipe_values
 from messages_ui import render_message_list
+
+
+OPEN_COLUMN = "Открыть"
+
+
+def render_events_table(
+    project_id: str,
+    show: pd.DataFrame,
+    events: pd.DataFrame,
+    *,
+    can_edit: bool,
+) -> pd.Series | None:
+    """Таблица инфоповодов: описание правится прямо здесь.
+
+    Описание правилось и раньше, но в свёрнутом блоке под таблицей: выбрать
+    строку, прокрутить, раскрыть, сохранить — и так для каждого из двадцати
+    инфоповодов дайджеста. В таблице это одна правка на строку.
+
+    Выбор строки — галочкой, а не кликом: редактируемая таблица Streamlit не
+    отдаёт выбранную строку, а обычная не даёт править. Из двух ограничений
+    выбрано то, где правка возможна: ради неё всё и затевалось.
+    """
+    state_key = f"events_open_row_{project_id}"
+    opened = str(st.session_state.get(state_key) or "")
+    keys = [str(k) for k in events.get("group_key", pd.Series(dtype=str))]
+
+    work = show.copy()
+    work.insert(0, OPEN_COLUMN, [key == opened for key in keys])
+
+    if not can_edit:
+        st.caption("Отметьте инфоповод, чтобы раскрыть его сообщения.")
+
+    edited = st.data_editor(
+        work,
+        hide_index=True,
+        width="stretch",
+        key=f"events_editor_{project_id}",
+        column_config={
+            OPEN_COLUMN: st.column_config.CheckboxColumn(
+                OPEN_COLUMN, width="small", help="Раскрыть инфоповод под таблицей."
+            ),
+            "Описание": st.column_config.TextColumn(
+                "Описание",
+                width="large",
+                help=(
+                    "О чём тема. Автоматическое описание собрано из тегов — "
+                    "перепишите своими словами, оно попадёт в отчёт."
+                    if can_edit
+                    else "О чём тема."
+                ),
+            ),
+        },
+        disabled=(
+            ["Сюжет / инфоповод", "Период", "Сообщений", "Источников", "Негатив", "Важность"]
+            if can_edit
+            else [c for c in work.columns if c != OPEN_COLUMN]
+        ),
+    )
+
+    if can_edit:
+        _save_edited_descriptions(project_id, show, edited, events)
+
+    # Галочек может оказаться несколько: открываем ту, что поставили сейчас.
+    checked = [
+        keys[position]
+        for position, value in enumerate(edited[OPEN_COLUMN].fillna(False))
+        if bool(value) and position < len(keys)
+    ]
+    new_key = next((key for key in checked if key != opened), "")
+    if new_key:
+        st.session_state[state_key] = new_key
+        st.rerun()
+    if not checked and opened:
+        st.session_state[state_key] = ""
+        st.rerun()
+    if not opened:
+        return None
+
+    match = events[events["group_key"].astype(str) == opened]
+    return match.iloc[0] if not match.empty else None
+
+
+def _save_edited_descriptions(
+    project_id: str, before: pd.DataFrame, after: pd.DataFrame, events: pd.DataFrame
+) -> None:
+    """Сохранить изменённые описания.
+
+    Сохраняется только то, что изменилось: таблица возвращает весь кадр на
+    каждой перерисовке, и запись всех строк подряд давала бы десятки обращений
+    к базе на одно нажатие.
+    """
+    saved = 0
+    for position, (old, new) in enumerate(
+        zip(before["Описание"].fillna("").astype(str), after["Описание"].fillna("").astype(str))
+    ):
+        if old.strip() == new.strip() or position >= len(events):
+            continue
+        row = events.iloc[position]
+        # Строка таблицы — это склеенный инфоповод, за ней может стоять
+        # несколько исходных событий. Правка распространяется на все, как и в
+        # блоке ручной правки под таблицей.
+        event_ids = [str(x) for x in (row.get("event_ids") or []) if str(x).strip()]
+        for event_id in event_ids:
+            row_key = f"event_edit::{event_id}"
+            # Запись заменяет payload целиком, поэтому прежние правки нужно
+            # перечитать: иначе изменение описания стёрло бы сохранённое
+            # название и теги того же инфоповода.
+            payload = dict(get_manual(project_id, row_key) or {})
+            payload["event_id"] = event_id
+            payload["description"] = new.strip()
+            try:
+                save_manual(project_id, "event_edits", row_key, payload)
+                saved += 1
+            except Exception:  # noqa: BLE001 — описание не стоит падения раздела
+                st.warning("Не удалось сохранить описание инфоповода.")
+    if saved:
+        st.rerun()
 
 
 def render_assembly_notice(messages: pd.DataFrame) -> None:
@@ -235,19 +352,28 @@ def render_selected_event_detail(
                 )
                 break
 
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Сообщений", format_int(metrics.get("messages", 0)))
-    c2.metric("Источников/чатов", format_int(chat_count))
-    c3.metric("Авторов", format_int(author_count))
-    c4.metric("Негатив", percent_text(int(sent.get("negative", 0) or 0), total))
-    c5.metric(
-        "Важность", str(round(float(selected.get("importance_score", 0) or 0), 2))
-    )
+    # Карточки в рамках, как в шапке «Обзора»: одинаковые числа должны и
+    # выглядеть одинаково, иначе показатели инфоповода читаются как подпись к
+    # заголовку, а не как самостоятельная сводка.
+    volume_cards = [
+        ("Сообщений", format_int(metrics.get("messages", 0))),
+        ("Источников/чатов", format_int(chat_count)),
+        ("Авторов", format_int(author_count)),
+        ("Негатив", percent_text(int(sent.get("negative", 0) or 0), total)),
+        ("Важность", str(round(float(selected.get("importance_score", 0) or 0), 2))),
+    ]
+    for column, (label, value) in zip(st.columns(5), volume_cards):
+        with column, st.container(border=True):
+            st.metric(label, value)
 
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Аудитория", format_int(metrics.get("audience", 0)))
-    m2.metric("Охват", format_int(metrics.get("reach", 0)))
-    m3.metric("Вовлеченность", format_int(metrics.get("engagement", 0)))
+    scale_cards = [
+        ("Аудитория", format_int(metrics.get("audience", 0))),
+        ("Охват", format_int(metrics.get("reach", 0))),
+        ("Вовлеченность", format_int(metrics.get("engagement", 0))),
+    ]
+    for column, (label, value) in zip(st.columns(3), scale_cards):
+        with column, st.container(border=True):
+            st.metric(label, value)
 
     if tags_text:
         st.caption(f"Теги: {tags_text}")
@@ -608,21 +734,16 @@ def render_events(
             "importance_score": "Важность",
         }
     )
-    event = st.dataframe(
-        show,
-        hide_index=True,
-        width="stretch",
-        selection_mode="single-row",
-        on_select="rerun",
+    selected_row = render_events_table(
+        project_id, show, filtered_events, can_edit=can_edit
     )
 
     render_residual_events(residual_events, messages)
 
-    rows = getattr(event, "selection", {}).get("rows", []) if event is not None else []
-    if not rows:
+    if selected_row is None:
         return
 
-    selected = filtered_events.iloc[rows[0]]
+    selected = selected_row
     set_selected_event_filter(project_id, selected)
     selected_ids = set(map(str, selected.get("event_ids", [])))
     render_selected_event_detail(project_id, selected, messages)
