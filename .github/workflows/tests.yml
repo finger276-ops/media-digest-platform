@@ -41,6 +41,9 @@ jobs:
       - name: Обработка выгрузки (микротемы, заголовки, сборка таблиц)
         run: python tests/test_preprocess.py
 
+      - name: Инструмент нагрузочного прогона (генератор синтетики, измеритель)
+        run: python tests/test_loadtest_pipeline.py
+
       - name: Природа сообщений (отзыв, комментарий, репост, публикация)
         run: python tests/test_message_kinds.py
 
@@ -82,6 +85,9 @@ jobs:
 
       - name: Блокировка правок (конфликт двух редакторов)
         run: python tests/test_manual_conflict.py
+
+      - name: Ручная модерация (правки, слияния, переносы, счётчики)
+        run: python tests/test_manual_moderation.py
 
       - name: Доставка ошибок владельцу (Sentry/вебхук)
         run: python tests/test_observability.py

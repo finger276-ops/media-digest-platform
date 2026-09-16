@@ -1061,6 +1061,34 @@ def should_start_new_discussion(
     return False
 
 
+# Единственные колонки messages, которые читает цикл по группам ниже
+# (discussion_id → атрибуты обсуждения). У messages к этому моменту ~70
+# колонок (все длинные тексты, включая message_raw/recognized_raw/parent_text),
+# и слияние ПОЛНОГО кадра на каждое сообщение — самая дорогая строка функции:
+# под pandas 3 со строками на pyarrow каждый .sort_values()/.head()/.iterrows()
+# внутри группы копирует и «переплетает» блоки всех колонок, а групп на
+# крупной выгрузке — тысячи. Профиль на 5 000 синтетических сообщений
+# (scripts/loadtest_pipeline.py) показал на этом шаге 86 секунд, из которых
+# добрая половина — работа со столбцами, которые цикл ниже не трогает вовсе.
+_DISCUSSION_MESSAGE_COLUMNS = (
+    "text_clean",
+    "tags",
+    "parent_text",
+    "source_main_topic",
+    "source_topics",
+    "microtopic",
+    "title",
+    "chat_id",
+    "chat_title",
+    "parent_link",
+    "author_id",
+    "is_negative",
+    "is_toxic",
+    "datetime",
+    "sort_date",
+)
+
+
 def make_discussions(
     messages: pd.DataFrame, window_minutes: int = 60
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -1128,7 +1156,14 @@ def make_discussions(
     discussion_messages = pd.DataFrame(
         discussion_links, columns=["discussion_id", "message_id", "discussion_source"]
     )
-    enriched = discussion_messages.merge(messages, on="message_id", how="left")
+    # Сливаем только то, что читает цикл ниже, а не все ~70 колонок messages —
+    # см. комментарий к _DISCUSSION_MESSAGE_COLUMNS.
+    merge_cols = ["message_id"] + [
+        c for c in _DISCUSSION_MESSAGE_COLUMNS if c in messages.columns
+    ]
+    enriched = discussion_messages.merge(
+        messages[merge_cols], on="message_id", how="left"
+    )
 
     rows = []
     for did, group in enriched.groupby("discussion_id", sort=False):
