@@ -180,6 +180,23 @@ CANONICAL_COLUMNS = [
     "Адрес",
     "Цитируемость СМИ",
     "Аудитория СМИ",
+    # Поля Медиалогии. Система даёт две аудитории вместо одной, свой индекс
+    # заметности и портрет автора подробнее, чем Brand Analytics. Обе аудитории
+    # сохраняются раздельно: «Аудитория» сводится из них для сопоставимости
+    # проектов, но исходные числа теряться не должны.
+    "Аудитория блога",
+    "Аудитория автора",
+    "Тип блога",
+    "СМ Индекс",
+    "Семейный статус",
+    "Образование",
+    "Статус на площадке",
+    "Объекты",
+    "Аспекты",
+    "Мнения",
+    "Спам",
+    "Объявления",
+    "Примечание",
     "Тональность",
     "Токсичность",
     "WOM",
@@ -230,6 +247,54 @@ def _clean_col_name(value: object) -> str:
     return value
 
 
+NBSP = " "
+# Excel экранирует возврат каретки внутри ячейки, а openpyxl оставляет
+# экранирование как есть. В xlsx-выгрузке Медиалогии «_x000d_» стоит в тексте
+# 1208 строк из 2234 — и дошло бы до карточки сообщения и до поиска.
+EXCEL_CARRIAGE_RETURN = "_x000d_"
+# Число с пробелом в разрядах: «2 786», «621 789». Так их пишет csv Медиалогии
+# (4170 ячеек), тогда как xlsx той же выгрузки пишет «2786». Значение одно и то
+# же, различается только запись, и от записи не должно зависеть ничего.
+GROUPED_NUMBER = re.compile("^-?\\d{1,3}(?:[ " + NBSP + "]\\d{3})+(?:[.,]\\d+)?$")
+# Длиннее этого числом быть нечему, а проверять каждую строку текста незачем.
+MAX_NUMBER_LENGTH = 24
+
+
+def _normalize_source_quirks(values: pd.Series) -> pd.Series:
+    """Убрать различия записи, за которыми стоит одно и то же значение.
+
+    Одна и та же выгрузка Медиалогии в двух форматах давала разный текст в 1208
+    строках и разные числа в 4170 ячейках — при полностью совпадающих данных.
+    Артефакты зеркальные: xlsx оставляет «_x000d_» вместо возврата каретки, csv
+    пишет пробел в разрядах и настоящий «\\r». Пока это не выправлено, два
+    проекта из одной системы ведут себя по-разному без всякой причины.
+    """
+    for marker in (EXCEL_CARRIAGE_RETURN, EXCEL_CARRIAGE_RETURN.upper()):
+        if values.str.contains(marker, regex=False, na=False).any():
+            values = values.str.replace(marker, "", regex=False)
+
+    if values.str.contains("\r", regex=False, na=False).any():
+        values = values.str.replace("\r\n", "\n", regex=False).str.replace(
+            "\r", "\n", regex=False
+        )
+
+    # Пробел трогаем только в ячейке, которая целиком является числом: в тексте
+    # «в 5 7 часов» склейка цифр была бы порчей данных.
+    spaced = values.str.contains(" ", regex=False, na=False) | values.str.contains(
+        NBSP, regex=False, na=False
+    )
+    candidates = spaced & values.str.len().le(MAX_NUMBER_LENGTH)
+    if candidates.any():
+        values = values.copy()
+        values.loc[candidates] = [
+            value.replace(" ", "").replace(NBSP, "")
+            if GROUPED_NUMBER.match(value)
+            else value
+            for value in values[candidates]
+        ]
+    return values
+
+
 def _decode_html_entities(values: pd.Series) -> pd.Series:
     """Вернуть тексту нормальные символы вместо HTML-мнемоник.
 
@@ -265,7 +330,9 @@ def _clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df = df.loc[:, [bool(str(c).strip()) for c in df.columns]]
     df = df.dropna(how="all")
     for col in df.columns:
-        df[col] = _decode_html_entities(df[col].fillna("").astype(str))
+        df[col] = _normalize_source_quirks(
+            _decode_html_entities(df[col].fillna("").astype(str))
+        )
     df = df.loc[
         ~df.apply(lambda r: all(str(v).strip() == "" for v in r), axis=1)
     ].reset_index(drop=True)
@@ -506,6 +573,30 @@ def first_existing(df: pd.DataFrame, candidates: Iterable[str]) -> pd.Series:
         if key in lower_map:
             return df[lower_map[key]].fillna("").astype(str)
     return pd.Series([""] * len(df), index=df.index, dtype="object")
+
+
+def _coalesce(df: pd.DataFrame, candidates: Iterable[str]) -> pd.Series:
+    """Первое непустое значение по строке, а не первая непустая колонка.
+
+    first_existing выбирает колонку целиком: если она есть, остальные не
+    рассматриваются. Для аудитории этого мало. Медиалогия отдаёт «Аудиторию
+    блога» и «Аудиторию автора», и в проверенной выгрузке первая заполнена у
+    2130 строк из 2234 — оставшиеся 104 получили бы ноль вместо авторской
+    аудитории, которая там есть.
+    """
+    lower_map = {str(c).strip().lower(): c for c in df.columns}
+    result: pd.Series | None = None
+    for candidate in candidates:
+        column = lower_map.get(candidate.strip().lower())
+        if column is None:
+            continue
+        values = df[column].fillna("").astype(str)
+        result = values if result is None else result.where(result.str.strip() != "", values)
+        if result.str.strip().ne("").all():
+            break
+    if result is None:
+        return pd.Series([""] * len(df), index=df.index, dtype="object")
+    return result
 
 
 def _join_text_parts(*parts: pd.Series) -> pd.Series:
@@ -758,7 +849,7 @@ def canonicalize_table(
     # Дробные значения вроде «4.8» — это сводный рейтинг карточки, а не ошибка,
     # поэтому колонка остаётся текстовой и разбирается числом уже в аналитике.
     out["Оценка"] = first_existing(
-        df, ["Оценка", "Рейтинг", "Оценка товара", "Rating", "Score"]
+        df, ["Оценка", "Оценка от 1 до 5", "Рейтинг", "Оценка товара", "Rating", "Score"]
     )
     out["Роль объекта"] = first_existing(
         df, ["Роль объекта", "Роль", "Object role", "Object Role"]
@@ -775,6 +866,22 @@ def canonicalize_table(
     out["Аудитория СМИ"] = first_existing(
         df, ["Аудитория СМИ", "Media audience", "Аудитория издания"]
     )
+    # Поля Медиалогии. Обе аудитории сохраняются как есть: сводная «Аудитория»
+    # выше собрана из них, но подмена исходных чисел одним сводным была бы
+    # потерей — у площадки и у автора это разные величины.
+    out["Аудитория блога"] = first_existing(df, ["Аудитория блога"])
+    out["Аудитория автора"] = first_existing(df, ["Аудитория автора"])
+    out["Тип блога"] = first_existing(df, ["Тип блога", "Тип сообщества"])
+    out["СМ Индекс"] = first_existing(df, ["СМ Индекс", "СМИндекс", "MLG Index"])
+    out["Семейный статус"] = first_existing(df, ["Семейный статус"])
+    out["Образование"] = first_existing(df, ["Образование"])
+    out["Статус на площадке"] = first_existing(df, ["Статус на площадке"])
+    out["Объекты"] = first_existing(df, ["Объекты"])
+    out["Аспекты"] = first_existing(df, ["Аспекты"])
+    out["Мнения"] = first_existing(df, ["Мнения"])
+    out["Спам"] = first_existing(df, ["Спам"])
+    out["Объявления"] = first_existing(df, ["Объявления"])
+    out["Примечание"] = first_existing(df, ["Примечание", "Комментарий аналитика"])
     out["Тональность"] = _normalize_sentiment(
         first_existing(df, ["Тональность", "Sentiment", "Окраска", "Тон"])
     )
@@ -788,7 +895,22 @@ def canonicalize_table(
     out["Количество дублей"] = first_existing(
         df, ["Количество дублей", "Дублей", "Duplicates"]
     )
-    out["Аудитория"] = first_existing(df, ["Аудитория", "Audience", "audience"])
+    # Медиалогия не отдаёт «Аудиторию» одной колонкой — у неё их две, блога и
+    # автора. Без этих синонимов аудитория у любого проекта на Медиалогии
+    # оказывалась нулевой, а вместе с ней и ER, который делится на неё.
+    # Аудитория блога идёт первой: это подписчики площадки, тот же смысл, что у
+    # «Аудитории» Brand Analytics. В проверенной выгрузке она заполнена у 2130
+    # строк из 2234 против 1841 у авторской и не меньше её в 446 случаях.
+    out["Аудитория"] = _coalesce(
+        df,
+        [
+            "Аудитория",
+            "Аудитория блога",
+            "Аудитория автора",
+            "Audience",
+            "audience",
+        ],
+    )
     out["Просмотры"] = first_existing(
         df, ["Просмотры", "Просмотров", "Views", "views", "Охват", "Reach", "reach"]
     )
