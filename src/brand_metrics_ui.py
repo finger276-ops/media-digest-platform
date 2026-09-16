@@ -27,6 +27,7 @@ from services.brand_metrics import (
 )
 from services.cached_store import clear_platform_caches, update_project
 from services.ingest import IngestError, read_canonical_bytes
+from services.metric_notes import load_notes, period_key, save_note
 
 METRIC_ORDER = ["BPI", "NSS", "SES", "TVS", "SOV", "ReachScore", "ER", "ERR"]
 
@@ -96,7 +97,88 @@ def render_metric_cards(cards: dict[str, dict[str, Any]]) -> None:
                     st.caption(card.get("reason", ""))
 
 
+def render_metric_conclusions(
+    project_id: str,
+    cards: dict[str, dict[str, Any]],
+    period_ids: list[str],
+    *,
+    role_can_edit: bool = False,
+) -> None:
+    """Таблица метрик с выводом аналитика вместо формулы.
+
+    Формулы с экрана убраны намеренно: это собственная методика платформы, а не
+    то, что заказчик должен читать в отчёте. Цифру он получает вместе с
+    выводом, а устройство расчёта — предмет отдельного разговора, если спросит.
+
+    Вывод пишет человек. «NSS +4,35%» — это число, а не мысль: что оно значит
+    для бренда, зависит от рынка, от событий периода и от того, чего компания
+    добивалась. Машине такой вывод не составить.
+    """
+    notes = load_notes(project_id, period_ids)
+    table = metrics_to_frame(cards, notes)
+    if table.empty:
+        return
+
+    if not role_can_edit:
+        st.dataframe(table, width="stretch", hide_index=True)
+        _render_metrics_download(table)
+        return
+
+    st.caption(
+        "Столбец «Вывод» заполняется вручную: что метрика означает для бренда. "
+        "Текст сохраняется для выбранного периода и попадает в выгрузку."
+    )
+    edited = st.data_editor(
+        table,
+        width="stretch",
+        hide_index=True,
+        key=f"metric_notes_{project_id}_{period_key(period_ids)}",
+        column_config={
+            "Вывод": st.column_config.TextColumn(
+                "Вывод аналитика",
+                width="large",
+                help="Что эта метрика говорит о бренде в выбранном периоде.",
+            )
+        },
+        disabled=["Метрика", "Название", "Значение", "Статус"],
+    )
+
+    # Сохраняется только то, что изменилось: data_editor возвращает весь кадр
+    # на каждой перерисовке, и запись всех строк подряд поднимала бы восемь
+    # обращений к базе на каждое нажатие в любом месте страницы.
+    changed = 0
+    for _, row in edited.iterrows():
+        code = str(row.get("Метрика") or "").strip()
+        new_note = str(row.get("Вывод") or "").strip()
+        if not code or new_note == str(notes.get(code, "") or "").strip():
+            continue
+        try:
+            save_note(project_id, period_ids, code, new_note)
+            changed += 1
+        except Exception:  # noqa: BLE001 — вывод не стоит падения раздела
+            st.warning(f"Не удалось сохранить вывод по метрике {code}.")
+    if changed:
+        st.caption(f"Сохранено выводов: {changed}.")
+
+    _render_metrics_download(edited)
+
+
+def _render_metrics_download(table) -> None:
+    st.download_button(
+        "Скачать метрики в CSV",
+        table.to_csv(index=False).encode("utf-8-sig"),
+        file_name="brand_metrics.csv",
+        mime="text/csv",
+    )
+
+
 def render_metric_details(cards: dict[str, dict[str, Any]]) -> None:
+    """Раскрытие формул — только для владельца платформы, в настройках.
+
+    С клиентского экрана убрано: методика расчёта не то, что заказчик читает
+    сам. Но аналитику проверить цифру нужно, поэтому блок остался доступен
+    там, где настраиваются веса.
+    """
     with st.expander("Как считается каждая метрика", expanded=False):
         for key in METRIC_ORDER:
             card = cards.get(key)
@@ -464,8 +546,8 @@ def render_brand_metrics_page(
 ) -> None:
     st.subheader("Индексы бренда")
     st.caption(
-        "Метрики считаются автоматически по выбранным периодам. Формулы и входные "
-        "числа раскрываются под карточками — цифру всегда можно проверить."
+        "Метрики считаются автоматически по выбранным периодам. Что каждая из "
+        "них означает для бренда — в столбце «Вывод»."
     )
 
     settings = project_metric_settings(project_settings)
@@ -483,21 +565,16 @@ def render_brand_metrics_page(
     )
 
     render_metric_cards(cards)
-    render_metric_details(cards)
-
-    table = metrics_to_frame(cards)
-    if not table.empty:
-        st.dataframe(table, width="stretch", hide_index=True)
-        st.download_button(
-            "Скачать метрики в CSV",
-            table.to_csv(index=False).encode("utf-8-sig"),
-            file_name="brand_metrics.csv",
-            mime="text/csv",
-        )
+    render_metric_conclusions(
+        project_id, cards, selected_period_ids, role_can_edit=role_can_edit
+    )
 
     render_metrics_dynamics(messages, periods, selected_period_ids, benchmarks, settings)
 
     if role_can_edit:
+        # Формулы остались доступны там, где настраиваются веса: аналитику
+        # проверить цифру нужно, заказчику — нет.
+        render_metric_details(cards)
         render_metric_settings(project_id, project_settings, settings)
     st.divider()
     render_category_upload(project_id, periods, selected_period_ids, role_can_edit)

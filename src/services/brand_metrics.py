@@ -653,8 +653,20 @@ def compute_brand_metrics(
     return cards
 
 
-def metrics_to_frame(cards: dict[str, dict[str, Any]]) -> pd.DataFrame:
-    """Таблица метрик для показа и выгрузки."""
+def metrics_to_frame(
+    cards: dict[str, dict[str, Any]], notes: dict[str, str] | None = None
+) -> pd.DataFrame:
+    """Таблица метрик для показа и выгрузки.
+
+    Формулы в таблицу не идут. Это собственная методика платформы, а не то, что
+    заказчик должен читать с экрана: цифру он получает вместе с выводом, а как
+    она устроена — предмет отдельного разговора, если спросит.
+
+    Вместо формулы — вывод аналитика: что эта метрика означает для бренда.
+    Число без толкования заказчику ничего не говорит, а толкование зависит от
+    рынка и от того, что происходило в периоде, — машине его не составить.
+    """
+    notes = notes or {}
     rows = []
     for key in ["BPI", "NSS", "SES", "TVS", "SOV", "ReachScore", "ER", "ERR"]:
         card = cards.get(key)
@@ -665,8 +677,8 @@ def metrics_to_frame(cards: dict[str, dict[str, Any]]) -> pd.DataFrame:
                 "Метрика": card["code"],
                 "Название": card["title"],
                 "Значение": card["value"],
-                "Формула": card["formula"],
                 "Статус": "рассчитана" if card["available"] else card["reason"],
+                "Вывод": str(notes.get(card["code"], "") or ""),
             }
         )
     return pd.DataFrame(rows)

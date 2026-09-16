@@ -25,6 +25,7 @@ from services.brand_metrics import (  # noqa: E402
     compute_sov,
     compute_tone_volume_score,
     merge_settings,
+    metrics_to_frame,
 )
 
 failures = []
@@ -200,6 +201,34 @@ settings = merge_settings({"bpi_weights": {"NSS": 1.0, "мусор": 5}, "nss_ba
 check("мусорные метрики отброшены", settings["bpi_weights"] == {"NSS": 1.0}, str(settings["bpi_weights"]))
 check("основа NSS сохранена", settings["nss_basis"] == "messages")
 check("основа SOV сохранена", settings["sov_basis"] == "reach")
+
+print("Таблица метрик: формулы убраны, вывод аналитика добавлен")
+# Формулы — собственная методика платформы. Заказчик получает цифру вместе с
+# выводом, а устройство расчёта — предмет отдельного разговора, если спросит.
+frame_cards = compute_brand_metrics(make_messages([("позитив", 100, 1000, 10, "тема")]))
+frame = metrics_to_frame(frame_cards)
+check("колонки «Формула» в таблице нет", "Формула" not in frame.columns, str(list(frame.columns)))
+check("колонка «Вывод» есть", "Вывод" in frame.columns, str(list(frame.columns)))
+check("статус остался", "Статус" in frame.columns, str(list(frame.columns)))
+check("вывод по умолчанию пустой", (frame["Вывод"] == "").all(), str(list(frame["Вывод"])))
+
+with_notes = metrics_to_frame(frame_cards, {"NSS": "Тональность выровнялась после мая"})
+nss_row = with_notes[with_notes["Метрика"] == "NSS"]
+check(
+    "вывод подставлен к своей метрике",
+    not nss_row.empty and nss_row.iloc[0]["Вывод"] == "Тональность выровнялась после мая",
+    str(nss_row.to_dict("records")),
+)
+others = with_notes[with_notes["Метрика"] != "NSS"]
+check("чужие метрики не задеты", (others["Вывод"] == "").all(), str(list(others["Вывод"])))
+
+print("Ключ периода для выводов")
+from services.metric_notes import period_key  # noqa: E402
+
+check("порядок периодов не влияет", period_key(["b", "a"]) == period_key(["a", "b"]))
+check("пустые значения отбрасываются", period_key(["a", "", None]) == "a", period_key(["a", "", None]))
+check("повторы схлопываются", period_key(["a", "a"]) == "a", period_key(["a", "a"]))
+check("пустой список даёт пустой ключ", period_key([]) == "" and period_key(None) == "")
 
 print()
 if failures:

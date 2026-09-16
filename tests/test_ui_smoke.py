@@ -403,6 +403,25 @@ labels = {str(m.label): m.value for m in at.metric}
 check("карточка BPI с расшифровкой названия", any("BPI · Индекс восприятия" in k for k in labels), str(list(labels))[:200])
 check("карточка NSS с названием", any(k.startswith("NSS · ") for k in labels), str(list(labels))[:200])
 check("саммари не примешивается к разделу", not any("Саммари периода" in str(t) for t in texts))
+# Формулы — собственная методика платформы, а не то, что заказчик читает с
+# экрана. Вместо них в таблице стоит вывод аналитика: что метрика означает для
+# бренда. Разобрать формулы аналитик по-прежнему может — в блоке настройки.
+captions = [str(c.value) for c in at.caption]
+check(
+    "столбец выводов объяснён",
+    any("«Вывод» заполняется вручную" in c for c in captions),
+    str(captions)[:220],
+)
+check(
+    "раскрытие формул осталось владельцу, рядом с настройкой весов",
+    any("Как считается каждая метрика" in str(e.label) for e in at.expander),
+    str([e.label for e in at.expander]),
+)
+check(
+    "методика не вынесена в подпись раздела",
+    not any("Формулы и входные числа" in c for c in captions),
+    str(captions)[:200],
+)
 
 print("3.2. Раздел «Теги»: статистика и карточка тега")
 open_section("Теги")
