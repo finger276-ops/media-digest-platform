@@ -41,7 +41,7 @@ from services.cached_store import (
 )
 from services.ingest import IngestError, read_canonical_bytes
 from services.metric_notes import load_notes, period_key, save_note
-from services.period_comparison import previous_period_id
+from services.period_comparison import ordered_period_ids, previous_period_id
 from services.project_settings import category_brands_from_project_settings
 
 METRIC_ORDER = ["BPI", "NSS", "SES", "TVS", "SOV", "ReachScore", "ER", "ERR"]
@@ -323,8 +323,12 @@ def render_metrics_dynamics(
     if len(period_ids) < 2:
         return
 
+    # Хронологический порядок, а не порядок выбора в боковой панели. График
+    # динамики рисует линию между соседними точками, и при выборе «3 апреля,
+    # 1 апреля, 2 апреля» эта линия показывает движение, которого не было.
+    ordered = ordered_period_ids(periods, period_ids)
     frame = metrics_by_period(
-        messages, period_ids, benchmarks=benchmarks, settings=settings
+        messages, ordered, benchmarks=benchmarks, settings=settings
     )
     if frame.empty:
         return
@@ -344,40 +348,45 @@ def render_metrics_dynamics(
     if not available:
         return
 
-    st.subheader("Динамика индексов")
-    default = [col for col in ["BPI", "NSS", "SES"] if col in available] or available[:3]
-    chosen = st.multiselect(
-        "Метрики на графике", available, default=default, key="brand_metrics_chart"
-    )
-    if not chosen:
-        return
-
-    long = frame.melt(
-        id_vars=["Период"], value_vars=chosen, var_name="Метрика", value_name="Значение"
-    ).dropna(subset=["Значение"])
-    if long.empty:
-        return
-
-    chart = (
-        alt.Chart(long)
-        .mark_line(point=True)
-        .encode(
-            x=alt.X(
-                "Период:N",
-                sort=list(frame["Период"]),
-                title="",
-                axis=alt.Axis(labelAngle=0, labelLimit=140),
-            ),
-            y=alt.Y("Значение:Q", title="%"),
-            color=alt.Color("Метрика:N", title=""),
-            tooltip=["Период", "Метрика", alt.Tooltip("Значение:Q", format=".2f")],
+    # Динамика нужна не всегда: на экране с карточками и выводами она занимает
+    # место, а смотрят её, когда вопрос именно в движении.
+    with st.expander("Динамика индексов", expanded=False):
+        default = (
+            [col for col in ["BPI", "NSS", "SES"] if col in available] or available[:3]
         )
-        .properties(height=320)
-    )
-    st.altair_chart(chart, width="stretch")
-    st.dataframe(
-        frame[["Период"] + chosen], width="stretch", hide_index=True
-    )
+        chosen = st.multiselect(
+            "Метрики на графике", available, default=default, key="brand_metrics_chart"
+        )
+        if not chosen:
+            return
+
+        long = frame.melt(
+            id_vars=["Период"],
+            value_vars=chosen,
+            var_name="Метрика",
+            value_name="Значение",
+        ).dropna(subset=["Значение"])
+        if long.empty:
+            return
+
+        chart = (
+            alt.Chart(long)
+            .mark_line(point=True)
+            .encode(
+                x=alt.X(
+                    "Период:N",
+                    sort=list(frame["Период"]),
+                    title="",
+                    axis=alt.Axis(labelAngle=0, labelLimit=140),
+                ),
+                y=alt.Y("Значение:Q", title="%"),
+                color=alt.Color("Метрика:N", title=""),
+                tooltip=["Период", "Метрика", alt.Tooltip("Значение:Q", format=".2f")],
+            )
+            .properties(height=320)
+        )
+        st.altair_chart(chart, width="stretch")
+        st.dataframe(frame[["Период"] + chosen], width="stretch", hide_index=True)
 
 
 # ---------------------------------------------------------------------------

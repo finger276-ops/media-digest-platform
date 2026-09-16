@@ -494,6 +494,42 @@ check(
     str([h.value for h in at.subheader]),
 )
 
+print("3.1. Динамика индексов: свёрнута и в хронологическом порядке")
+# Периоды выбираются в обратном порядке: май, потом апрель. График динамики
+# рисует линию между соседними точками, и порядок выбора выдал бы движение,
+# которого не было.
+period_multiselect = [m for m in at.sidebar.multiselect if str(m.label) == "Периоды"]
+if period_multiselect:
+    period_multiselect[0].set_value([PERIOD_ID_2, PERIOD_ID]).run()
+    open_section("Индексы бренда")
+    check("раздел открылся без исключений", not at.exception, str(at.exception))
+    check(
+        "динамика убрана в раскрывашку",
+        any("Динамика индексов" in str(e.label) for e in at.expander),
+        str([e.label for e in at.expander]),
+    )
+    check(
+        "и больше не отдельный заголовок",
+        not any("Динамика индексов" == str(h.value).strip() for h in at.subheader),
+        str([h.value for h in at.subheader]),
+    )
+    dynamics = [
+        list(d.value["Период"])
+        for d in at.dataframe
+        if "Период" in getattr(d.value, "columns", [])
+    ]
+    check(
+        "периоды идут хронологически, а не в порядке выбора",
+        any(
+            len(rows) >= 2 and "24.04" in str(rows[0]) and "01.05" in str(rows[1])
+            for rows in dynamics
+        ),
+        str(dynamics)[:220],
+    )
+    # Возвращаем один период: дальше тест проверяет разделы в исходном виде.
+    period_multiselect = [m for m in at.sidebar.multiselect if str(m.label) == "Периоды"]
+    period_multiselect[0].set_value([PERIOD_ID]).run()
+
 print("3.2. Раздел «Теги»: статистика и карточка тега")
 open_section("Теги")
 check("раздел открылся без исключений", not at.exception, str(at.exception))
