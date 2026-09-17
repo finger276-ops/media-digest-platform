@@ -26,7 +26,7 @@ from .ai_provider import AIConfig, AIError, complete, estimate_tokens, load_ai_c
 from .brand_metrics import METRIC_TITLES
 from .metrics_compute import numeric_series, overview_metrics, sentiment_counts
 from .period_comparison import daily_metrics_for_comparison
-from .tag_compute import build_tag_statistics_compute
+from .report_highlights import event_title_column, top_report_events, top_report_tags
 
 KIND_SUMMARY = "summary"
 KIND_BRAND = "brand"
@@ -96,10 +96,12 @@ def _period_label(periods: pd.DataFrame, period_ids: list[str]) -> str:
 
 
 def _tags_block(messages: pd.DataFrame) -> str:
-    stats = build_tag_statistics_compute(messages)
+    # top_report_tags - та же выборка (сортировка + топ-N), что и превью
+    # «Что включить в отчёт» на «Обзоре» и PNG/DOCX/PDF-экспорт. Раньше здесь
+    # был свой, третий по счёту способ выбрать теги (без пересортировки).
+    stats = top_report_tags(messages, limit=TOP_TAGS)
     if stats is None or stats.empty:
         return "Теги: в выгрузке нет теговых колонок."
-    stats = stats.head(TOP_TAGS)
     lines = []
     for _, row in stats.iterrows():
         negative = row.get("Негатив", 0)
@@ -111,14 +113,19 @@ def _tags_block(messages: pd.DataFrame) -> str:
 
 
 def _events_block(events_agg: pd.DataFrame) -> str:
-    if events_agg is None or events_agg.empty:
+    # top_report_events - та же выборка, что и на «Обзоре»/в экспорте: без
+    # служебных заголовков («Без сюжета» и варианты), отсортирована по числу
+    # сообщений и значимости. Раньше здесь не было ни фильтра, ни сортировки
+    # вообще - «Без сюжета» мог попасть в карточку для модели как есть.
+    work = top_report_events(events_agg, limit=TOP_EVENTS)
+    if work.empty:
         return "Инфоповоды: не найдены."
-    work = events_agg.head(TOP_EVENTS)
+    title_col = event_title_column(work) or "title"
     lines = []
     for _, row in work.iterrows():
         count = int(row.get("message_count") or 0)
         negative = int(row.get("negative_count") or 0)
-        title = _clean_text(row.get("title"), 160)
+        title = _clean_text(row.get(title_col), 160)
         piece = f"- «{title}»: {_fmt_int(count)} сообщ."
         if negative:
             piece += f", из них негативных {_fmt_int(negative)} ({_share(negative, count)})"

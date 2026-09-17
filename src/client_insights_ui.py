@@ -16,69 +16,11 @@ import streamlit as st
 
 from services.metrics_compute import format_int, overview_metrics
 from services.period_comparison import ordered_period_ids, period_metrics_for_comparison
+from services.report_highlights import is_technical_event_title
+from services.report_highlights import event_title_column as event_title_col
+from services.report_highlights import top_report_events as top_client_events
+from services.report_highlights import top_report_tags as top_client_tags
 from services.tag_compute import build_tag_statistics
-
-TECHNICAL_EVENT_TITLES = {
-    "без сюжета",
-    "без темы",
-    "прочее",
-    "прочие сообщения",
-    "общее обсуждение",
-}
-
-
-def is_technical_event_title(title: Any) -> bool:
-    value = str(title or "").strip().lower().replace("ё", "е")
-    return not value or value in {x.replace("ё", "е") for x in TECHNICAL_EVENT_TITLES}
-
-
-def event_title_col(events_agg: pd.DataFrame) -> str | None:
-    for col in ["title", "event_title", "Сюжет / инфоповод"]:
-        if isinstance(events_agg, pd.DataFrame) and col in events_agg.columns:
-            return col
-    return None
-
-
-def top_client_events(events_agg: pd.DataFrame, limit: int = 5) -> pd.DataFrame:
-    if events_agg is None or events_agg.empty:
-        return pd.DataFrame()
-    work = events_agg.copy()
-    title_col = event_title_col(work)
-    if not title_col:
-        return pd.DataFrame()
-    work = work[~work[title_col].apply(is_technical_event_title)].copy()
-    if work.empty:
-        return work
-    for col in ["message_count", "negative_count", "importance_score"]:
-        if col in work.columns:
-            work[col] = pd.to_numeric(work[col], errors="coerce").fillna(0)
-    sort_cols = [c for c in ["message_count", "importance_score"] if c in work.columns]
-    if sort_cols:
-        work = work.sort_values(sort_cols, ascending=False)
-    return work.head(limit).copy()
-
-
-def top_client_tags(messages: pd.DataFrame, limit: int = 5) -> pd.DataFrame:
-    stats = build_tag_statistics(messages)
-    if stats is None or stats.empty:
-        return pd.DataFrame()
-    work = stats.copy()
-    for col in [
-        "Сообщений",
-        "Аудитория",
-        "Охват",
-        "Вовлеченность",
-        "Негатив",
-        "Доля негатива",
-    ]:
-        if col in work.columns:
-            work[col] = pd.to_numeric(work[col], errors="coerce").fillna(0)
-    sort_cols = [
-        c for c in ["Сообщений", "Охват", "Вовлеченность"] if c in work.columns
-    ]
-    if sort_cols:
-        work = work.sort_values(sort_cols, ascending=False)
-    return work.head(limit).copy()
 
 
 def build_period_change_insights(

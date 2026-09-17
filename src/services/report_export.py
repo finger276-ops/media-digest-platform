@@ -22,10 +22,10 @@ import pandas as pd
 from .chart_style import SENTIMENT_COLOR_RANGE
 from .dashboard_config import REPORT_TEMPLATE_OPTIONS
 from .cached_store import download_storage_file
-from .metrics_compute import format_int, numeric_series, percent_text
+from .metrics_compute import format_int, percent_text
 from .observability import report_failure
 from .project_settings import report_branding_from_project_settings, valid_hex_color
-from .tag_compute import build_tag_statistics
+from .report_highlights import event_title_column, top_report_events, top_report_tags
 
 LOGGER = logging.getLogger("platform.report_export")
 
@@ -55,10 +55,13 @@ def safe_export_filename(project_name: str, period_label: str, ext: str) -> str:
 def export_top_tags(
     messages: pd.DataFrame | None, limit: int = 5
 ) -> list[dict[str, Any]]:
+    """Топ тегов для PNG/DOCX/PDF — та же выборка, что и превью на «Обзоре»
+    («Что включить в отчёт», client_insights_ui.top_client_tags) и карточка
+    для ИИ (ai_summary._tags_block): все три берут top_report_tags."""
     if messages is None or not isinstance(messages, pd.DataFrame) or messages.empty:
         return []
     try:
-        stats = build_tag_statistics(messages).head(limit).copy()
+        stats = top_report_tags(messages, limit=limit)
     except Exception:  # noqa: BLE001 — выгрузка без топ-тегов лучше, чем никакая
         LOGGER.warning("Топ-теги для выгрузки не посчитались", exc_info=True)
         return []
@@ -82,26 +85,12 @@ def export_top_tags(
 def export_top_events(
     events: pd.DataFrame | None, limit: int = 5
 ) -> list[dict[str, Any]]:
-    if events is None or not isinstance(events, pd.DataFrame) or events.empty:
-        return []
-    work = events.copy()
-    title_col = first_existing_col(
-        work, ["display_title", "event_title", "title", "Сюжет / инфоповод", "Сюжет"]
-    )
-    if title_col is None:
-        return []
-    work["_title"] = work[title_col].fillna("").astype(str).str.strip()
-    # Технические категории не должны попадать в клиентскую инфографику.
-    work = work[
-        (work["_title"] != "")
-        & (
-            ~work["_title"]
-            .str.lower()
-            .isin({"без сюжета", "без_сюжета", "без темы", "прочее"})
-        )
-    ]
+    """Топ инфоповодов для PNG/DOCX/PDF — та же выборка, что top_client_events
+    и ai_summary._events_block (см. export_top_tags)."""
+    work = top_report_events(events, limit=limit)
     if work.empty:
         return []
+    title_col = event_title_column(work)
     count_col = first_existing_col(work, ["message_count", "messages", "Сообщений"])
     reach_col = first_existing_col(
         work, ["views", "reach", "Охват", "Просмотры", "Просмотров"]
@@ -109,24 +98,19 @@ def export_top_events(
     engagement_col = first_existing_col(
         work, ["engagement", "Вовлеченность", "Вовлечённость"]
     )
-    work["_messages"] = (
-        numeric_series(work, [count_col]).astype(int) if count_col else 0
-    )
-    work["_reach"] = numeric_series(work, [reach_col]).astype(int) if reach_col else 0
-    work["_engagement"] = (
-        numeric_series(work, [engagement_col]).astype(int) if engagement_col else 0
-    )
-    work = work.sort_values(
-        ["_messages", "_reach", "_engagement"], ascending=False
-    ).head(limit)
     result: list[dict[str, Any]] = []
     for _, row in work.iterrows():
+        name = str(row.get(title_col) or "").strip() if title_col else ""
+        if not name:
+            continue
         result.append(
             {
-                "name": str(row.get("_title") or "").strip(),
-                "messages": int(row.get("_messages", 0) or 0),
-                "reach": int(row.get("_reach", 0) or 0),
-                "engagement": int(row.get("_engagement", 0) or 0),
+                "name": name,
+                "messages": int(row.get(count_col, 0) or 0) if count_col else 0,
+                "reach": int(row.get(reach_col, 0) or 0) if reach_col else 0,
+                "engagement": (
+                    int(row.get(engagement_col, 0) or 0) if engagement_col else 0
+                ),
             }
         )
     return result
