@@ -20,8 +20,10 @@ from .dashboard_config import (
     DEFAULT_CHART_LABEL_SETTINGS,
     DEFAULT_DASHBOARD_VIEW_SETTINGS,
     DEFAULT_REPORT_BRANDING,
+    DEFAULT_REPORT_SECTIONS,
     DEFAULT_STORY_BUILD_SETTINGS,
     LEGACY_PROFILE_ALIASES,
+    REPORT_SECTION_OPTIONS,
 )
 
 
@@ -176,6 +178,22 @@ def report_branding_from_project_settings(
     if not result.get("report_title"):
         result["report_title"] = "Дайджест упоминаний"
     return result
+
+
+def report_sections_from_project_settings(settings: dict[str, Any] | None) -> list[str]:
+    """Какие блоки включать в PNG/DOCX/PDF по умолчанию для проекта.
+
+    Сохранено — как и брендирование — на уровне проекта: аналитик выбирает
+    один раз, дальше выгрузка собирается так же, с возможностью поменять
+    набор перед конкретной выгрузкой (см. report_export_ui.py).
+    """
+    raw = {}
+    if isinstance(settings, dict):
+        raw = settings.get("report_sections")
+    if not isinstance(raw, list) or not raw:
+        return list(DEFAULT_REPORT_SECTIONS)
+    result = [s for s in raw if s in REPORT_SECTION_OPTIONS]
+    return result or list(DEFAULT_REPORT_SECTIONS)
 
 
 def category_brands_from_project_settings(

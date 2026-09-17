@@ -12,7 +12,8 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
-from services.dashboard_config import REPORT_TEMPLATE_OPTIONS
+from services.dashboard_config import REPORT_SECTION_OPTIONS, REPORT_TEMPLATE_OPTIONS
+from services.project_settings import report_sections_from_project_settings
 from services.report_export import (
     generate_summary_docx,
     generate_summary_infographic_png,
@@ -32,6 +33,9 @@ def render_summary_export_buttons(
     messages: pd.DataFrame | None = None,
     events_agg: pd.DataFrame | None = None,
     branding: dict[str, Any] | None = None,
+    project_settings: dict[str, Any] | None = None,
+    project_id: str = "",
+    role_can_edit: bool = False,
 ) -> None:
     report_template = st.selectbox(
         "Шаблон отчета",
@@ -39,8 +43,41 @@ def render_summary_export_buttons(
         index=0,
         format_func=lambda x: REPORT_TEMPLATE_OPTIONS.get(x, x),
         key=f"{key_prefix}_template",
-        help="Шаблон меняет структуру выгрузки и набор аналитических блоков в Word/PDF/PNG.",
+        help="Шаблон меняет длину списков тегов/инфоповодов (5 или 8 позиций).",
     )
+
+    default_sections = report_sections_from_project_settings(project_settings)
+    selected_sections = st.multiselect(
+        "Разделы отчёта",
+        list(REPORT_SECTION_OPTIONS.keys()),
+        default=default_sections,
+        format_func=lambda s: REPORT_SECTION_OPTIONS.get(s, s),
+        key=f"{key_prefix}_sections",
+        help=(
+            "Какие блоки собрать в Word/PDF/PNG — можно оставить только то, "
+            "что нужно для этой выгрузки. PNG-инфографика сама перестраивается "
+            "под выбранный набор, без пустых мест."
+        ),
+    )
+    if role_can_edit and project_id:
+        if st.button(
+            "Сохранить как выбор по умолчанию для проекта",
+            key=f"{key_prefix}_save_sections",
+            help="Следующие выгрузки будут открываться с этим набором разделов.",
+        ):
+            from services.cached_store import clear_platform_caches, update_project
+
+            updated = dict(project_settings or {})
+            updated["report_sections"] = list(selected_sections) or list(
+                REPORT_SECTION_OPTIONS.keys()
+            )
+            try:
+                update_project(project_id, settings=updated)
+                clear_platform_caches(project_id)
+                st.success("Сохранено как выбор по умолчанию для проекта.")
+            except Exception as exc:  # noqa: BLE001 — сохранение не должно ронять выгрузку
+                st.warning(f"Не удалось сохранить: {exc}")
+
     payload = summary_export_payload(
         project_name,
         period_label,
@@ -50,6 +87,7 @@ def render_summary_export_buttons(
         events_agg=events_agg,
         report_template=report_template,
         branding=branding,
+        sections=selected_sections,
     )
     st.caption(
         f"Брендирование: {payload.get('client_name') or project_name}; акцентный цвет {payload.get('accent_color')}."

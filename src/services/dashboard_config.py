@@ -59,6 +59,21 @@ REPORT_TEMPLATE_OPTIONS = {
     "full": "Полный отчет",
 }
 
+# Конструктор отчёта: какие блоки вообще попадают в PNG/DOCX/PDF. Отдельно
+# от REPORT_TEMPLATE_OPTIONS выше — шаблон регулирует длину списков (5 или 8
+# позиций), а это регулирует сам набор блоков. Порядок словаря — порядок
+# отображения и в форме выбора, и в самом отчёте (сверху вниз/по порядку).
+REPORT_SECTION_OPTIONS = {
+    "metrics": "Основные метрики",
+    "sentiment": "Тональность",
+    "top_tags": "Топ тегов",
+    "top_events": "Топ инфоповодов",
+    "highlights": "Главное (тезисы саммари)",
+    "summary_text": "Полный текст саммари",
+}
+
+DEFAULT_REPORT_SECTIONS = list(REPORT_SECTION_OPTIONS.keys())
+
 DEFAULT_REPORT_BRANDING = {
     "client_name": "",
     "report_title": "Дайджест упоминаний",

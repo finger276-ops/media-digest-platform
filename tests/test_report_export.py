@@ -15,7 +15,13 @@ for _p in (REPO / "src", REPO / "scripts", REPO / "tests"):
         sys.path.insert(0, str(_p))
 
 import pandas as pd  # noqa: E402
+from docx import Document  # noqa: E402
+from io import BytesIO  # noqa: E402
 
+from services.dashboard_config import (  # noqa: E402
+    DEFAULT_REPORT_SECTIONS,
+    REPORT_SECTION_OPTIONS,
+)
 from services.metrics_compute import overview_metrics  # noqa: E402
 from services.report_export import (  # noqa: E402
     export_top_events,
@@ -24,6 +30,7 @@ from services.report_export import (  # noqa: E402
     generate_summary_docx,
     generate_summary_infographic_png,
     generate_summary_pdf,
+    resolve_report_sections,
     safe_export_filename,
     summary_export_payload,
 )
@@ -159,6 +166,152 @@ try:
     check("генерация на пустых данных не падает", True)
 except Exception as exc:
     check("генерация на пустых данных не падает", False, str(exc))
+
+print("7. Конструктор отчёта: resolve_report_sections нормализует выбор")
+check(
+    "пустой список -> полный набор по умолчанию",
+    resolve_report_sections([]) == DEFAULT_REPORT_SECTIONS,
+    str(resolve_report_sections([])),
+)
+check("None -> полный набор по умолчанию", resolve_report_sections(None) == DEFAULT_REPORT_SECTIONS)
+check(
+    "неизвестные id отбрасываются, известные остаются в своём порядке",
+    resolve_report_sections(["metrics", "unknown_id", "sentiment"]) == ["metrics", "sentiment"],
+    str(resolve_report_sections(["metrics", "unknown_id", "sentiment"])),
+)
+check(
+    "только неизвестные id -> откат на полный набор (не пустой отчёт по ошибке вызова)",
+    resolve_report_sections(["bogus"]) == DEFAULT_REPORT_SECTIONS,
+)
+
+print("8. Конструктор отчёта: DOCX реально включает/выключает разделы")
+
+
+def _docx_headings(docx_bytes):
+    doc = Document(BytesIO(docx_bytes))
+    return [p.text for p in doc.paragraphs if p.style.name.startswith("Heading")]
+
+
+full_docx = generate_summary_docx(
+    summary_export_payload(
+        "ТЕХНОНИКОЛЬ",
+        "24.04.2026–30.04.2026",
+        "Текст саммари.",
+        metrics,
+        messages=MESSAGES,
+        events_agg=EVENTS_AGG,
+        report_template="full",
+    )
+)
+full_headings = _docx_headings(full_docx)
+check(
+    "с полным набором разделов все заголовки на месте",
+    {"Основные метрики", "Что включить в отчет", "Саммари периода"} <= set(full_headings),
+    str(full_headings),
+)
+
+summary_only_docx = generate_summary_docx(
+    summary_export_payload(
+        "ТЕХНОНИКОЛЬ",
+        "24.04.2026–30.04.2026",
+        "Текст саммари.",
+        metrics,
+        messages=MESSAGES,
+        events_agg=EVENTS_AGG,
+        report_template="full",
+        sections=["summary_text"],
+    )
+)
+summary_only_headings = _docx_headings(summary_only_docx)
+check(
+    "только «summary_text» — нет заголовков метрик/тегов, саммари есть",
+    "Основные метрики" not in summary_only_headings
+    and "Что включить в отчет" not in summary_only_headings
+    and "Саммари периода" in summary_only_headings,
+    str(summary_only_headings),
+)
+
+metrics_only_docx = generate_summary_docx(
+    summary_export_payload(
+        "ТЕХНОНИКОЛЬ",
+        "24.04.2026–30.04.2026",
+        "Текст саммари.",
+        metrics,
+        messages=MESSAGES,
+        events_agg=EVENTS_AGG,
+        report_template="full",
+        sections=["metrics"],
+    )
+)
+metrics_only_headings = _docx_headings(metrics_only_docx)
+check(
+    "только «metrics» — заголовок метрик есть, саммари нет",
+    "Основные метрики" in metrics_only_headings
+    and "Саммари периода" not in metrics_only_headings,
+    str(metrics_only_headings),
+)
+
+print("9. Конструктор отчёта: PNG/PDF не падают ни на одном наборе разделов, включая пустой")
+try:
+    combos = (
+        [],
+        ["metrics"],
+        ["top_tags"],
+        ["top_events"],
+        ["highlights"],
+        list(REPORT_SECTION_OPTIONS.keys()),
+    )
+    for combo in combos:
+        combo_payload = summary_export_payload(
+            "ТЕХНОНИКОЛЬ",
+            "24.04.2026–30.04.2026",
+            "Текст.",
+            metrics,
+            messages=MESSAGES,
+            events_agg=EVENTS_AGG,
+            sections=combo,
+        )
+        png = generate_summary_infographic_png(combo_payload)
+        check(
+            f"PNG для набора {combo or '[] (откат на полный)'} — валидная сигнатура",
+            png[:8] == b"\x89PNG\r\n\x1a\n",
+        )
+        pdf = generate_summary_pdf(combo_payload)
+        check(
+            f"PDF для набора {combo or '[] (откат на полный)'} — валидная сигнатура",
+            pdf[:5] == b"%PDF-",
+        )
+except Exception as exc:
+    check("генерация не падает ни на одном наборе разделов", False, str(exc))
+
+print("10. Конструктор отчёта: PNG с меньшим набором разделов реально компактнее")
+full_png = generate_summary_infographic_png(
+    summary_export_payload(
+        "ТЕХНОНИКОЛЬ",
+        "24.04.2026–30.04.2026",
+        "Текст саммари подлиннее, чтобы блок «Главное» тоже дал контент для сравнения размеров.",
+        metrics,
+        messages=MESSAGES,
+        events_agg=EVENTS_AGG,
+        sections=list(REPORT_SECTION_OPTIONS.keys()),
+    )
+)
+metrics_only_png = generate_summary_infographic_png(
+    summary_export_payload(
+        "ТЕХНОНИКОЛЬ",
+        "24.04.2026–30.04.2026",
+        "Текст саммари подлиннее, чтобы блок «Главное» тоже дал контент для сравнения размеров.",
+        metrics,
+        messages=MESSAGES,
+        events_agg=EVENTS_AGG,
+        sections=["metrics"],
+    )
+)
+check(
+    "PNG с одним разделом реально другой (по размеру), а не тот же файл с игнорируемым параметром",
+    len(metrics_only_png) != len(full_png),
+    f"{len(metrics_only_png)} vs {len(full_png)}",
+)
 
 print()
 if failures:

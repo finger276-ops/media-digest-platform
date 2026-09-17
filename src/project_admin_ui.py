@@ -30,6 +30,7 @@ from services.dashboard_config import (
     COMPARISON_CHART_BLOCKS,
     DASHBOARD_SECTION_OPTIONS,
     DEFAULT_DASHBOARD_VIEW_SETTINGS,
+    REPORT_SECTION_OPTIONS,
 )
 from services.formatting import fmt_date
 from services.metrics_compute import format_int
@@ -38,6 +39,7 @@ from services.project_settings import (
     dashboard_view_settings_from_project_settings,
     project_settings_from_row,
     report_branding_from_project_settings,
+    report_sections_from_project_settings,
     valid_hex_color,
 )
 
@@ -332,6 +334,23 @@ def render_project_manager(projects: pd.DataFrame) -> None:
                     "Брендирование применяется к Word/PDF/PNG-выгрузкам саммари и клиентских отчетов."
                 )
 
+            current_report_sections = report_sections_from_project_settings(
+                current_settings
+            )
+            with st.expander("Разделы отчёта по умолчанию", expanded=False):
+                st.caption(
+                    "Какие блоки открыты при выгрузке саммари по умолчанию. "
+                    "Аналитик может изменить набор перед конкретной выгрузкой — "
+                    "здесь настраивается только стартовый выбор."
+                )
+                report_sections = st.multiselect(
+                    "Разделы",
+                    list(REPORT_SECTION_OPTIONS.keys()),
+                    default=current_report_sections,
+                    format_func=lambda s: REPORT_SECTION_OPTIONS.get(s, s),
+                    key=f"report_sections_{project_id}",
+                )
+
             current_view_settings = dashboard_view_settings_from_project_settings(
                 current_settings
             )
@@ -479,6 +498,9 @@ def render_project_manager(projects: pd.DataFrame) -> None:
                     "logo_filename": logo_filename,
                     "logo_mime_type": logo_mime_type,
                 }
+                updated_settings["report_sections"] = list(report_sections) or list(
+                    REPORT_SECTION_OPTIONS.keys()
+                )
                 updated_settings["dashboard_view_settings"] = {
                     "default_view_mode": default_view_mode,
                     "start_section": start_section,

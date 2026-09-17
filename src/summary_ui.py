@@ -149,7 +149,8 @@ def render_period_summary(
 
     with st.expander("Выгрузить саммари", expanded=False):
         st.caption(
-            "Можно скачать Word, PDF или отдельную PNG-инфографику. В инфографику попадут метрики, тональность, топ-теги, топ-инфоповоды и ключевые тезисы саммари."
+            "Можно скачать Word, PDF или отдельную PNG-инфографику — набор блоков "
+            "настраивается ниже, PNG сам перестраивается под выбор."
         )
         render_summary_export_buttons(
             project_name,
@@ -160,6 +161,9 @@ def render_period_summary(
             messages=messages,
             events_agg=events_agg,
             branding=branding,
+            project_settings=project_settings,
+            project_id=project_id,
+            role_can_edit=role_rank(role) >= role_rank("editor"),
         )
 
     if role_rank(role) >= role_rank("editor"):

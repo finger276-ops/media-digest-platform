@@ -20,7 +20,11 @@ from typing import Any
 import pandas as pd
 
 from .chart_style import SENTIMENT_COLOR_RANGE
-from .dashboard_config import REPORT_TEMPLATE_OPTIONS
+from .dashboard_config import (
+    DEFAULT_REPORT_SECTIONS,
+    REPORT_SECTION_OPTIONS,
+    REPORT_TEMPLATE_OPTIONS,
+)
 from .cached_store import download_storage_file
 from .metrics_compute import format_int, percent_text
 from .observability import report_failure
@@ -28,6 +32,11 @@ from .project_settings import report_branding_from_project_settings, valid_hex_c
 from .report_highlights import event_title_column, top_report_events, top_report_tags
 
 LOGGER = logging.getLogger("platform.report_export")
+
+# Разделы, у которых вообще есть что нарисовать на PNG-инфографике. Если
+# аналитик оставил только "Полный текст саммари", инфографика с одним
+# заголовком и пустым телом — лишняя страница, а не полезный блок.
+_VISUAL_SECTIONS = {"metrics", "sentiment", "top_tags", "top_events", "highlights"}
 
 
 def first_existing_col(df: pd.DataFrame, columns: list[str | None]) -> str | None:
@@ -166,6 +175,17 @@ def _logo_image_from_payload(payload: dict[str, Any]):
         return None
 
 
+def resolve_report_sections(sections: list[str] | None) -> list[str]:
+    """Нормализовать выбор блоков конструктора: неизвестные id отбрасываются,
+    пустой/некорректный выбор откатывается на полный набор по умолчанию —
+    отчёт без единого блока никому не нужен и обычно означает баг вызова,
+    а не осознанный выбор аналитика."""
+    if not sections:
+        return list(DEFAULT_REPORT_SECTIONS)
+    result = [s for s in sections if s in REPORT_SECTION_OPTIONS]
+    return result or list(DEFAULT_REPORT_SECTIONS)
+
+
 def summary_export_payload(
     project_name: str,
     period_label: str,
@@ -176,11 +196,13 @@ def summary_export_payload(
     *,
     report_template: str = "summary",
     branding: dict[str, Any] | None = None,
+    sections: list[str] | None = None,
 ) -> dict[str, Any]:
     sent = metrics.get("sentiment", {}) if isinstance(metrics, dict) else {}
     report_template = (
         report_template if report_template in REPORT_TEMPLATE_OPTIONS else "summary"
     )
+    sections = resolve_report_sections(sections)
     branding = report_branding_from_project_settings(
         {"report_branding": branding or {}}, project_name=project_name
     )
@@ -200,6 +222,7 @@ def summary_export_payload(
         "report_template_label": REPORT_TEMPLATE_OPTIONS.get(
             report_template, report_template
         ),
+        "sections": sections,
         "period_label": period_label,
         "summary_text": clean_summary_for_export(summary_text),
         "summary_highlights": summary_highlights(summary_text),
@@ -315,6 +338,307 @@ def _draw_export_card(
         )
 
 
+# Отступ между блоками инфографики. Раньше между блоками были фиксированные,
+# точечно подобранные зазоры (0.045-0.050) - здесь один общий, потому что
+# ровно этот зазор теперь применяется между ЛЮБЫМИ двумя соседними блоками,
+# какую бы пару разделов аналитик ни оставил включённой.
+_INFOGRAPHIC_GAP = 0.045
+
+
+def _draw_metrics_section(ax, payload, comparison, accent, top: float) -> float:
+    if len(comparison) >= 2:
+        previous, current = comparison[-2], comparison[-1]
+        metric_cards = [
+            (
+                "Сообщения",
+                current.get("messages", 0),
+                _metric_delta_for_export(
+                    current.get("messages", 0), previous.get("messages", 0)
+                ),
+            ),
+            (
+                "Аудитория",
+                current.get("audience", 0),
+                _metric_delta_for_export(
+                    current.get("audience", 0), previous.get("audience", 0)
+                ),
+            ),
+            (
+                "Охват",
+                current.get("reach", 0),
+                _metric_delta_for_export(
+                    current.get("reach", 0), previous.get("reach", 0)
+                ),
+            ),
+            (
+                "Вовлеченность",
+                current.get("engagement", 0),
+                _metric_delta_for_export(
+                    current.get("engagement", 0), previous.get("engagement", 0)
+                ),
+            ),
+        ]
+        ax.text(
+            0.060,
+            top,
+            f"Последний период: {_short_label(current.get('label'), 48)}",
+            fontsize=8.2,
+            color="#6b7280",
+            va="top",
+            ha="left",
+        )
+    else:
+        metric_cards = [
+            ("Сообщения", payload.get("messages", 0), ""),
+            ("Аудитория", payload.get("audience", 0), ""),
+            ("Охват", payload.get("reach", 0), ""),
+            ("Вовлеченность", payload.get("engagement", 0), ""),
+        ]
+
+    xs = [0.060, 0.525]
+    ys = [top - 0.107, top - 0.227]
+    for idx, (title, value, subtitle) in enumerate(metric_cards):
+        _draw_export_card(
+            ax,
+            xs[idx % 2],
+            ys[idx // 2],
+            0.405,
+            0.095,
+            title,
+            format_int(value),
+            f"к пред. периоду: {subtitle}" if subtitle else "",
+            accent_color=accent,
+        )
+    return top - 0.227
+
+
+def _draw_sentiment_section(ax, fig, payload, comparison, top: float) -> float:
+    from matplotlib.patches import Rectangle
+
+    total = max(1, int(payload.get("total", 0) or 0))
+    pos = int(payload.get("positive", 0) or 0)
+    neu = int(payload.get("neutral", 0) or 0)
+    neg = int(payload.get("negative", 0) or 0)
+    if len(comparison) >= 2:
+        sent = comparison[-1].get("sentiment", {}) or {}
+        total = max(1, int(sent.get("total", 0) or 0))
+        pos = int(sent.get("positive", 0) or 0)
+        neu = int(sent.get("neutral", 0) or 0)
+        neg = int(sent.get("negative", 0) or 0)
+
+    ax.text(
+        0.060,
+        top,
+        "Тональность",
+        fontsize=12,
+        fontweight="bold",
+        color="#111827",
+        va="top",
+        ha="left",
+    )
+    pie_bottom = top - 0.158
+    pie_ax = fig.add_axes([0.070, pie_bottom, 0.220, 0.145])
+    pie_ax.axis("equal")
+    values = [max(pos, 0), max(neu, 0), max(neg, 0)]
+    # Те же цвета, что и на живом дашборде (services/chart_style.py) - иначе
+    # тональность выглядела бы разными оттенками зелёного/красного на экране
+    # и в выгруженном PNG/PDF/DOCX одного и того же периода.
+    colors = list(SENTIMENT_COLOR_RANGE)
+    labels = ["Позитив", "Нейтрал", "Негатив"]
+    if sum(values) <= 0:
+        values = [1]
+        pie_colors = ["#d1d5db"]
+    else:
+        pie_colors = colors
+    pie_ax.pie(
+        values,
+        colors=pie_colors,
+        startangle=90,
+        counterclock=False,
+        wedgeprops={"width": 0.42, "edgecolor": "white"},
+    )
+    pie_ax.text(
+        0,
+        0.05,
+        format_int(total),
+        ha="center",
+        va="center",
+        fontsize=12.5,
+        fontweight="bold",
+        color="#111827",
+    )
+    pie_ax.text(
+        0, -0.13, "сообщений", ha="center", va="center", fontsize=7.5, color="#6b7280"
+    )
+    pie_ax.set_xticks([])
+    pie_ax.set_yticks([])
+
+    y0 = top - 0.040
+    for i, (lab, val, col) in enumerate(zip(labels, [pos, neu, neg], colors)):
+        yy = y0 - i * 0.041
+        ax.add_patch(
+            Rectangle(
+                (0.330, yy - 0.010), 0.014, 0.014, facecolor=col, edgecolor="none"
+            )
+        )
+        ax.text(0.352, yy, lab, fontsize=9.2, color="#111827", va="center", ha="left")
+        ax.text(
+            0.490,
+            yy,
+            format_int(val),
+            fontsize=9.2,
+            color="#111827",
+            va="center",
+            ha="right",
+            fontweight="bold",
+        )
+        ax.text(
+            0.510,
+            yy,
+            percent_text(val, total),
+            fontsize=8.4,
+            color="#6b7280",
+            va="center",
+            ha="left",
+        )
+    return pie_bottom
+
+
+def _draw_top_lists_section(
+    ax, payload, top: float, *, show_tags: bool, show_events: bool
+) -> float:
+    if show_tags:
+        top_tags = payload.get("top_tags") or []
+        ax.text(
+            0.060,
+            top,
+            "Топ тегов",
+            fontsize=11.5,
+            fontweight="bold",
+            color="#111827",
+            va="top",
+            ha="left",
+        )
+        y = top - 0.028
+        if top_tags:
+            for item in top_tags[:5]:
+                ax.text(
+                    0.070,
+                    y,
+                    f"• {_short_label(item.get('name'), 28)}",
+                    fontsize=8.4,
+                    color="#111827",
+                    va="top",
+                    ha="left",
+                )
+                ax.text(
+                    0.430,
+                    y,
+                    f"{format_int(item.get('messages', 0))} сообщ.",
+                    fontsize=7.8,
+                    color="#6b7280",
+                    va="top",
+                    ha="right",
+                )
+                y -= 0.028
+        else:
+            ax.text(
+                0.070,
+                y,
+                "Нет тегов для отображения",
+                fontsize=8.4,
+                color="#6b7280",
+                va="top",
+                ha="left",
+            )
+
+    if show_events:
+        top_events = payload.get("top_events") or []
+        ax.text(
+            0.525,
+            top,
+            "Топ инфоповодов",
+            fontsize=11.5,
+            fontweight="bold",
+            color="#111827",
+            va="top",
+            ha="left",
+        )
+        y = top - 0.028
+        if top_events:
+            for item in top_events[:5]:
+                ax.text(
+                    0.535,
+                    y,
+                    f"• {_short_label(item.get('name'), 29)}",
+                    fontsize=8.4,
+                    color="#111827",
+                    va="top",
+                    ha="left",
+                )
+                ax.text(
+                    0.935,
+                    y,
+                    f"{format_int(item.get('messages', 0))} сообщ.",
+                    fontsize=7.8,
+                    color="#6b7280",
+                    va="top",
+                    ha="right",
+                )
+                y -= 0.028
+        else:
+            ax.text(
+                0.535,
+                y,
+                "Нет инфоповодов для отображения",
+                fontsize=8.4,
+                color="#6b7280",
+                va="top",
+                ha="left",
+            )
+    # Фиксированная высота блока (под 5 позиций) вне зависимости от того,
+    # сколько реально показано, - так же, как было в исходной раскладке.
+    return top - 0.177
+
+
+def _draw_highlights_section(ax, payload, top: float) -> float:
+    ax.text(
+        0.060,
+        top,
+        "Главное",
+        fontsize=11.5,
+        fontweight="bold",
+        color="#111827",
+        va="top",
+        ha="left",
+    )
+    summary_y = top - 0.027
+    line_count = 0
+    for block in (payload.get("summary_highlights") or [])[:4]:
+        wrapped = textwrap.wrap(str(block), width=86) or [str(block)]
+        bullet = True
+        for seg in wrapped[:2]:
+            prefix = "• " if bullet else "  "
+            ax.text(
+                0.070,
+                summary_y,
+                prefix + seg,
+                fontsize=8.4,
+                color="#111827",
+                va="top",
+                ha="left",
+            )
+            summary_y -= 0.021
+            line_count += 1
+            bullet = False
+            if line_count >= 8:
+                break
+        summary_y -= 0.004
+        if line_count >= 8:
+            break
+    return summary_y
+
+
 def generate_summary_infographic_png(payload: dict[str, Any]) -> bytes:
     try:
         import matplotlib
@@ -355,6 +679,7 @@ def generate_summary_infographic_png(payload: dict[str, Any]) -> bytes:
     period = _short_label(payload.get("period_label") or "выбранный период", 56)
     created = str(payload.get("created_at") or "")
     comparison = payload.get("comparison_sequence") or []
+    sections = set(resolve_report_sections(payload.get("sections")))
 
     # Header
     ax.add_patch(
@@ -409,282 +734,41 @@ def generate_summary_infographic_png(payload: dict[str, Any]) -> bytes:
         logo_ax.imshow(logo_img)
         logo_ax.axis("off")
 
-    # Metrics: two rows, enough height for large numbers and deltas.
-    if len(comparison) >= 2:
-        previous, current = comparison[-2], comparison[-1]
-        metric_cards = [
-            (
-                "Сообщения",
-                current.get("messages", 0),
-                _metric_delta_for_export(
-                    current.get("messages", 0), previous.get("messages", 0)
-                ),
-            ),
-            (
-                "Аудитория",
-                current.get("audience", 0),
-                _metric_delta_for_export(
-                    current.get("audience", 0), previous.get("audience", 0)
-                ),
-            ),
-            (
-                "Охват",
-                current.get("reach", 0),
-                _metric_delta_for_export(
-                    current.get("reach", 0), previous.get("reach", 0)
-                ),
-            ),
-            (
-                "Вовлеченность",
-                current.get("engagement", 0),
-                _metric_delta_for_export(
-                    current.get("engagement", 0), previous.get("engagement", 0)
-                ),
-            ),
-        ]
+    # Тело инфографики - курсор сверху вниз: каждый включённый блок рисуется
+    # от текущего cursor и сам сообщает, где закончился, следующий блок
+    # стартует сразу после с одним и тем же отступом. Выключенный блок просто
+    # не сдвигает курсор - следующий встаёт на его место, без дыр.
+    cursor = 0.862
+    show_tags = "top_tags" in sections
+    show_events = "top_events" in sections
+
+    if "metrics" in sections:
+        cursor = _draw_metrics_section(ax, payload, comparison, accent, cursor)
+        cursor -= _INFOGRAPHIC_GAP
+
+    if "sentiment" in sections:
+        cursor = _draw_sentiment_section(ax, fig, payload, comparison, cursor)
+        cursor -= _INFOGRAPHIC_GAP
+
+    if show_tags or show_events:
+        cursor = _draw_top_lists_section(
+            ax, payload, cursor, show_tags=show_tags, show_events=show_events
+        )
+        cursor -= _INFOGRAPHIC_GAP
+
+    if "highlights" in sections:
+        cursor = _draw_highlights_section(ax, payload, cursor)
+
+    if not (sections & _VISUAL_SECTIONS):
         ax.text(
             0.060,
-            0.862,
-            f"Последний период: {_short_label(current.get('label'), 48)}",
-            fontsize=8.2,
+            cursor,
+            "Все аналитические блоки отключены в настройках выгрузки.",
+            fontsize=9,
             color="#6b7280",
             va="top",
             ha="left",
         )
-    else:
-        metric_cards = [
-            ("Сообщения", payload.get("messages", 0), ""),
-            ("Аудитория", payload.get("audience", 0), ""),
-            ("Охват", payload.get("reach", 0), ""),
-            ("Вовлеченность", payload.get("engagement", 0), ""),
-        ]
-
-    xs = [0.060, 0.525]
-    ys = [0.755, 0.635]
-    for idx, (title, value, subtitle) in enumerate(metric_cards):
-        _draw_export_card(
-            ax,
-            xs[idx % 2],
-            ys[idx // 2],
-            0.405,
-            0.095,
-            title,
-            format_int(value),
-            f"к пред. периоду: {subtitle}" if subtitle else "",
-            accent_color=accent,
-        )
-
-    # Sentiment block
-    total = max(1, int(payload.get("total", 0) or 0))
-    pos = int(payload.get("positive", 0) or 0)
-    neu = int(payload.get("neutral", 0) or 0)
-    neg = int(payload.get("negative", 0) or 0)
-    if len(comparison) >= 2:
-        sent = comparison[-1].get("sentiment", {}) or {}
-        total = max(1, int(sent.get("total", 0) or 0))
-        pos = int(sent.get("positive", 0) or 0)
-        neu = int(sent.get("neutral", 0) or 0)
-        neg = int(sent.get("negative", 0) or 0)
-
-    ax.text(
-        0.060,
-        0.585,
-        "Тональность",
-        fontsize=12,
-        fontweight="bold",
-        color="#111827",
-        va="top",
-        ha="left",
-    )
-    pie_ax = fig.add_axes([0.070, 0.427, 0.220, 0.145])
-    pie_ax.axis("equal")
-    values = [max(pos, 0), max(neu, 0), max(neg, 0)]
-    # Те же цвета, что и на живом дашборде (services/chart_style.py) - иначе
-    # тональность выглядела бы разными оттенками зелёного/красного на экране
-    # и в выгруженном PNG/PDF/DOCX одного и того же периода.
-    colors = list(SENTIMENT_COLOR_RANGE)
-    labels = ["Позитив", "Нейтрал", "Негатив"]
-    if sum(values) <= 0:
-        values = [1]
-        pie_colors = ["#d1d5db"]
-    else:
-        pie_colors = colors
-    pie_ax.pie(
-        values,
-        colors=pie_colors,
-        startangle=90,
-        counterclock=False,
-        wedgeprops={"width": 0.42, "edgecolor": "white"},
-    )
-    pie_ax.text(
-        0,
-        0.05,
-        format_int(total),
-        ha="center",
-        va="center",
-        fontsize=12.5,
-        fontweight="bold",
-        color="#111827",
-    )
-    pie_ax.text(
-        0, -0.13, "сообщений", ha="center", va="center", fontsize=7.5, color="#6b7280"
-    )
-    pie_ax.set_xticks([])
-    pie_ax.set_yticks([])
-
-    y0 = 0.545
-    for i, (lab, val, col) in enumerate(zip(labels, [pos, neu, neg], colors)):
-        yy = y0 - i * 0.041
-        ax.add_patch(
-            Rectangle(
-                (0.330, yy - 0.010), 0.014, 0.014, facecolor=col, edgecolor="none"
-            )
-        )
-        ax.text(0.352, yy, lab, fontsize=9.2, color="#111827", va="center", ha="left")
-        ax.text(
-            0.490,
-            yy,
-            format_int(val),
-            fontsize=9.2,
-            color="#111827",
-            va="center",
-            ha="right",
-            fontweight="bold",
-        )
-        ax.text(
-            0.510,
-            yy,
-            percent_text(val, total),
-            fontsize=8.4,
-            color="#6b7280",
-            va="center",
-            ha="left",
-        )
-
-    # Top lists: safer fixed columns and shorter labels to avoid overlap.
-    top_tags = payload.get("top_tags") or []
-    top_events = payload.get("top_events") or []
-    ax.text(
-        0.060,
-        0.382,
-        "Топ тегов",
-        fontsize=11.5,
-        fontweight="bold",
-        color="#111827",
-        va="top",
-        ha="left",
-    )
-    y = 0.354
-    if top_tags:
-        for item in top_tags[:5]:
-            ax.text(
-                0.070,
-                y,
-                f"• {_short_label(item.get('name'), 28)}",
-                fontsize=8.4,
-                color="#111827",
-                va="top",
-                ha="left",
-            )
-            ax.text(
-                0.430,
-                y,
-                f"{format_int(item.get('messages', 0))} сообщ.",
-                fontsize=7.8,
-                color="#6b7280",
-                va="top",
-                ha="right",
-            )
-            y -= 0.028
-    else:
-        ax.text(
-            0.070,
-            y,
-            "Нет тегов для отображения",
-            fontsize=8.4,
-            color="#6b7280",
-            va="top",
-            ha="left",
-        )
-
-    ax.text(
-        0.525,
-        0.382,
-        "Топ инфоповодов",
-        fontsize=11.5,
-        fontweight="bold",
-        color="#111827",
-        va="top",
-        ha="left",
-    )
-    y = 0.354
-    if top_events:
-        for item in top_events[:5]:
-            ax.text(
-                0.535,
-                y,
-                f"• {_short_label(item.get('name'), 29)}",
-                fontsize=8.4,
-                color="#111827",
-                va="top",
-                ha="left",
-            )
-            ax.text(
-                0.935,
-                y,
-                f"{format_int(item.get('messages', 0))} сообщ.",
-                fontsize=7.8,
-                color="#6b7280",
-                va="top",
-                ha="right",
-            )
-            y -= 0.028
-    else:
-        ax.text(
-            0.535,
-            y,
-            "Нет инфоповодов для отображения",
-            fontsize=8.4,
-            color="#6b7280",
-            va="top",
-            ha="left",
-        )
-
-    # Summary highlights: limited lines with consistent spacing.
-    ax.text(
-        0.060,
-        0.205,
-        "Главное",
-        fontsize=11.5,
-        fontweight="bold",
-        color="#111827",
-        va="top",
-        ha="left",
-    )
-    summary_y = 0.178
-    line_count = 0
-    for block in (payload.get("summary_highlights") or [])[:4]:
-        wrapped = textwrap.wrap(str(block), width=86) or [str(block)]
-        bullet = True
-        for seg in wrapped[:2]:
-            prefix = "• " if bullet else "  "
-            ax.text(
-                0.070,
-                summary_y,
-                prefix + seg,
-                fontsize=8.4,
-                color="#111827",
-                va="top",
-                ha="left",
-            )
-            summary_y -= 0.021
-            line_count += 1
-            bullet = False
-            if line_count >= 8:
-                break
-        summary_y -= 0.004
-        if line_count >= 8:
-            break
 
     footer_text = str(
         payload.get("footer_text")
@@ -752,58 +836,70 @@ def generate_summary_docx(payload: dict[str, Any]) -> bytes:
     meta.add_run(f"Дата выгрузки: {payload.get('created_at') or ''}")
     meta.paragraph_format.space_after = Pt(8)
 
-    try:
-        infographic_png = generate_summary_infographic_png(payload)
-        pic_p = doc.add_paragraph()
-        pic_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        run = pic_p.add_run()
-        run.add_picture(BytesIO(infographic_png), width=Inches(6.4))
-        doc.add_page_break()
-    except Exception as exc:  # noqa: BLE001 — Word без инфографики лучше, чем без Word
-        # Клиент получит документ и не узнает, что страницы не хватает, —
-        # поэтому владелец должен узнать вместо него.
-        LOGGER.warning("Инфографика для Word не собралась", exc_info=True)
-        report_failure("выгрузка Word: инфографика не собралась", exc)
+    sections = set(resolve_report_sections(payload.get("sections")))
+    has_visual_sections = bool(_VISUAL_SECTIONS & sections)
+
+    if has_visual_sections:
+        try:
+            infographic_png = generate_summary_infographic_png(payload)
+            pic_p = doc.add_paragraph()
+            pic_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            run = pic_p.add_run()
+            run.add_picture(BytesIO(infographic_png), width=Inches(6.4))
+            doc.add_page_break()
+        except Exception as exc:  # noqa: BLE001 — Word без инфографики лучше, чем без Word
+            # Клиент получит документ и не узнает, что страницы не хватает, —
+            # поэтому владелец должен узнать вместо него.
+            LOGGER.warning("Инфографика для Word не собралась", exc_info=True)
+            report_failure("выгрузка Word: инфографика не собралась", exc)
 
     total = max(1, int(payload.get("total", 0) or 0))
-    doc.add_heading("Основные метрики", level=2)
-    doc.add_paragraph(
-        f"Сообщений — {format_int(payload.get('messages', 0))}; "
-        f"аудитория — {format_int(payload.get('audience', 0))}; "
-        f"охват — {format_int(payload.get('reach', 0))}; "
-        f"вовлеченность — {format_int(payload.get('engagement', 0))}."
-    )
-    doc.add_paragraph(
-        f"Тональность: позитив — {percent_text(int(payload.get('positive', 0) or 0), total)}; "
-        f"нейтрал — {percent_text(int(payload.get('neutral', 0) or 0), total)}; "
-        f"негатив — {percent_text(int(payload.get('negative', 0) or 0), total)}."
-    )
+    if "metrics" in sections or "sentiment" in sections:
+        doc.add_heading("Основные метрики", level=2)
+        if "metrics" in sections:
+            doc.add_paragraph(
+                f"Сообщений — {format_int(payload.get('messages', 0))}; "
+                f"аудитория — {format_int(payload.get('audience', 0))}; "
+                f"охват — {format_int(payload.get('reach', 0))}; "
+                f"вовлеченность — {format_int(payload.get('engagement', 0))}."
+            )
+        if "sentiment" in sections:
+            doc.add_paragraph(
+                f"Тональность: позитив — {percent_text(int(payload.get('positive', 0) or 0), total)}; "
+                f"нейтрал — {percent_text(int(payload.get('neutral', 0) or 0), total)}; "
+                f"негатив — {percent_text(int(payload.get('negative', 0) or 0), total)}."
+            )
 
-    if payload.get("report_template") in {"client_overview", "comparison", "full"}:
+    if "top_tags" in sections or "top_events" in sections:
         doc.add_heading("Что включить в отчет", level=2)
-        top_tags = payload.get("top_tags") or []
-        top_events = payload.get("top_events") or []
-        if top_tags:
-            doc.add_paragraph(
-                "Топ тегов: "
-                + "; ".join(
-                    str(x.get("name") or "") for x in top_tags[:5] if x.get("name")
+        if "top_tags" in sections:
+            top_tags = payload.get("top_tags") or []
+            if top_tags:
+                doc.add_paragraph(
+                    "Топ тегов: "
+                    + "; ".join(
+                        str(x.get("name") or "") for x in top_tags[:5] if x.get("name")
+                    )
                 )
-            )
-        if top_events:
-            doc.add_paragraph(
-                "Топ инфоповодов: "
-                + "; ".join(
-                    str(x.get("name") or "") for x in top_events[:5] if x.get("name")
+        if "top_events" in sections:
+            top_events = payload.get("top_events") or []
+            if top_events:
+                doc.add_paragraph(
+                    "Топ инфоповодов: "
+                    + "; ".join(
+                        str(x.get("name") or "")
+                        for x in top_events[:5]
+                        if x.get("name")
+                    )
                 )
-            )
 
-    doc.add_heading("Саммари периода", level=2)
-    for block in str(payload.get("summary_text") or "").split("\n"):
-        block = block.strip()
-        if block:
-            para = doc.add_paragraph(block)
-            para.paragraph_format.space_after = Pt(4)
+    if "summary_text" in sections:
+        doc.add_heading("Саммари периода", level=2)
+        for block in str(payload.get("summary_text") or "").split("\n"):
+            block = block.strip()
+            if block:
+                para = doc.add_paragraph(block)
+                para.paragraph_format.space_after = Pt(4)
 
     out = BytesIO()
     doc.save(out)
@@ -975,19 +1071,23 @@ def generate_summary_pdf(payload: dict[str, Any]) -> bytes:
         spaceAfter=6,
     )
 
+    sections = set(resolve_report_sections(payload.get("sections")))
+    has_visual_sections = bool(_VISUAL_SECTIONS & sections)
+
     story = []
     infographic_added = False
-    try:
-        infographic_png = generate_summary_infographic_png(payload)
-        infographic_io = BytesIO(infographic_png)
-        infographic_io.seek(0)
-        # Инфографика теперь первая страница PDF, без дублирующей текстовой страницы.
-        story.append(Image(infographic_io, width=17.2 * cm, height=24.35 * cm))
-        story.append(PageBreak())
-        infographic_added = True
-    except Exception as exc:  # noqa: BLE001 — PDF без инфографики лучше, чем без PDF
-        LOGGER.warning("Инфографика для PDF не собралась", exc_info=True)
-        report_failure("выгрузка PDF: инфографика не собралась", exc)
+    if has_visual_sections:
+        try:
+            infographic_png = generate_summary_infographic_png(payload)
+            infographic_io = BytesIO(infographic_png)
+            infographic_io.seek(0)
+            # Инфографика — первая страница PDF, без дублирующей текстовой страницы.
+            story.append(Image(infographic_io, width=17.2 * cm, height=24.35 * cm))
+            story.append(PageBreak())
+            infographic_added = True
+        except Exception as exc:  # noqa: BLE001 — PDF без инфографики лучше, чем без PDF
+            LOGGER.warning("Инфографика для PDF не собралась", exc_info=True)
+            report_failure("выгрузка PDF: инфографика не собралась", exc)
 
     total = max(1, int(payload.get("total", 0) or 0))
     if not infographic_added:
@@ -1022,32 +1122,48 @@ def generate_summary_pdf(payload: dict[str, Any]) -> bytes:
                     normal,
                 ),
                 Spacer(1, 8),
-                Paragraph("<b>Основные метрики</b>", heading),
-                Paragraph(
-                    xml_escape(
-                        f"Сообщений — {format_int(payload.get('messages', 0))}; "
-                        f"аудитория — {format_int(payload.get('audience', 0))}; "
-                        f"охват — {format_int(payload.get('reach', 0))}; "
-                        f"вовлеченность — {format_int(payload.get('engagement', 0))}."
-                    ),
-                    normal,
-                ),
-                Paragraph(
-                    xml_escape(
-                        f"Тональность: позитив — {percent_text(int(payload.get('positive', 0) or 0), total)}; "
-                        f"нейтрал — {percent_text(int(payload.get('neutral', 0) or 0), total)}; "
-                        f"негатив — {percent_text(int(payload.get('negative', 0) or 0), total)}."
-                    ),
-                    normal,
-                ),
-                Spacer(1, 8),
             ]
         )
+        if "metrics" in sections or "sentiment" in sections:
+            story.append(Paragraph("<b>Основные метрики</b>", heading))
+            if "metrics" in sections:
+                story.append(
+                    Paragraph(
+                        xml_escape(
+                            f"Сообщений — {format_int(payload.get('messages', 0))}; "
+                            f"аудитория — {format_int(payload.get('audience', 0))}; "
+                            f"охват — {format_int(payload.get('reach', 0))}; "
+                            f"вовлеченность — {format_int(payload.get('engagement', 0))}."
+                        ),
+                        normal,
+                    )
+                )
+            if "sentiment" in sections:
+                story.append(
+                    Paragraph(
+                        xml_escape(
+                            f"Тональность: позитив — {percent_text(int(payload.get('positive', 0) or 0), total)}; "
+                            f"нейтрал — {percent_text(int(payload.get('neutral', 0) or 0), total)}; "
+                            f"негатив — {percent_text(int(payload.get('negative', 0) or 0), total)}."
+                        ),
+                        normal,
+                    )
+                )
+            story.append(Spacer(1, 8))
 
-    story.append(Paragraph("<b>Саммари периода</b>", heading))
-    for block in str(payload.get("summary_text") or "").split("\n"):
-        block = block.strip()
-        if block:
-            story.append(Paragraph(xml_escape(block), normal))
+    if "summary_text" in sections:
+        story.append(Paragraph("<b>Саммари периода</b>", heading))
+        for block in str(payload.get("summary_text") or "").split("\n"):
+            block = block.strip()
+            if block:
+                story.append(Paragraph(xml_escape(block), normal))
+    if not story:
+        # Аналитик снял вообще все разделы - пустой PDF выглядел бы как баг,
+        # а не как осознанный (пустой) выбор.
+        story.append(
+            Paragraph(
+                "Все разделы отчёта отключены в настройках выгрузки.", normal
+            )
+        )
     doc.build(story)
     return out.getvalue()
