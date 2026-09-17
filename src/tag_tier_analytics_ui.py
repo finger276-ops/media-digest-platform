@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Аналитика по уровням (тирам) системы тегов проекта — Этап 4.
+Аналитика по уровням системы тегов проекта — Этап 4.
 
 Показывается в разделе «Теги» дашборда, если для проекта загружена
 структура (Этап 3). Считает ТОЧНО по сообщениям:
@@ -12,8 +12,8 @@
 считается ОДИН раз (в отличие от простой суммы счётчиков тегов).
 
 Блоки:
-  1) обзор Тир 1 — вклад каждой ветки;
-  2) drill-down — выбор узла и разбивка по его детям;
+  1) верхний уровень — вклад каждой ветки (одна свёрнутая раскрывашка);
+  2) выбор ветки внутри той же раскрывашки — разбивка по её детям;
   3) покрытие — сколько сообщений размечено структурой, какие теги
      из данных в структуру не входят (подсказка аналитику).
 
@@ -100,6 +100,31 @@ def compute_tier_aggregates(
 # UI
 # ---------------------------------------------------------------------------
 
+# Общие настройки индикатора доли — один и тот же вид у обзора верхнего
+# уровня и у разбивки внутри выбранной ветки.
+def _share_column(label: str) -> "st.column_config.ProgressColumn":
+    return st.column_config.ProgressColumn(
+        label, format="%.1f%%", min_value=0, max_value=100
+    )
+
+
+_SUBTREE_HELP = (
+    "Уникальных сообщений с этим тегом или любым его потомком — не сумма "
+    "счётчиков, а множество: сообщение с двумя дочерними тегами одной ветки "
+    "считается один раз."
+)
+_OWN_HELP = "Сообщений именно с этим тегом, без учёта потомков."
+
+_COUNT_COLUMNS = {
+    "Сообщений (с потомками)": st.column_config.NumberColumn(
+        "Сообщений (с потомками)", help=_SUBTREE_HELP
+    ),
+    "Сообщений (сам тег)": st.column_config.NumberColumn(
+        "Сообщений (сам тег)", help=_OWN_HELP
+    ),
+}
+
+
 def render_tier_analytics_block(
     messages: pd.DataFrame, project_id: str | None = None
 ) -> None:
@@ -129,100 +154,61 @@ def render_tier_analytics_block(
             f"({coverage['covered_pct']}%) имеют хотя бы один тег из структуры."
         )
 
-        # --- 1. Обзор Тир 1 ---
-        tier1 = table[table["Тир"] == 1].copy()
-        if not tier1.empty:
-            st.markdown("**Верхний уровень (Тир 1):**")
-            # Раньше здесь стоял bar_chart с теми же тремя числами, что и в
-            # таблице ниже, — на маленьком N (обычно 3-6 тир-1 веток) график
-            # не показывает ничего, что нельзя прочитать из таблицы, только
-            # занимает экран. Доля встроена в саму таблицу индикатором —
-            # тот же визуальный вес, без дублирования.
+        # Раньше здесь было по очереди: обзор «Тир 1», bar_chart, дублирующий
+        # ту же таблицу, потом выбор узла из списка с подписью «(Тир 2)»; на
+        # следующем заходе — сплошная таблица-дерево с отступами и значками
+        # «↳». Ни то, ни другое не понравилось: жаргон «тир» и стрелочки
+        # мешали читать структуру. Здесь — одна свёрнутая раскрывашка: внутри
+        # верхний уровень и выбор ветки для разбивки, без единого «Тир N»
+        # и без значков вложенности.
+        with st.expander("Структура тегов", expanded=False):
+            top_level = table[table["Тир"] == table["Тир"].min()].copy()
+            st.markdown("**Верхний уровень:**")
             st.dataframe(
-                tier1[
+                top_level[
                     ["Тег", "Доля от всех", "Сообщений (с потомками)", "Сообщений (сам тег)"]
                 ],
                 hide_index=True,
                 width="stretch",
-                column_config={
-                    "Доля от всех": st.column_config.ProgressColumn(
-                        "Доля от всех",
-                        format="%.1f%%",
-                        min_value=0,
-                        max_value=100,
-                    ),
-                    "Сообщений (с потомками)": st.column_config.NumberColumn(
-                        "Сообщений (с потомками)",
-                        help="Уникальных сообщений с этим тегом или любым его "
-                        "потомком — не сумма счётчиков, а множество: сообщение "
-                        "с двумя дочерними тегами ветки считается один раз.",
-                    ),
-                    "Сообщений (сам тег)": st.column_config.NumberColumn(
-                        "Сообщений (сам тег)",
-                        help="Сообщений именно с этим тегом, без учёта потомков.",
-                    ),
-                },
+                column_config={"Доля от всех": _share_column("Доля от всех"), **_COUNT_COLUMNS},
             )
 
-        # --- 2. Drill-down ---
-        parents = [
-            t for t, n in hierarchy.by_tag.items() if n.children
-        ]
-        if parents:
-            parents_sorted = sorted(
-                parents, key=lambda t: (hierarchy.tier_of(t) or 99, t)
-            )
-            chosen = st.selectbox(
-                "Провалиться в узел:",
-                parents_sorted,
-                format_func=lambda t: f"{t} (Тир {hierarchy.tier_of(t)})",
-                key=f"tier_drill_{project_id}",
-            )
-            node = hierarchy.get_node(chosen)
-            if node and node.children:
-                child_names = [c.tag for c in node.children]
-                child_rows = table[table["Тег"].isin(child_names)].copy()
-                parent_subtree = int(
-                    table.loc[table["Тег"] == chosen, "Сообщений (с потомками)"].iloc[0]
+            branches = sorted(t for t, n in hierarchy.by_tag.items() if n.children)
+            if branches:
+                chosen = st.selectbox(
+                    "Показать состав ветки:",
+                    branches,
+                    key=f"tier_branch_{project_id}",
                 )
-                if parent_subtree > 0:
-                    child_rows["Доля в узле"] = (
-                        child_rows["Сообщений (с потомками)"] / parent_subtree * 100
-                    ).round(1)
-                else:
-                    child_rows["Доля в узле"] = 0.0
-                st.markdown(f"**Внутри «{chosen}»** ({parent_subtree} сообщений в ветке):")
-                st.dataframe(
-                    child_rows[
-                        [
-                            "Тег",
-                            "Доля в узле",
-                            "Сообщений (с потомками)",
-                            "Сообщений (сам тег)",
-                        ]
-                    ],
-                    hide_index=True,
-                    width="stretch",
-                    column_config={
-                        "Доля в узле": st.column_config.ProgressColumn(
-                            "Доля в узле",
-                            format="%.1f%%",
-                            min_value=0,
-                            max_value=100,
-                        ),
-                        "Сообщений (с потомками)": st.column_config.NumberColumn(
-                            "Сообщений (с потомками)",
-                            help="Уникальных сообщений с этим тегом или любым "
-                            "его потомком.",
-                        ),
-                        "Сообщений (сам тег)": st.column_config.NumberColumn(
-                            "Сообщений (сам тег)",
-                            help="Сообщений именно с этим тегом, без учёта потомков.",
-                        ),
-                    },
-                )
+                node = hierarchy.get_node(chosen)
+                if node and node.children:
+                    child_names = [c.tag for c in node.children]
+                    child_rows = table[table["Тег"].isin(child_names)].copy()
+                    parent_subtree = int(
+                        table.loc[table["Тег"] == chosen, "Сообщений (с потомками)"].iloc[0]
+                    )
+                    if parent_subtree > 0:
+                        child_rows["Доля в ветке"] = (
+                            child_rows["Сообщений (с потомками)"] / parent_subtree * 100
+                        ).round(1)
+                    else:
+                        child_rows["Доля в ветке"] = 0.0
+                    st.markdown(f"**Состав «{chosen}»** ({parent_subtree} сообщений в ветке):")
+                    st.dataframe(
+                        child_rows[
+                            [
+                                "Тег",
+                                "Доля в ветке",
+                                "Сообщений (с потомками)",
+                                "Сообщений (сам тег)",
+                            ]
+                        ],
+                        hide_index=True,
+                        width="stretch",
+                        column_config={"Доля в ветке": _share_column("Доля в ветке"), **_COUNT_COLUMNS},
+                    )
 
-        # --- 3. Теги вне структуры (подсказка аналитику) ---
+        # --- Теги вне структуры (подсказка аналитику) ---
         if coverage["outside_tags"]:
             with st.expander("Теги в данных, отсутствующие в структуре", expanded=False):
                 st.caption(
