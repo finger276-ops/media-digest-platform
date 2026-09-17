@@ -791,15 +791,38 @@ def generate_summary_infographic_png(payload: dict[str, Any]) -> bytes:
     return out.getvalue()
 
 
+def _docx_bottom_border(paragraph, color_hex: str, size: int = 16) -> None:
+    """Цветная линия под абзацем - тот же приём, что акцентная полоса в
+    шапке PNG-инфографики, только средствами Word (нет прямого API, поэтому
+    через oxml - стандартный, задокументированный обходной путь)."""
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    p_pr = paragraph._p.get_or_add_pPr()
+    borders = OxmlElement("w:pBdr")
+    bottom = OxmlElement("w:bottom")
+    bottom.set(qn("w:val"), "single")
+    bottom.set(qn("w:sz"), str(size))
+    bottom.set(qn("w:space"), "6")
+    bottom.set(qn("w:color"), color_hex.lstrip("#"))
+    borders.append(bottom)
+    p_pr.append(borders)
+
+
 def generate_summary_docx(payload: dict[str, Any]) -> bytes:
     try:
         from docx import Document
-        from docx.shared import Pt, Inches, Cm
+        from docx.shared import Pt, Inches, Cm, RGBColor
         from docx.enum.text import WD_ALIGN_PARAGRAPH
     except Exception as exc:
         raise RuntimeError(
             "Для выгрузки Word добавьте python-docx в requirements.txt."
         ) from exc
+
+    accent = valid_hex_color(payload.get("accent_color"), "#2563eb")
+    accent_rgb = RGBColor.from_string(accent.lstrip("#"))
+    muted_rgb = RGBColor.from_string("6b7280")
+    ink_rgb = RGBColor.from_string("111827")
 
     doc = Document()
     section = doc.sections[0]
@@ -811,15 +834,22 @@ def generate_summary_docx(payload: dict[str, Any]) -> bytes:
     styles = doc.styles
     styles["Normal"].font.name = "Arial"
     styles["Normal"].font.size = Pt(10.5)
+    styles["Normal"].font.color.rgb = ink_rgb
     styles["Heading 1"].font.name = "Arial"
     styles["Heading 1"].font.size = Pt(16)
+    styles["Heading 1"].font.color.rgb = accent_rgb
+    # Тот же акцентный цвет, что заголовки блоков и полоса на карточках
+    # метрик в PNG-инфографике - страницы саммари не должны выглядеть
+    # отдельным, неоформленным документом рядом с картинкой на первой странице.
     styles["Heading 2"].font.name = "Arial"
     styles["Heading 2"].font.size = Pt(13)
+    styles["Heading 2"].font.color.rgb = accent_rgb
 
     p = doc.add_paragraph()
     r = p.add_run(str(payload.get("report_title") or "Дайджест упоминаний"))
     r.bold = True
     r.font.size = Pt(16)
+    r.font.color.rgb = accent_rgb
     p.paragraph_format.space_after = Pt(4)
 
     p2 = doc.add_paragraph()
@@ -828,13 +858,22 @@ def generate_summary_docx(payload: dict[str, Any]) -> bytes:
     )
     r2.bold = True
     r2.font.size = Pt(13)
+    r2.font.color.rgb = ink_rgb
     p2.paragraph_format.space_after = Pt(6)
 
     meta = doc.add_paragraph()
-    meta.add_run(f"Шаблон: {payload.get('report_template_label') or ''}\n")
-    meta.add_run(f"Период: {payload.get('period_label') or 'выбранный период'}\n")
-    meta.add_run(f"Дата выгрузки: {payload.get('created_at') or ''}")
-    meta.paragraph_format.space_after = Pt(8)
+    meta_lines = [
+        f"Шаблон: {payload.get('report_template_label') or ''}",
+        f"Период: {payload.get('period_label') or 'выбранный период'}",
+        f"Дата выгрузки: {payload.get('created_at') or ''}",
+    ]
+    for i, line in enumerate(meta_lines):
+        text = line if i == len(meta_lines) - 1 else line + "\n"
+        run = meta.add_run(text)
+        run.font.color.rgb = muted_rgb
+        run.font.size = Pt(9.5)
+    meta.paragraph_format.space_after = Pt(10)
+    _docx_bottom_border(meta, accent)
 
     sections = set(resolve_report_sections(payload.get("sections")))
     has_visual_sections = bool(_VISUAL_SECTIONS & sections)
@@ -1019,6 +1058,7 @@ def _pdf_font_name() -> str:
 
 def generate_summary_pdf(payload: dict[str, Any]) -> bytes:
     try:
+        from reportlab.lib import colors as rl_colors
         from reportlab.lib.pagesizes import A4
         from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
         from reportlab.lib.units import cm
@@ -1028,6 +1068,7 @@ def generate_summary_pdf(payload: dict[str, Any]) -> bytes:
             Spacer,
             Image,
             PageBreak,
+            HRFlowable,
         )
         from xml.sax.saxutils import escape as xml_escape
     except Exception as exc:
@@ -1036,6 +1077,10 @@ def generate_summary_pdf(payload: dict[str, Any]) -> bytes:
         ) from exc
 
     font_name = _pdf_font_name()
+    accent = valid_hex_color(payload.get("accent_color"), "#2563eb")
+    accent_color = rl_colors.HexColor(accent)
+    ink_color = rl_colors.HexColor("#111827")
+    muted_color = rl_colors.HexColor("#6b7280")
     out = BytesIO()
     doc = SimpleDocTemplate(
         out,
@@ -1052,7 +1097,13 @@ def generate_summary_pdf(payload: dict[str, Any]) -> bytes:
         fontName=font_name,
         fontSize=10,
         leading=14,
+        textColor=ink_color,
     )
+    # Акцентный цвет и приглушённый серый - те же токены, что в шапке и
+    # подписях PNG-инфографики (services/chart_style.py) - страницы саммари
+    # не должны выглядеть отдельным, неоформленным документом рядом с
+    # картинкой на первой странице.
+    muted = ParagraphStyle("PlatformMuted", parent=normal, fontSize=9, textColor=muted_color)
     title = ParagraphStyle(
         "PlatformTitle",
         parent=normal,
@@ -1060,6 +1111,7 @@ def generate_summary_pdf(payload: dict[str, Any]) -> bytes:
         fontSize=16,
         leading=20,
         spaceAfter=10,
+        textColor=accent_color,
     )
     heading = ParagraphStyle(
         "PlatformHeading",
@@ -1069,6 +1121,10 @@ def generate_summary_pdf(payload: dict[str, Any]) -> bytes:
         leading=16,
         spaceBefore=8,
         spaceAfter=6,
+        textColor=accent_color,
+    )
+    client_style = ParagraphStyle(
+        "PlatformClient", parent=normal, fontSize=13, leading=17, textColor=ink_color
     )
 
     sections = set(resolve_report_sections(payload.get("sections")))
@@ -1105,23 +1161,24 @@ def generate_summary_pdf(payload: dict[str, Any]) -> bytes:
                             or "Проект"
                         )
                     ),
-                    heading,
+                    client_style,
                 ),
                 Paragraph(
                     xml_escape(f"Шаблон: {payload.get('report_template_label') or ''}"),
-                    normal,
+                    muted,
                 ),
                 Paragraph(
                     xml_escape(
                         f"Период: {payload.get('period_label') or 'выбранный период'}"
                     ),
-                    normal,
+                    muted,
                 ),
                 Paragraph(
                     xml_escape(f"Дата выгрузки: {payload.get('created_at') or ''}"),
-                    normal,
+                    muted,
                 ),
-                Spacer(1, 8),
+                Spacer(1, 6),
+                HRFlowable(width="100%", thickness=1.4, color=accent_color, spaceAfter=10),
             ]
         )
         if "metrics" in sections or "sentiment" in sections:

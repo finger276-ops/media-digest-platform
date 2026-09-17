@@ -313,6 +313,66 @@ check(
     f"{len(metrics_only_png)} vs {len(full_png)}",
 )
 
+print("11. Текстовые страницы Word/PDF окрашены под брендирование, а не голый чёрный текст")
+styled_payload = summary_export_payload(
+    "ТЕХНОНИКОЛЬ",
+    "24.04.2026–30.04.2026",
+    "Текст саммари.",
+    metrics,
+    messages=MESSAGES,
+    events_agg=EVENTS_AGG,
+    branding={**BRANDING, "accent_color": "#7c3aed"},
+)
+styled_docx = Document(BytesIO(generate_summary_docx(styled_payload)))
+check(
+    "заголовок отчёта покрашен в акцентный цвет проекта",
+    str(styled_docx.styles["Heading 2"].font.color.rgb) == "7C3AED",
+    str(styled_docx.styles["Heading 2"].font.color.rgb),
+)
+check(
+    "обычный текст — не чистый чёрный, а «чернильный» тон инфографики",
+    str(styled_docx.styles["Normal"].font.color.rgb) == "111827",
+    str(styled_docx.styles["Normal"].font.color.rgb),
+)
+title_run = next(p for p in styled_docx.paragraphs if p.text == "Дайджест упоминаний").runs[0]
+check(
+    "заголовок отчёта (титул) тоже акцентный, а не дефолтный чёрный",
+    str(title_run.font.color.rgb) == "7C3AED",
+    str(title_run.font.color.rgb),
+)
+
+# PDF: пиксели не проверяем (как и раньше в этом файле - только сигнатура),
+# но разный accent_color обязан давать разные байты - иначе цвет из payload
+# в PDF просто не доехал.
+pdf_purple = generate_summary_pdf(
+    summary_export_payload(
+        "ТЕХНОНИКОЛЬ",
+        "24.04.2026–30.04.2026",
+        "Текст саммари.",
+        metrics,
+        messages=MESSAGES,
+        events_agg=EVENTS_AGG,
+        branding={**BRANDING, "accent_color": "#7c3aed"},
+        sections=["summary_text"],
+    )
+)
+pdf_green = generate_summary_pdf(
+    summary_export_payload(
+        "ТЕХНОНИКОЛЬ",
+        "24.04.2026–30.04.2026",
+        "Текст саммари.",
+        metrics,
+        messages=MESSAGES,
+        events_agg=EVENTS_AGG,
+        branding={**BRANDING, "accent_color": "#16a34a"},
+        sections=["summary_text"],
+    )
+)
+check(
+    "разный accent_color -> разные байты PDF (цвет реально доезжает до документа)",
+    pdf_purple != pdf_green,
+)
+
 print()
 if failures:
     print(f"ПРОВАЛЕНО: {len(failures)} → {failures}")
