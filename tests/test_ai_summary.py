@@ -398,6 +398,84 @@ check(
     card_risk[-500:],
 )
 
+print("8.5. По дням: пиковый день виден модели, а не выдумывается на скудных данных")
+# _comparison_block выше - период к периоду, это заголовочная динамика (на
+# ней держатся цифры PNG/DOCX/PDF, её менять нельзя). Блок "по дням" -
+# дополнение: даёт модели сказать "пик пришёлся на 26.04", а не только
+# "негатив вырос". Дни: 24.04(1, без негатива), 25.04(2, 1 негатив),
+# 26.04(3, все три негативные - и самый насыщенный, и худший по негативу),
+# 27.04(1, нейтрал).
+daily_messages = pd.DataFrame(
+    {
+        "message_id": [f"d{i}" for i in range(7)],
+        "period_id": ["p1"] * 7,
+        "datetime": [
+            "2026-04-24T10:00:00",
+            "2026-04-25T10:00:00",
+            "2026-04-25T11:00:00",
+            "2026-04-26T10:00:00",
+            "2026-04-26T11:00:00",
+            "2026-04-26T12:00:00",
+            "2026-04-27T10:00:00",
+        ],
+        "sentiment": [
+            "позитив",
+            "негатив",
+            "нейтрал",
+            "негатив",
+            "негатив",
+            "негатив",
+            "нейтрал",
+        ],
+        "views": [100] * 7,
+        "audience": [50] * 7,
+        "engagement": [5] * 7,
+        "text_clean": ["Текст"] * 7,
+    }
+)
+card_daily = build_data_card(
+    project_name="ТЕХНОНИКОЛЬ",
+    periods=periods,
+    period_ids=["p1"],
+    messages=daily_messages,
+    events_agg=events,
+    include_excerpts=False,
+)
+check(
+    "блок по дням появился - дат хватает (4 дня)",
+    "По дням внутри периода" in card_daily,
+    card_daily[-500:],
+)
+check(
+    "самый насыщенный день назван верно - 26.04 (3 сообщения)",
+    "больше всего сообщений: 26.04 (3)" in card_daily,
+    card_daily[-500:],
+)
+check(
+    "день пика негатива назван верно - 26.04 (3 негативных)",
+    "больше всего негативных сообщений: 26.04 (3)" in card_daily,
+    card_daily[-500:],
+)
+check(
+    "без колонки datetime блока по дням нет - карточка из раздела 7 без изменений",
+    "По дням внутри периода" not in card,
+    card,
+)
+two_day_messages = daily_messages[daily_messages["message_id"].isin(["d0", "d1"])]
+card_two_days = build_data_card(
+    project_name="ТЕХНОНИКОЛЬ",
+    periods=periods,
+    period_ids=["p1"],
+    messages=two_day_messages,
+    events_agg=events,
+    include_excerpts=False,
+)
+check(
+    "на двух днях блока по дням нет - весь диапазон не наблюдение, а не пик",
+    "По дням внутри периода" not in card_two_days,
+    card_two_days,
+)
+
 print("9. Промпт: задача, карточка и запрет выдумывать числа")
 prompt = build_prompt(KIND_SUMMARY, card, extra_instructions="писать суше")
 check("в промпте есть карточка", "ТЕХНОНИКОЛЬ" in prompt)

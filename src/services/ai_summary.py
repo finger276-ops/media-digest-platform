@@ -25,6 +25,7 @@ import pandas as pd
 from .ai_provider import AIConfig, AIError, complete, estimate_tokens, load_ai_config
 from .brand_metrics import METRIC_TITLES
 from .metrics_compute import numeric_series, overview_metrics, sentiment_counts
+from .period_comparison import daily_metrics_for_comparison
 from .tag_compute import build_tag_statistics_compute
 
 KIND_SUMMARY = "summary"
@@ -191,6 +192,37 @@ def _comparison_block(metrics: dict[str, Any] | None) -> str:
     )
 
 
+def _daily_highlight_block(messages: pd.DataFrame) -> str | None:
+    """Пиковые дни внутри периода — календарная разбивка, а не сам период.
+
+    _comparison_block выше — период к периоду, это и есть заголовочная
+    динамика отчёта, её менять нельзя (на ней держатся цифры в PNG/DOCX/
+    PDF). Этот блок — дополнение: даёт модели повод сказать «пик негатива
+    пришёлся на 27.04», а не только «негатив вырос на 12%». Возвращает
+    None, если дней меньше трёх — на двух «пик» это и так весь диапазон,
+    не наблюдение.
+    """
+    daily = daily_metrics_for_comparison(messages)
+    if len(daily) < 3:
+        return None
+
+    def _negative(day: dict[str, Any]) -> int:
+        return int((day.get("sentiment") or {}).get("negative") or 0)
+
+    busiest = max(daily, key=lambda d: d.get("messages", 0))
+    worst = max(daily, key=_negative)
+    lines = [
+        f"- больше всего сообщений: {busiest.get('label')} "
+        f"({_fmt_int(busiest.get('messages'))})",
+    ]
+    if _negative(worst) > 0:
+        lines.append(
+            f"- больше всего негативных сообщений: {worst.get('label')} "
+            f"({_fmt_int(_negative(worst))})"
+        )
+    return f"По дням внутри периода ({len(daily)} дн.):\n" + "\n".join(lines)
+
+
 def _brand_metrics_block(cards: dict[str, dict[str, Any]] | None) -> str:
     if not cards:
         return "Индексы бренда: не посчитаны."
@@ -274,6 +306,9 @@ def build_data_card(
         _events_block(events_agg),
         _brand_metrics_block(brand_cards),
     ]
+    daily_highlight = _daily_highlight_block(messages)
+    if daily_highlight:
+        blocks.append(daily_highlight)
     if include_excerpts:
         excerpts = _excerpts_block(messages, negative_only=negative_excerpts)
         if excerpts:
@@ -290,6 +325,8 @@ TASK_PROMPTS = {
 - какие темы дали основной объём и почему они появились;
 - как изменилась картина к предыдущему периоду, если динамика есть в карточке;
 - где сосредоточен негатив;
+- если в карточке есть блок «По дням внутри периода» — укажи конкретный \
+день пика (сообщений или негатива), это конкретнее, чем «негатив вырос»;
 - одно-два наблюдения, которые не видны из голых цифр.""",
     KIND_BRAND: """Напиши комментарий к индексам бренда: 2–4 абзаца.
 
