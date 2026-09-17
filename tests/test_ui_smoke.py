@@ -439,6 +439,59 @@ if period_multiselect:
     metric_deltas = [str(m.delta) for m in at.metric if m.delta]
     check("у метрик есть дельта к предыдущему периоду", bool(metric_deltas), str(metric_deltas)[:200])
 
+    print("2.55. Динамика основных метрик: подписи периодов не накладываются, цвет метрики закреплён")
+    # Ровно тот график со скриншота, который пожаловался аналитик: в узких
+    # facet-панелях подписи периодов «24.04.2026-30.04.2026» и соседняя
+    # слипались при angle=0. Проверяем сам факт: ни у одной оси с периодами
+    # угол не нулевой (иначе тест не поймает регресс к прежнему виду).
+    all_specs = [
+        json.loads(el.proto.spec)
+        for el in at.get("vega_lite_chart")
+        if getattr(el, "proto", None) is not None
+    ]
+
+    def _encodings(spec):
+        # facet-график хранит encoding под spec["spec"]["encoding"], обычный - под spec["encoding"].
+        found = []
+        if "encoding" in spec:
+            found.append(spec["encoding"])
+        nested = spec.get("spec")
+        if isinstance(nested, dict) and "encoding" in nested:
+            found.append(nested["encoding"])
+        return found
+
+    period_axis_angles = [
+        enc["x"]["axis"]["labelAngle"]
+        for spec in all_specs
+        for enc in _encodings(spec)
+        if enc.get("x", {}).get("field") == "Период"
+        and "axis" in enc.get("x", {})
+        and "labelAngle" in enc["x"]["axis"]
+    ]
+    check(
+        "хотя бы одна ось периода отрисована с закреплённым наклоном",
+        bool(period_axis_angles),
+        str(period_axis_angles),
+    )
+    check(
+        "ни одна ось периода не осталась с angle=0 (та самая причина наложения подписей)",
+        bool(period_axis_angles) and all(a != 0 for a in period_axis_angles),
+        str(period_axis_angles),
+    )
+
+    metric_color_domains = [
+        enc["color"]["scale"]["domain"]
+        for spec in all_specs
+        for enc in _encodings(spec)
+        if enc.get("color", {}).get("field") == "Метрика"
+        and "domain" in enc.get("color", {}).get("scale", {})
+    ]
+    check(
+        "цвет метрики закреплён фиксированным доменом (не дефолтной схемой Vega)",
+        any(set(d) == {"Сообщения", "Аудитория", "Охват", "Вовлеченность"} for d in metric_color_domains),
+        str(metric_color_domains),
+    )
+
     print("2.6. Динамика тональности: 100%-накопленный столбец")
     sentiment_type_select = [
         s for s in at.selectbox if str(s.label) == "Вид тональности"
@@ -567,6 +620,40 @@ if period_multiselect:
         ),
         str(dynamics)[:220],
     )
+
+    print("3.12. Динамика индексов бренда: тот же наклон осей и закреплённый цвет метрики")
+    brand_specs = [
+        json.loads(el.proto.spec)
+        for el in at.get("vega_lite_chart")
+        if getattr(el, "proto", None) is not None
+    ]
+    brand_period_angles = [
+        spec["encoding"]["x"]["axis"]["labelAngle"]
+        for spec in brand_specs
+        if spec.get("encoding", {}).get("x", {}).get("field") == "Период"
+        and "axis" in spec.get("encoding", {}).get("x", {})
+        and "labelAngle" in spec["encoding"]["x"]["axis"]
+    ]
+    check(
+        "ось периода в «Индексах бренда» тоже с ненулевым наклоном",
+        bool(brand_period_angles) and all(a != 0 for a in brand_period_angles),
+        str(brand_period_angles),
+    )
+    brand_color_domains = [
+        spec["encoding"]["color"]["scale"]["domain"]
+        for spec in brand_specs
+        if spec.get("encoding", {}).get("color", {}).get("field") == "Метрика"
+        and "domain" in spec.get("encoding", {}).get("color", {}).get("scale", {})
+    ]
+    check(
+        "цвет метрики бренда закреплён полным доменом BPI..ERR, а не только выбранными",
+        any(
+            {"BPI", "NSS", "SES", "TVS", "SOV", "ReachScore", "ER", "ERR"} == set(d)
+            for d in brand_color_domains
+        ),
+        str(brand_color_domains),
+    )
+
     # Возвращаем один период: дальше тест проверяет разделы в исходном виде.
     period_multiselect = [m for m in at.sidebar.multiselect if str(m.label) == "Периоды"]
     period_multiselect[0].set_value([PERIOD_ID]).run()

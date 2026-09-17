@@ -31,9 +31,21 @@ from services.project_settings import (
     chart_label_settings_from_project_settings,
     chart_label_text_kwargs,
 )
+from services.chart_style import (
+    LINE_INTERPOLATE,
+    PERIOD_AXIS,
+    fixed_color_scale,
+)
 
 SENTIMENT_COLOR_DOMAIN = ["Позитив", "Нейтрал", "Негатив"]
 SENTIMENT_COLOR_RANGE = ["#2ca02c", "#9e9e9e", "#d62728"]
+
+# Порядок метрик закреплён здесь же, где строится их цветовая шкала — тот же
+# порядок, что в metrics_cols ниже, чтобы цвет метрики не зависел от того, в
+# каком графике она сейчас нарисована.
+MAIN_METRICS_COLOR_SCALE = fixed_color_scale(
+    ["Сообщения", "Аудитория", "Охват", "Вовлеченность"]
+)
 
 
 def _render_sentiment_donut(
@@ -245,10 +257,14 @@ def render_period_comparison_charts(
                 "Период:N",
                 sort=None,
                 title="Период",
-                axis=alt.Axis(labelAngle=0, labelLimit=120),
+                axis=PERIOD_AXIS,
             ),
             y=alt.Y("Значение:Q", title="Значение"),
-            color=alt.Color("Метрика:N", legend=alt.Legend(title="Метрика")),
+            color=alt.Color(
+                "Метрика:N",
+                scale=MAIN_METRICS_COLOR_SCALE,
+                legend=alt.Legend(title="Метрика"),
+            ),
             tooltip=[
                 alt.Tooltip("Полный период:N", title="Период"),
                 "Метрика",
@@ -264,11 +280,15 @@ def render_period_comparison_charts(
                         "Период:N",
                         sort=None,
                         title="Период",
-                        axis=alt.Axis(labelAngle=0, labelLimit=120),
+                        axis=PERIOD_AXIS,
                     ),
                     xOffset=alt.XOffset("Метрика:N"),
                     y=alt.Y("Значение:Q", title="Значение"),
-                    color=alt.Color("Метрика:N", legend=alt.Legend(title="Метрика")),
+                    color=alt.Color(
+                        "Метрика:N",
+                        scale=MAIN_METRICS_COLOR_SCALE,
+                        legend=alt.Legend(title="Метрика"),
+                    ),
                     tooltip=[
                         alt.Tooltip("Полный период:N", title="Период"),
                         "Метрика",
@@ -338,16 +358,18 @@ def render_period_comparison_charts(
             )
             metrics_line = (
                 alt.Chart(metrics_long)
-                .mark_line(point=True)
+                .mark_line(point=True, interpolate=LINE_INTERPOLATE)
                 .encode(
                     x=alt.X(
                         "Период:N",
                         sort=None,
                         title=None,
-                        axis=alt.Axis(labelAngle=0, labelLimit=120),
+                        axis=PERIOD_AXIS,
                     ),
                     y=alt.Y("Значение:Q", title=None),
-                    color=alt.Color("Метрика:N", legend=None),
+                    color=alt.Color(
+                        "Метрика:N", scale=MAIN_METRICS_COLOR_SCALE, legend=None
+                    ),
                     tooltip=[
                         alt.Tooltip("Полный период:N", title="Период"),
                         "Метрика",
@@ -383,7 +405,7 @@ def render_period_comparison_charts(
                 "Период:N",
                 sort=None,
                 title="Период",
-                axis=alt.Axis(labelAngle=0, labelLimit=120),
+                axis=PERIOD_AXIS,
             ),
             y=alt.Y("Доля, %:Q", title="Доля, %"),
             color=alt.Color(
@@ -413,7 +435,7 @@ def render_period_comparison_charts(
                         "Период:N",
                         sort=None,
                         title="Период",
-                        axis=alt.Axis(labelAngle=0, labelLimit=120),
+                        axis=PERIOD_AXIS,
                     ),
                     y=alt.Y(
                         "Доля, %:Q",
@@ -461,7 +483,9 @@ def render_period_comparison_charts(
                 label_settings=label_settings,
             )
         else:
-            sentiment_line = base_sentiment.mark_line(point=True)
+            sentiment_line = base_sentiment.mark_line(
+                point=True, interpolate=LINE_INTERPOLATE
+            )
             st.caption(
                 "Подписи процентов скрыты, чтобы линии не накладывались. Значения доступны при наведении на точки."
             )
@@ -476,13 +500,17 @@ def render_period_comparison_charts(
                 st.caption("Негатив отдельно — на общей шкале его не видно из-за нейтрала.")
                 st.altair_chart(
                     alt.Chart(negative_only)
-                    .mark_line(point=True, color=SENTIMENT_COLOR_RANGE[2])
+                    .mark_line(
+                        point=True,
+                        color=SENTIMENT_COLOR_RANGE[2],
+                        interpolate=LINE_INTERPOLATE,
+                    )
                     .encode(
                         x=alt.X(
                             "Период:N",
                             sort=None,
                             title=None,
-                            axis=alt.Axis(labelAngle=0, labelLimit=120),
+                            axis=PERIOD_AXIS,
                         ),
                         y=alt.Y("Доля, %:Q", title="Негатив, %"),
                         tooltip=[
@@ -546,7 +574,7 @@ def render_period_comparison_charts(
                     "Период:N",
                     sort=None,
                     title="Период",
-                    axis=alt.Axis(labelAngle=0, labelLimit=120),
+                    axis=PERIOD_AXIS,
                 ),
                 y=alt.Y("Значение:Q", title=selected_metric),
                 tooltip=[
@@ -555,7 +583,7 @@ def render_period_comparison_charts(
                 ],
             )
             if comparison_chart_type == "График":
-                line = bar_base.mark_line(point=True)
+                line = bar_base.mark_line(point=True, interpolate=LINE_INTERPOLATE)
                 line_labels = bar_base.mark_text(
                     **chart_label_text_kwargs(label_settings, chart_type="line")
                 ).encode(text="Подпись:N")

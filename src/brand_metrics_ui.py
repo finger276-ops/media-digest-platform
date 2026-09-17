@@ -49,8 +49,13 @@ from services.metric_notes import (
 )
 from services.period_comparison import ordered_period_ids, previous_period_id
 from services.project_settings import category_brands_from_project_settings
+from services.chart_style import LINE_INTERPOLATE, PERIOD_AXIS, fixed_color_scale
 
 METRIC_ORDER = ["BPI", "NSS", "SES", "TVS", "SOV", "ReachScore", "ER", "ERR"]
+
+# Домен на весь набор метрик, а не только на выбранные аналитиком: тогда
+# цвет BPI не меняется в зависимости от того, что ещё отмечено в multiselect.
+METRIC_COLOR_SCALE = fixed_color_scale(METRIC_ORDER)
 
 SOURCE_SYSTEM_OPTIONS = {
     "auto": "Автоопределение",
@@ -456,16 +461,16 @@ def render_metrics_dynamics(
 
         chart = (
             alt.Chart(long)
-            .mark_line(point=True)
+            .mark_line(point=True, interpolate=LINE_INTERPOLATE)
             .encode(
                 x=alt.X(
                     "Период:N",
                     sort=list(frame["Период"]),
                     title="",
-                    axis=alt.Axis(labelAngle=0, labelLimit=140),
+                    axis=PERIOD_AXIS,
                 ),
                 y=alt.Y("Значение:Q", title="%"),
-                color=alt.Color("Метрика:N", title=""),
+                color=alt.Color("Метрика:N", scale=METRIC_COLOR_SCALE, title=""),
                 tooltip=["Период", "Метрика", alt.Tooltip("Значение:Q", format=".2f")],
             )
             .properties(height=320)
