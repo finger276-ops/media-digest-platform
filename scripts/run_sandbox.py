@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -123,12 +123,23 @@ _THEMES = [
 ]
 
 
+_PERIOD_START = {
+    PERIOD_ID: datetime(2026, 4, 24, 10, 0, 0),
+    PERIOD_ID_2: datetime(2026, 5, 1, 10, 0, 0),
+}
+
+
 def _message_row(index, sentiment, views, audience, engagement, theme, tags, period_id):
+    # Сообщения разнесены по всем семи дням периода (не одной датой на весь
+    # период), чтобы в песочнице было видно дневную разбивку динамики -
+    # именно то, что попросили показать на графиках вместо одной точки на
+    # период целиком.
+    day = _PERIOD_START[period_id] + timedelta(days=index % 7, hours=index % 6)
     payload = {
         "message_id": f"{period_id}_m{index}",
         "period_id": period_id,
-        "date": "24.04.2026" if period_id == PERIOD_ID else "01.05.2026",
-        "datetime": ("2026-04-24T10:00:00" if period_id == PERIOD_ID else "2026-05-01T10:00:00"),
+        "date": day.strftime("%d.%m.%Y"),
+        "datetime": day.isoformat(),
         "sentiment": sentiment,
         "views": views,
         "audience": audience,

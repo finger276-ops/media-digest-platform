@@ -652,8 +652,10 @@ def render_period_comparison_metrics(
     chart_label_settings: dict[str, Any] | None = None,
     comparison_visible_charts: list[str] | None = None,
 ) -> dict[str, Any] | None:
-    """Render sequential comparison when two or more periods are selected."""
-    aggregate_metrics = build_comparison_metrics(messages, periods, period_ids)
+    """Render sequential comparison, broken down by calendar day where possible."""
+    aggregate_metrics = build_comparison_metrics(
+        messages, periods, period_ids, granularity="day"
+    )
     if aggregate_metrics is None:
         return None
     comparison = aggregate_metrics["comparison_sequence"]
@@ -662,12 +664,15 @@ def render_period_comparison_metrics(
     first = aggregate_metrics["comparison"]["first"]
     last = aggregate_metrics["comparison"]["last"]
     st.subheader("Сравнение периодов")
-    st.caption(
-        "Сравнение идет цепочкой по хронологии: "
-        + " → ".join(
-            item.get("label", item.get("period_id", "")) for item in comparison
-        )
+    chain_labels = [str(item.get("label", item.get("period_id", ""))) for item in comparison]
+    # Дневная разбивка может дать куда больше точек, чем период целиком - без
+    # ограничения цепочка из месяца превратилась бы в нечитаемую простыню.
+    chain = (
+        " → ".join(chain_labels[:10]) + f" → … ещё {len(chain_labels) - 10}"
+        if len(chain_labels) > 10
+        else " → ".join(chain_labels)
     )
+    st.caption("Сравнение идет цепочкой по хронологии: " + chain)
 
     st.markdown(
         f"**{current['label']}** — к предыдущему периоду: {previous['label']}"

@@ -783,20 +783,25 @@ def main() -> None:
         elif page == "Сообщения":
             _section_messages(enriched_messages, project_id)
         elif page == "Динамика":
-            if len(selected_period_ids) < 2:
+            # Гейт раньше был по числу периодов (нужно 2+), но динамика теперь
+            # в первую очередь по дням: одного периода на неделю хватает, если
+            # в нём различимы хотя бы два календарных дня. Решение о том,
+            # достаточно ли данных, принимает сама функция (build_comparison_
+            # metrics с откатом на периоды), а не подсчёт периодов здесь.
+            rendered = render_period_comparison_metrics(
+                enriched_messages,
+                periods,
+                selected_period_ids,
+                chart_label_settings=chart_label_settings,
+                comparison_visible_charts=dashboard_view_settings.get(
+                    "comparison_visible_charts"
+                ),
+            )
+            if rendered is None:
                 st.info(
-                    "Выберите в боковой панели два периода или больше — тогда появится "
-                    "сравнение и графики динамики."
-                )
-            else:
-                render_period_comparison_metrics(
-                    enriched_messages,
-                    periods,
-                    selected_period_ids,
-                    chart_label_settings=chart_label_settings,
-                    comparison_visible_charts=dashboard_view_settings.get(
-                        "comparison_visible_charts"
-                    ),
+                    "Пока не из чего строить динамику: нужно минимум два дня с "
+                    "распознанной датой в выбранных сообщениях, либо два "
+                    "периода в боковой панели."
                 )
         elif page == "Отчёт":
             report_metrics = (

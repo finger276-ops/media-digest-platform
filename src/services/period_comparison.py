@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import pandas as pd
@@ -154,6 +155,62 @@ def period_metrics_for_comparison(
     return result
 
 
+def daily_metrics_for_comparison(messages: pd.DataFrame) -> list[dict[str, Any]]:
+    """То же самое, что period_metrics_for_comparison, но по календарным дням.
+
+    Раньше динамика считалась по загруженным периодам целиком (неделя —
+    одна точка на графике), хотя у каждого сообщения уже есть точная дата
+    (колонка "datetime", см. services/message_normalize.py). Разбивка по
+    дням показывает движение внутри самой загрузки, а не только между
+    файлами — так и просил аналитик: «грузится период с 1 по 7, но на
+    графиках это разделено по дням».
+
+    Форма результата совпадает с period_metrics_for_comparison один в один
+    (те же ключи: period_id/label/messages/.../*_share), поэтому всё
+    остальное — build_comparison_metrics, comparison_visual_rows, таблица,
+    круговые диаграммы — работает без изменений, просто на других точках.
+    """
+    if (
+        not isinstance(messages, pd.DataFrame)
+        or messages.empty
+        or "datetime" not in messages.columns
+    ):
+        return []
+    work = messages.copy()
+    work["_day"] = pd.to_datetime(work["datetime"], errors="coerce").dt.floor("D")
+    work = work.dropna(subset=["_day"])
+    if work.empty:
+        return []
+    days = sorted(work["_day"].unique())
+    if len(days) < 2:
+        return []
+
+    result: list[dict[str, Any]] = []
+    for day in days:
+        subset = work[work["_day"] == day]
+        metrics = overview_metrics(subset)
+        sent = metrics.get("sentiment", {})
+        total = max(1, int(sent.get("total", 0) or 0))
+        day_ts = pd.Timestamp(day)
+        metrics.update(
+            {
+                "period_id": day_ts.strftime("%Y-%m-%d"),
+                "label": day_ts.strftime("%d.%m"),
+                "positive_share": (
+                    float(sent.get("positive", 0) or 0) / total if total else 0.0
+                ),
+                "neutral_share": (
+                    float(sent.get("neutral", 0) or 0) / total if total else 0.0
+                ),
+                "negative_share": (
+                    float(sent.get("negative", 0) or 0) / total if total else 0.0
+                ),
+            }
+        )
+        result.append(metrics)
+    return result
+
+
 def selected_period_label(periods: pd.DataFrame, period_ids: list[str]) -> str:
     """Human-readable label for the currently selected period set."""
     ids = [str(x) for x in (period_ids or []) if str(x).strip()]
@@ -203,14 +260,29 @@ def selected_period_label(periods: pd.DataFrame, period_ids: list[str]) -> str:
 
 
 def build_comparison_metrics(
-    messages: pd.DataFrame, periods: pd.DataFrame, period_ids: list[str]
+    messages: pd.DataFrame,
+    periods: pd.DataFrame,
+    period_ids: list[str],
+    *,
+    granularity: str = "period",
 ) -> dict[str, Any] | None:
     """Посчитать последовательное сравнение периодов без отрисовки.
 
     Нужна и разделу «Динамика», и выгрузкам в разделе «Отчёт», поэтому расчёт
     отделён от интерфейса.
+
+    granularity="day" — точки по календарным дням внутри выбранных периодов
+    (см. daily_metrics_for_comparison), с откатом на period_metrics_for_
+    comparison, если дней с датой меньше двух (например, дата не
+    распозналась при импорте). По умолчанию — «period», как было: отчёт в
+    разделе «Отчёт» специально не переключен на дни, чтобы не менять
+    поведение выгрузок.
     """
-    comparison = period_metrics_for_comparison(messages, periods, period_ids)
+    comparison = (
+        daily_metrics_for_comparison(messages) if granularity == "day" else []
+    )
+    if len(comparison) < 2:
+        comparison = period_metrics_for_comparison(messages, periods, period_ids)
     if len(comparison) < 2:
         return None
     previous, current = comparison[-2], comparison[-1]
@@ -310,11 +382,21 @@ def comparison_row(
     return row
 
 
+_YEAR_IN_DATE_RE = re.compile(r"(\d{2}\.\d{2})\.\d{4}")
+
+
 def short_period_chart_label(label: Any) -> str:
-    """Compact period label for chart axes: only the period name, without repeated dates."""
+    """Compact period label for chart axes: only the period name, without repeated dates.
+
+    Год убирается из дат («24.04.2026» → «24.04»): на оси графика он не
+    несёт пользы — сравниваемые периоды почти всегда в пределах одного
+    года, — а место экономит, что и было целью подписи. Произвольные
+    (не автосгенерированные) названия периодов regex не трогает.
+    """
     raw = str(label or "").strip()
     if not raw:
         return "Период"
+    raw = _YEAR_IN_DATE_RE.sub(r"\1", raw)
     for sep in [" · ", " — ", " - "]:
         if sep in raw:
             raw = raw.split(sep, 1)[0].strip()
