@@ -430,6 +430,133 @@ check(
     f"{highlights_bottom} (порог {_FOOTER_CLEARANCE})",
 )
 
+print("13. PDF нативный: без растровой картинки, верный шрифт у видимого текста, автоперенос страниц")
+import base64 as _b64  # noqa: E402
+import re as _re  # noqa: E402
+import zlib as _zlib  # noqa: E402
+
+
+def _pdf_stream_objects(pdf_bytes):
+    """(obj_id, разжатые байты) для всех потоков PDF.
+
+    Конец потока ищем по /Length из словаря объекта, а НЕ по текстовому
+    "endstream" - сжатые бинарные данные могут случайно содержать байты,
+    совпадающие с ключевыми словами PDF, и наивный текстовый поиск режет
+    поток посередине (так и оказалось при первой попытке этой проверки).
+    """
+    out = []
+    for m in _re.finditer(rb"(\d+) 0 obj\s*(<<.*?>>)\s*stream\r?\n", pdf_bytes, _re.DOTALL):
+        obj_dict = m.group(2)
+        length_m = _re.search(rb"/Length\s+(\d+)", obj_dict)
+        if not length_m:
+            continue
+        length = int(length_m.group(1))
+        raw = pdf_bytes[m.end() : m.end() + length]
+        filters = [f.decode() for f in _re.findall(rb"/(FlateDecode|ASCII85Decode)", obj_dict)]
+        try:
+            if "ASCII85Decode" in filters:
+                a85 = raw.rstrip(b"\r\n")
+                if a85.endswith(b"~>"):
+                    a85 = a85[:-2]
+                decoded = _b64.a85decode(a85)
+                if "FlateDecode" in filters:
+                    decoded = _zlib.decompress(decoded)
+            elif "FlateDecode" in filters:
+                decoded = _zlib.decompress(raw)
+            else:
+                decoded = raw
+        except Exception:
+            continue
+        out.append((m.group(1).decode(), decoded))
+    return out
+
+
+def _pdf_visible_base_fonts(pdf_bytes):
+    """BaseFont-имена, которыми реально нарисован ВИДИМЫЙ текст (за Tf в
+    том же текстовом блоке следует Tj/TJ) - в отличие от простого
+    присутствия шрифта в словаре ресурсов. reportlab на каждой странице сам
+    открывает пустой блок "BT /F1 12 Tf ... ET" (без Tj) для инициализации
+    состояния холста - это инертный служебный Helvetica, не баг (тот же
+    артефакт был подтверждён раньше на старом PDF и в отдельном минимальном
+    репро-скрипте reportlab, не связанном с этим проектом)."""
+    name_to_base = {}
+    text = pdf_bytes.decode("latin1")
+    for fm in _re.finditer(r"/BaseFont\s*/([A-Za-z0-9+\-,]+)[^>]*?/Name\s*/([A-Za-z0-9+]+)", text):
+        name_to_base[fm.group(2)] = fm.group(1)
+    for fm in _re.finditer(r"/Name\s*/([A-Za-z0-9+]+)[^>]*?/BaseFont\s*/([A-Za-z0-9+\-,]+)", text):
+        name_to_base[fm.group(1)] = fm.group(2)
+
+    visible = set()
+    for _obj_id, decoded in _pdf_stream_objects(pdf_bytes):
+        for fm in _re.finditer(
+            rb"/([A-Za-z0-9+]+)\s+[\d.]+\s+Tf(.*?)(?=/[A-Za-z0-9+]+\s+[\d.]+\s+Tf|ET)",
+            decoded,
+            _re.DOTALL,
+        ):
+            font_res, tail = fm.group(1).decode(), fm.group(2)
+            if b"Tj" in tail or b"TJ" in tail:
+                visible.add(name_to_base.get(font_res, font_res))
+    return visible
+
+
+def _pdf_page_count(pdf_bytes):
+    text = pdf_bytes.decode("latin1")
+    m = _re.search(r"/Type\s*/Pages[^>]*?/Count\s+(\d+)", text, _re.DOTALL)
+    if not m:
+        # reportlab не гарантирует порядок ключей в словаре /Pages - /Count
+        # иногда идёт раньше /Type.
+        m = _re.search(r"/Count\s+(\d+)[^>]*?/Type\s*/Pages", text, _re.DOTALL)
+    return int(m.group(1)) if m else None
+
+
+native_payload = summary_export_payload(
+    "ТЕХНОНИКОЛЬ",
+    "24.04.2026–30.04.2026",
+    "Текст саммари.",
+    metrics,
+    messages=MESSAGES,
+    events_agg=EVENTS_AGG,
+    branding=BRANDING,
+    report_template="full",
+)
+native_pdf = generate_summary_pdf(native_payload)
+check(
+    "PDF больше не встраивает растровую картинку-инфографику",
+    b"/Subtype /Image" not in native_pdf and b"/Subtype/Image" not in native_pdf,
+)
+
+visible_fonts = _pdf_visible_base_fonts(native_pdf)
+check(
+    "весь реально нарисованный текст - не Helvetica (шрифт не «утёк» мимо PlatformSans)",
+    bool(visible_fonts) and all("Helvetica" not in f for f in visible_fonts),
+    str(visible_fonts),
+)
+check(
+    "видимый текст использует зарегистрированный платформенный шрифт (DejaVu Sans)",
+    any("DejaVuSans" in f for f in visible_fonts),
+    str(visible_fonts),
+)
+
+huge_summary = "\n".join(f"Пункт {i}: {long_line}" for i in range(60))
+huge_payload = summary_export_payload(
+    "ТЕХНОНИКОЛЬ",
+    "24.04.2026–30.04.2026",
+    huge_summary,
+    metrics,
+    messages=MESSAGES,
+    events_agg=EVENTS_AGG,
+    branding=BRANDING,
+    report_template="full",
+)
+huge_pdf = generate_summary_pdf(huge_payload)
+huge_pages = _pdf_page_count(huge_pdf)
+short_pages = _pdf_page_count(native_pdf)
+check(
+    "длинное саммари переносится на больше страниц, чем короткое (авторазбивка платипуса, не ручной курсор)",
+    huge_pages is not None and short_pages is not None and huge_pages > short_pages,
+    f"huge={huge_pages} short={short_pages}",
+)
+
 print()
 if failures:
     print(f"ПРОВАЛЕНО: {len(failures)} → {failures}")

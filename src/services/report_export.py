@@ -1075,20 +1075,233 @@ def _pdf_font_name() -> str:
     )
 
 
+def _pdf_bold_font_name(font_name: str) -> str:
+    """Имя жирного варианта, если он реально зарегистрирован - иначе тот же
+    обычный шрифт (жирный текст останется обычным, не подменится Helvetica)."""
+    from reportlab.pdfbase import pdfmetrics
+
+    bold_name = f"{font_name}-Bold"
+    try:
+        pdfmetrics.getFont(bold_name)
+        return bold_name
+    except Exception:  # noqa: BLE001 - нет жирного варианта, работаем без него
+        return font_name
+
+
+class _PdfMetricsBlock:
+    """Строка из 4 карточек метрик - те же данные и цвета, что на месте PNG
+    раньше, но нарисованы напрямую на canvas PDF, тем же шрифтом, что и
+    остальной текст страницы."""
+
+    def __init__(self, cards, subtitle, accent_color, ink_color, muted_color, font_name, bold_font_name):
+        self.cards = cards  # [(title, value, delta_subtitle), ...] до 4 штук
+        self.subtitle = subtitle
+        self.accent_color = accent_color
+        self.ink_color = ink_color
+        self.muted_color = muted_color
+        self.font_name = font_name
+        self.bold_font_name = bold_font_name
+
+    def height(self, width):
+        from reportlab.lib.units import cm
+
+        return (0.5 * cm if self.subtitle else 0) + 2 * (2.05 * cm) + 0.3 * cm
+
+    def draw(self, canv, x, y, width):
+        """Рисует блок так, что (x, y) - левый ВЕРХНИЙ угол; возвращает y низа блока."""
+        from reportlab.lib import colors as rl_colors
+        from reportlab.lib.units import cm
+
+        gap = 0.3 * cm
+        card_w = (width - gap) / 2
+        card_h = 2.05 * cm
+        top = y
+        if self.subtitle:
+            canv.setFillColor(self.muted_color)
+            canv.setFont(self.font_name, 8.2)
+            canv.drawString(x, top - 10, self.subtitle)
+            top -= 0.5 * cm
+        positions = [
+            (x, top - card_h),
+            (x + card_w + gap, top - card_h),
+            (x, top - card_h - gap - card_h),
+            (x + card_w + gap, top - card_h - gap - card_h),
+        ]
+        for (cx, cy), (card_title, value, subtitle) in zip(positions, self.cards):
+            canv.setFillColor(rl_colors.HexColor("#f8fafc"))
+            canv.setStrokeColor(rl_colors.HexColor("#d9e0ea"))
+            canv.setLineWidth(0.7)
+            canv.roundRect(cx, cy, card_w, card_h, 6, stroke=1, fill=1)
+            canv.setStrokeColor(self.accent_color)
+            canv.setLineWidth(2.2)
+            canv.line(cx + 10, cy + 10, cx + 10, cy + card_h - 10)
+            canv.setFillColor(rl_colors.HexColor("#4b5563"))
+            canv.setFont(self.font_name, 9)
+            canv.drawString(cx + 20, cy + card_h - 20, card_title)
+            canv.setFillColor(self.ink_color)
+            size = _adaptive_font_size(value, base=17, min_size=11)
+            canv.setFont(self.bold_font_name, size)
+            canv.drawString(cx + 20, cy + card_h / 2 - 6, value)
+            if subtitle:
+                canv.setFillColor(self.muted_color)
+                canv.setFont(self.font_name, 7.4)
+                canv.drawString(cx + 20, cy + 10, f"к пред. периоду: {subtitle}")
+        return top - card_h - gap - card_h
+
+
+class _PdfSentimentBlock:
+    """Донат-диаграмма тональности + легенда - те же цвета, что и на живом
+    дашборде (SENTIMENT_COLOR_RANGE), нарисованные через canvas.wedge вместо
+    растровой картинки."""
+
+    HEIGHT_CM = 3.6
+
+    def __init__(self, values, colors_hex, labels, total, background_color, font_name, bold_font_name):
+        self.values = values
+        self.colors_hex = colors_hex
+        self.labels = labels
+        self.total = max(1, total)
+        self.background_color = background_color
+        self.font_name = font_name
+        self.bold_font_name = bold_font_name
+
+    def height(self, width):
+        from reportlab.lib.units import cm
+
+        return self.HEIGHT_CM * cm
+
+    def draw(self, canv, x, y, width):
+        from reportlab.lib import colors as rl_colors
+        from reportlab.lib.units import cm
+
+        block_h = self.height(width)
+        r = block_h / 2 - 0.15 * cm
+        cx, cy = x + r + 0.2 * cm, y - block_h / 2
+        total_v = sum(self.values) or 1
+        start = 90.0
+        any_positive = any(v > 0 for v in self.values)
+        colors_list = self.colors_hex if any_positive else ["#d1d5db"]
+        values = self.values if any_positive else [1]
+        for val, col in zip(values, colors_list):
+            if val <= 0:
+                continue
+            extent = -360.0 * (val / total_v)
+            canv.setFillColor(rl_colors.HexColor(col))
+            canv.setStrokeColor(self.background_color)
+            canv.setLineWidth(1.4)
+            canv.wedge(cx - r, cy - r, cx + r, cy + r, start, extent, stroke=1, fill=1)
+            start += extent
+        canv.setFillColor(self.background_color)
+        hole_r = r * 0.56
+        canv.circle(cx, cy, hole_r, stroke=0, fill=1)
+        canv.setFillColor(rl_colors.HexColor("#111827"))
+        canv.setFont(self.bold_font_name, 13)
+        canv.drawCentredString(cx, cy + 2, format_int(self.total))
+        canv.setFillColor(rl_colors.HexColor("#6b7280"))
+        canv.setFont(self.font_name, 7)
+        canv.drawCentredString(cx, cy - 11, "сообщений")
+
+        legend_x = cx + r + 1.1 * cm
+        row_h = block_h / max(1, len(self.labels))
+        ly = y - row_h / 2 + 3
+        for lab, val, col in zip(self.labels, self.values, self.colors_hex):
+            canv.setFillColor(rl_colors.HexColor(col))
+            canv.rect(legend_x, ly - 5, 9, 9, stroke=0, fill=1)
+            canv.setFillColor(rl_colors.HexColor("#111827"))
+            canv.setFont(self.font_name, 9.2)
+            canv.drawString(legend_x + 15, ly - 4, lab)
+            canv.setFont(self.bold_font_name, 9.2)
+            canv.drawRightString(legend_x + 3.9 * cm, ly - 4, format_int(val))
+            canv.setFillColor(rl_colors.HexColor("#6b7280"))
+            canv.setFont(self.font_name, 8.4)
+            canv.drawString(legend_x + 4.05 * cm, ly - 4, percent_text(val, self.total))
+            ly -= row_h
+        return y - block_h
+
+
+class _PdfTopListsBlock:
+    """«Топ тегов» / «Топ инфоповодов» - две колонки, рисуются напрямую, без
+    ручного textwrap: короткие строки, перенос не нужен (см. _short_label)."""
+
+    HEIGHT_CM = 4.1
+
+    def __init__(self, tags, events, show_tags, show_events, ink_color, muted_color, font_name, bold_font_name):
+        self.tags = tags
+        self.events = events
+        self.show_tags = show_tags
+        self.show_events = show_events
+        self.ink_color = ink_color
+        self.muted_color = muted_color
+        self.font_name = font_name
+        self.bold_font_name = bold_font_name
+
+    def height(self, width):
+        from reportlab.lib.units import cm
+
+        return self.HEIGHT_CM * cm
+
+    def _draw_column(self, canv, x, top, col_w, heading_text, items, name_key, count_label_fmt):
+        from reportlab.lib import colors as rl_colors
+
+        canv.setFillColor(self.ink_color)
+        canv.setFont(self.bold_font_name, 11)
+        canv.drawString(x, top - 12, heading_text)
+        y = top - 32
+        if items:
+            for item in items[:5]:
+                canv.setFillColor(self.ink_color)
+                canv.setFont(self.font_name, 8.6)
+                canv.drawString(x, y, f"• {_short_label(item.get('name'), 30)}")
+                canv.setFillColor(self.muted_color)
+                canv.setFont(self.font_name, 7.8)
+                canv.drawRightString(
+                    x + col_w, y, count_label_fmt(item)
+                )
+                y -= 17
+        else:
+            canv.setFillColor(self.muted_color)
+            canv.setFont(self.font_name, 8.6)
+            canv.drawString(x, y, "Нет данных для отображения")
+        return y
+
+    def draw(self, canv, x, y, width):
+        from reportlab.lib.units import cm
+
+        gap = 0.6 * cm
+        col_w = (width - gap) / 2
+        if self.show_tags:
+            self._draw_column(
+                canv,
+                x,
+                y,
+                col_w,
+                "Топ тегов",
+                self.tags,
+                "name",
+                lambda item: f"{format_int(item.get('messages', 0))} сообщ.",
+            )
+        if self.show_events:
+            self._draw_column(
+                canv,
+                x + col_w + gap,
+                y,
+                col_w,
+                "Топ инфоповодов",
+                self.events,
+                "name",
+                lambda item: f"{format_int(item.get('messages', 0))} сообщ.",
+            )
+        return y - self.height(width)
+
+
 def generate_summary_pdf(payload: dict[str, Any]) -> bytes:
     try:
         from reportlab.lib import colors as rl_colors
         from reportlab.lib.pagesizes import A4
         from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
         from reportlab.lib.units import cm
-        from reportlab.platypus import (
-            SimpleDocTemplate,
-            Paragraph,
-            Spacer,
-            Image,
-            PageBreak,
-            HRFlowable,
-        )
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+        from reportlab.platypus.flowables import Flowable
         from xml.sax.saxutils import escape as xml_escape
     except Exception as exc:
         raise RuntimeError(
@@ -1096,18 +1309,90 @@ def generate_summary_pdf(payload: dict[str, Any]) -> bytes:
         ) from exc
 
     font_name = _pdf_font_name()
+    bold_font_name = _pdf_bold_font_name(font_name)
     accent = valid_hex_color(payload.get("accent_color"), "#2563eb")
+    background = valid_hex_color(payload.get("background_color"), "#ffffff")
     accent_color = rl_colors.HexColor(accent)
+    background_color = rl_colors.HexColor(background)
     ink_color = rl_colors.HexColor("#111827")
     muted_color = rl_colors.HexColor("#6b7280")
+
+    sections = set(resolve_report_sections(payload.get("sections")))
+    total = max(1, int(payload.get("total", 0) or 0))
+    comparison = payload.get("comparison_sequence") or []
+
+    # --- шапка/футер: рисуются на КАЖДОЙ странице через onPage-колбэк, а не
+    # один раз как первая страница-картинка - если саммари длинное и уходит
+    # на страницу 2+, брендирование не теряется. ---
+    report_title_text = _short_label(
+        payload.get("report_title") or "Дайджест упоминаний", 60
+    )
+    project_text = _short_label(
+        payload.get("client_name") or payload.get("project_name") or "Проект", 46
+    )
+    meta_text = f"{payload.get('report_template_label') or ''} · {payload.get('period_label') or 'выбранный период'}".strip(
+        " ·"
+    )
+    created_text = str(payload.get("created_at") or "")
+    footer_text = _short_label(
+        str(
+            payload.get("footer_text")
+            or "Сформировано автоматически на основе выбранного периода и текущего саммари."
+        ),
+        140,
+    )
+    logo_img = _logo_image_from_payload(payload)
+    HEADER_H = 2.7 * cm
+    FOOTER_H = 0.9 * cm
+    MARGIN = 1.7 * cm
+
+    def _draw_page_frame(canv, doc):
+        canv.saveState()
+        page_w, page_h = doc.pagesize
+        canv.setFillColor(background_color)
+        canv.rect(0, 0, page_w, page_h, stroke=0, fill=1)
+        canv.setFillColor(accent_color)
+        canv.rect(0, page_h - HEADER_H, page_w, HEADER_H, stroke=0, fill=1)
+        canv.setFillColor(rl_colors.white)
+        canv.setFont(font_name, 10)
+        canv.drawString(MARGIN, page_h - 0.85 * cm, report_title_text)
+        canv.setFont(bold_font_name, 15)
+        canv.drawString(MARGIN, page_h - 1.55 * cm, project_text)
+        canv.setFont(font_name, 8.3)
+        canv.setFillColor(rl_colors.HexColor("#e5e7eb"))
+        canv.drawString(MARGIN, page_h - 2.05 * cm, meta_text)
+        canv.setFont(font_name, 7.8)
+        canv.drawRightString(page_w - MARGIN, page_h - 0.85 * cm, created_text)
+        if logo_img is not None:
+            try:
+                from reportlab.lib.utils import ImageReader
+
+                logo_w, logo_h = 2.6 * cm, 1.0 * cm
+                canv.drawImage(
+                    ImageReader(logo_img),
+                    page_w - MARGIN - logo_w,
+                    page_h - 2.0 * cm,
+                    width=logo_w,
+                    height=logo_h,
+                    mask="auto",
+                    preserveAspectRatio=True,
+                    anchor="c",
+                )
+            except Exception:  # noqa: BLE001 - без логотипа PDF всё равно нужен
+                LOGGER.warning("Логотип не встроился в PDF", exc_info=True)
+        canv.setFillColor(muted_color)
+        canv.setFont(font_name, 7.6)
+        canv.drawString(MARGIN, FOOTER_H / 2, footer_text)
+        canv.restoreState()
+
     out = BytesIO()
     doc = SimpleDocTemplate(
         out,
         pagesize=A4,
-        leftMargin=1.7 * cm,
-        rightMargin=1.7 * cm,
-        topMargin=1.5 * cm,
-        bottomMargin=1.5 * cm,
+        leftMargin=MARGIN,
+        rightMargin=MARGIN,
+        topMargin=HEADER_H + 0.5 * cm,
+        bottomMargin=FOOTER_H + 0.4 * cm,
     )
     base = getSampleStyleSheet()
     normal = ParagraphStyle(
@@ -1118,128 +1403,147 @@ def generate_summary_pdf(payload: dict[str, Any]) -> bytes:
         leading=14,
         textColor=ink_color,
     )
-    # Акцентный цвет и приглушённый серый - те же токены, что в шапке и
-    # подписях PNG-инфографики (services/chart_style.py) - страницы саммари
-    # не должны выглядеть отдельным, неоформленным документом рядом с
-    # картинкой на первой странице.
-    muted = ParagraphStyle("PlatformMuted", parent=normal, fontSize=9, textColor=muted_color)
-    title = ParagraphStyle(
-        "PlatformTitle",
-        parent=normal,
-        fontName=font_name,
-        fontSize=16,
-        leading=20,
-        spaceAfter=10,
-        textColor=accent_color,
-    )
     heading = ParagraphStyle(
         "PlatformHeading",
         parent=normal,
-        fontName=font_name,
+        fontName=bold_font_name,
         fontSize=12,
         leading=16,
-        spaceBefore=8,
+        spaceBefore=4,
         spaceAfter=6,
         textColor=accent_color,
     )
-    client_style = ParagraphStyle(
-        "PlatformClient", parent=normal, fontSize=13, leading=17, textColor=ink_color
-    )
 
-    sections = set(resolve_report_sections(payload.get("sections")))
-    has_visual_sections = bool(_VISUAL_SECTIONS & sections)
+    # Обёртка, которая просто зовёт draw(canv, x, top, width) у одного из
+    # блоков выше - так каждый блок (карточки/донат/топ-списки) остаётся
+    # ОБЫЧНЫМ платипус-флоублом и участвует в общей вёрстке страницы:
+    # не помещается - переносится на следующую, как любой другой абзац.
+    class _BlockFlowable(Flowable):
+        def __init__(self, block):
+            Flowable.__init__(self)
+            self.block = block
+            self.width = 0
+            self._h = 0
 
-    story = []
-    infographic_added = False
-    if has_visual_sections:
-        try:
-            infographic_png = generate_summary_infographic_png(payload)
-            infographic_io = BytesIO(infographic_png)
-            infographic_io.seek(0)
-            # Инфографика — первая страница PDF, без дублирующей текстовой страницы.
-            story.append(Image(infographic_io, width=17.2 * cm, height=24.35 * cm))
-            story.append(PageBreak())
-            infographic_added = True
-        except Exception as exc:  # noqa: BLE001 — PDF без инфографики лучше, чем без PDF
-            LOGGER.warning("Инфографика для PDF не собралась", exc_info=True)
-            report_failure("выгрузка PDF: инфографика не собралась", exc)
+        def wrap(self, avail_width, avail_height):
+            self.width = avail_width
+            self._h = self.block.height(avail_width)
+            return self.width, self._h
 
-    total = max(1, int(payload.get("total", 0) or 0))
-    if not infographic_added:
-        story.extend(
-            [
-                Paragraph(
-                    f"<b>{xml_escape(str(payload.get('report_title') or 'Дайджест упоминаний'))}</b>",
-                    title,
+        def draw(self):
+            self.block.draw(self.canv, 0, self._h, self.width)
+
+    story: list[Any] = []
+
+    if "metrics" in sections:
+        if len(comparison) >= 2:
+            previous, current = comparison[-2], comparison[-1]
+            cards = [
+                (
+                    "Сообщения",
+                    format_int(current.get("messages", 0)),
+                    _metric_delta_for_export(current.get("messages", 0), previous.get("messages", 0)),
                 ),
-                Paragraph(
-                    xml_escape(
-                        str(
-                            payload.get("client_name")
-                            or payload.get("project_name")
-                            or "Проект"
-                        )
-                    ),
-                    client_style,
+                (
+                    "Аудитория",
+                    format_int(current.get("audience", 0)),
+                    _metric_delta_for_export(current.get("audience", 0), previous.get("audience", 0)),
                 ),
-                Paragraph(
-                    xml_escape(f"Шаблон: {payload.get('report_template_label') or ''}"),
-                    muted,
+                (
+                    "Охват",
+                    format_int(current.get("reach", 0)),
+                    _metric_delta_for_export(current.get("reach", 0), previous.get("reach", 0)),
                 ),
-                Paragraph(
-                    xml_escape(
-                        f"Период: {payload.get('period_label') or 'выбранный период'}"
-                    ),
-                    muted,
+                (
+                    "Вовлеченность",
+                    format_int(current.get("engagement", 0)),
+                    _metric_delta_for_export(current.get("engagement", 0), previous.get("engagement", 0)),
                 ),
-                Paragraph(
-                    xml_escape(f"Дата выгрузки: {payload.get('created_at') or ''}"),
-                    muted,
-                ),
-                Spacer(1, 6),
-                HRFlowable(width="100%", thickness=1.4, color=accent_color, spaceAfter=10),
             ]
+            subtitle = f"Последний период: {_short_label(current.get('label'), 48)}"
+        else:
+            cards = [
+                ("Сообщения", format_int(payload.get("messages", 0)), ""),
+                ("Аудитория", format_int(payload.get("audience", 0)), ""),
+                ("Охват", format_int(payload.get("reach", 0)), ""),
+                ("Вовлеченность", format_int(payload.get("engagement", 0)), ""),
+            ]
+            subtitle = ""
+        story.append(
+            _BlockFlowable(
+                _PdfMetricsBlock(cards, subtitle, accent_color, ink_color, muted_color, font_name, bold_font_name)
+            )
         )
-        if "metrics" in sections or "sentiment" in sections:
-            story.append(Paragraph("<b>Основные метрики</b>", heading))
-            if "metrics" in sections:
-                story.append(
-                    Paragraph(
-                        xml_escape(
-                            f"Сообщений — {format_int(payload.get('messages', 0))}; "
-                            f"аудитория — {format_int(payload.get('audience', 0))}; "
-                            f"охват — {format_int(payload.get('reach', 0))}; "
-                            f"вовлеченность — {format_int(payload.get('engagement', 0))}."
-                        ),
-                        normal,
-                    )
+        story.append(Spacer(1, 10))
+
+    if "sentiment" in sections:
+        pos = int(payload.get("positive", 0) or 0)
+        neu = int(payload.get("neutral", 0) or 0)
+        neg = int(payload.get("negative", 0) or 0)
+        sent_total = total
+        if len(comparison) >= 2:
+            sent = comparison[-1].get("sentiment", {}) or {}
+            sent_total = max(1, int(sent.get("total", 0) or 0))
+            pos = int(sent.get("positive", 0) or 0)
+            neu = int(sent.get("neutral", 0) or 0)
+            neg = int(sent.get("negative", 0) or 0)
+        story.append(Paragraph("Тональность", heading))
+        story.append(
+            _BlockFlowable(
+                _PdfSentimentBlock(
+                    [pos, neu, neg],
+                    list(SENTIMENT_COLOR_RANGE),
+                    ["Позитив", "Нейтрал", "Негатив"],
+                    sent_total,
+                    background_color,
+                    font_name,
+                    bold_font_name,
                 )
-            if "sentiment" in sections:
-                story.append(
-                    Paragraph(
-                        xml_escape(
-                            f"Тональность: позитив — {percent_text(int(payload.get('positive', 0) or 0), total)}; "
-                            f"нейтрал — {percent_text(int(payload.get('neutral', 0) or 0), total)}; "
-                            f"негатив — {percent_text(int(payload.get('negative', 0) or 0), total)}."
-                        ),
-                        normal,
-                    )
+            )
+        )
+        story.append(Spacer(1, 10))
+
+    show_tags = "top_tags" in sections
+    show_events = "top_events" in sections
+    if show_tags or show_events:
+        story.append(
+            _BlockFlowable(
+                _PdfTopListsBlock(
+                    payload.get("top_tags") or [],
+                    payload.get("top_events") or [],
+                    show_tags,
+                    show_events,
+                    ink_color,
+                    muted_color,
+                    font_name,
+                    bold_font_name,
                 )
-            story.append(Spacer(1, 8))
+            )
+        )
+        story.append(Spacer(1, 10))
+
+    if "highlights" in sections:
+        story.append(Paragraph("Главное", heading))
+        highlights = (payload.get("summary_highlights") or [])[:4]
+        for block in highlights:
+            story.append(Paragraph("• " + xml_escape(str(block)), normal))
+        story.append(Spacer(1, 6))
 
     if "summary_text" in sections:
-        story.append(Paragraph("<b>Саммари периода</b>", heading))
+        if story:
+            story.append(PageBreak())
+        story.append(Paragraph("Саммари периода", heading))
         for block in str(payload.get("summary_text") or "").split("\n"):
             block = block.strip()
             if block:
                 story.append(Paragraph(xml_escape(block), normal))
+
     if not story:
         # Аналитик снял вообще все разделы - пустой PDF выглядел бы как баг,
         # а не как осознанный (пустой) выбор.
         story.append(
-            Paragraph(
-                "Все разделы отчёта отключены в настройках выгрузки.", normal
-            )
+            Paragraph("Все разделы отчёта отключены в настройках выгрузки.", normal)
         )
-    doc.build(story)
+
+    doc.build(story, onFirstPage=_draw_page_frame, onLaterPages=_draw_page_frame)
     return out.getvalue()
