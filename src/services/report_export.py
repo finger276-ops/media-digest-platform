@@ -338,11 +338,10 @@ def _draw_export_card(
         )
 
 
-# Отступ между блоками инфографики. Раньше между блоками были фиксированные,
-# точечно подобранные зазоры (0.045-0.050) - здесь один общий, потому что
-# ровно этот зазор теперь применяется между ЛЮБЫМИ двумя соседними блоками,
-# какую бы пару разделов аналитик ни оставил включённой.
-_INFOGRAPHIC_GAP = 0.045
+# Отступ до подписи в футере (см. её fontsize/позицию ниже) - последний
+# блок ("Главное") не должен налезать на неё, даже если саммари длинное и
+# даёт 4 длинных пункта, каждый на 2 строки.
+_FOOTER_CLEARANCE = 0.075
 
 
 def _draw_metrics_section(ax, payload, comparison, accent, top: float) -> float:
@@ -409,7 +408,9 @@ def _draw_metrics_section(ax, payload, comparison, accent, top: float) -> float:
             f"к пред. периоду: {subtitle}" if subtitle else "",
             accent_color=accent,
         )
-    return top - 0.227
+    # 0.227 - высота самого блока (до низа второй строки карточек), + 0.050 -
+    # зазор до заголовка следующего блока в исходной раскладке (0.862 -> 0.585).
+    return top - 0.277
 
 
 def _draw_sentiment_section(ax, fig, payload, comparison, top: float) -> float:
@@ -501,7 +502,10 @@ def _draw_sentiment_section(ax, fig, payload, comparison, top: float) -> float:
             va="center",
             ha="left",
         )
-    return pie_bottom
+    # pie_bottom (top - 0.158) - низ самого донат-графика; + 0.045 - зазор до
+    # заголовка следующего блока в исходной раскладке (0.585 -> 0.382... то
+    # есть до низа доната остаётся 0.427, а следующий блок стартовал на 0.382).
+    return pie_bottom - 0.045
 
 
 def _draw_top_lists_section(
@@ -614,10 +618,20 @@ def _draw_highlights_section(ax, payload, top: float) -> float:
     )
     summary_y = top - 0.027
     line_count = 0
+    # Раньше единственным ограничителем было "не больше 8 строк" - на
+    # длинном автосаммари (4 пункта по 2 строки) это давало текст, который
+    # реально наезжал на подпись в футере (она стоит на фиксированной
+    # 0.045 независимо от того, сколько текста выше). Останавливаемся,
+    # как только следующая строка попала бы в зону футера, а не только по
+    # счётчику строк.
     for block in (payload.get("summary_highlights") or [])[:4]:
+        if summary_y < _FOOTER_CLEARANCE:
+            break
         wrapped = textwrap.wrap(str(block), width=86) or [str(block)]
         bullet = True
         for seg in wrapped[:2]:
+            if summary_y < _FOOTER_CLEARANCE:
+                break
             prefix = "• " if bullet else "  "
             ax.text(
                 0.070,
@@ -735,26 +749,24 @@ def generate_summary_infographic_png(payload: dict[str, Any]) -> bytes:
         logo_ax.axis("off")
 
     # Тело инфографики - курсор сверху вниз: каждый включённый блок рисуется
-    # от текущего cursor и сам сообщает, где закончился, следующий блок
-    # стартует сразу после с одним и тем же отступом. Выключенный блок просто
-    # не сдвигает курсор - следующий встаёт на его место, без дыр.
+    # от текущего cursor и возвращает позицию, где должен начаться следующий
+    # (зазор до следующего блока уже включён в возврат - см. комментарии в
+    # каждой _draw_*_section). Выключенный блок просто не сдвигает курсор -
+    # следующий встаёт на его место, без дыр.
     cursor = 0.862
     show_tags = "top_tags" in sections
     show_events = "top_events" in sections
 
     if "metrics" in sections:
         cursor = _draw_metrics_section(ax, payload, comparison, accent, cursor)
-        cursor -= _INFOGRAPHIC_GAP
 
     if "sentiment" in sections:
         cursor = _draw_sentiment_section(ax, fig, payload, comparison, cursor)
-        cursor -= _INFOGRAPHIC_GAP
 
     if show_tags or show_events:
         cursor = _draw_top_lists_section(
             ax, payload, cursor, show_tags=show_tags, show_events=show_events
         )
-        cursor -= _INFOGRAPHIC_GAP
 
     if "highlights" in sections:
         cursor = _draw_highlights_section(ax, payload, cursor)
@@ -831,17 +843,24 @@ def generate_summary_docx(payload: dict[str, Any]) -> bytes:
     section.left_margin = Cm(1.7)
     section.right_margin = Cm(1.7)
 
+    # Тот же шрифт, что и в PNG-инфографике ("font.family": "DejaVu Sans" в
+    # generate_summary_infographic_png) - раньше здесь стоял Arial, и страницы
+    # саммари визуально не совпадали с картинкой на первой странице того же
+    # документа. Шрифт не встраивается в .docx (в отличие от PDF, где он
+    # зашит через TTFont) - если у читателя его нет, Word подставит похожий
+    # рубленый шрифт, это мягкая деградация, не поломка.
+    docx_font = "DejaVu Sans"
     styles = doc.styles
-    styles["Normal"].font.name = "Arial"
+    styles["Normal"].font.name = docx_font
     styles["Normal"].font.size = Pt(10.5)
     styles["Normal"].font.color.rgb = ink_rgb
-    styles["Heading 1"].font.name = "Arial"
+    styles["Heading 1"].font.name = docx_font
     styles["Heading 1"].font.size = Pt(16)
     styles["Heading 1"].font.color.rgb = accent_rgb
     # Тот же акцентный цвет, что заголовки блоков и полоса на карточках
     # метрик в PNG-инфографике - страницы саммари не должны выглядеть
     # отдельным, неоформленным документом рядом с картинкой на первой странице.
-    styles["Heading 2"].font.name = "Arial"
+    styles["Heading 2"].font.name = docx_font
     styles["Heading 2"].font.size = Pt(13)
     styles["Heading 2"].font.color.rgb = accent_rgb
 

@@ -373,6 +373,63 @@ check(
     pdf_purple != pdf_green,
 )
 
+print("12. PNG-инфографика: блок «Главное» не наезжает на подпись в футере")
+import matplotlib  # noqa: E402
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
+
+from services.report_export import (  # noqa: E402
+    _FOOTER_CLEARANCE,
+    _draw_highlights_section,
+    _draw_metrics_section,
+    _draw_sentiment_section,
+    _draw_top_lists_section,
+)
+
+full_payload = summary_export_payload(
+    "ТЕХНОНИКОЛЬ",
+    "24.04.2026–30.04.2026",
+    "Текст саммари.",
+    metrics,
+    messages=MESSAGES,
+    events_agg=EVENTS_AGG,
+    report_template="full",
+)
+fig = plt.figure(figsize=(8.27, 11.69), dpi=170)
+ax = fig.add_axes([0, 0, 1, 1])
+ax.set_xlim(0, 1)
+ax.set_ylim(0, 1)
+comparison = full_payload.get("comparison_sequence") or []
+cursor = _draw_metrics_section(ax, full_payload, comparison, "#2563eb", 0.862)
+cursor = _draw_sentiment_section(ax, fig, full_payload, comparison, cursor)
+cursor = _draw_top_lists_section(ax, full_payload, cursor, show_tags=True, show_events=True)
+check(
+    # Раньше здесь задваивался отступ (0.045 после блока топ-списков, хотя
+    # его собственный возврат уже включал зазор до следующего блока) - курсор
+    # оказывался на ~0.165 вместо исходных ~0.205, и «Главному» не хватало
+    # места до футера на длинном автосаммари.
+    "после метрик+тональности+топ-списков курсор совпадает с исходной раскладкой (не задвоен зазор)",
+    cursor > 0.19,
+    str(cursor),
+)
+
+# Специально длинное саммари - 4 пункта, каждый заведомо оборачивается в 2
+# строки (worst case: 8 строк из 8 возможных).
+long_line = (
+    "Очень длинная строка саммари, которая заведомо превышает восемьдесят "
+    "шесть символов ширины и обязана перенестись на вторую строку целиком."
+)
+tall_payload = dict(full_payload)
+tall_payload["summary_highlights"] = [long_line] * 4
+highlights_bottom = _draw_highlights_section(ax, tall_payload, cursor)
+plt.close(fig)
+check(
+    "даже на экстремально длинном саммари «Главное» останавливается до зоны футера",
+    highlights_bottom >= _FOOTER_CLEARANCE - 0.03,
+    f"{highlights_bottom} (порог {_FOOTER_CLEARANCE})",
+)
+
 print()
 if failures:
     print(f"ПРОВАЛЕНО: {len(failures)} → {failures}")
