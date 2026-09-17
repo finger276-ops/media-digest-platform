@@ -19,6 +19,7 @@ from typing import Any
 
 import pandas as pd
 
+from .chart_style import SENTIMENT_COLOR_RANGE
 from .dashboard_config import REPORT_TEMPLATE_OPTIONS
 from .cached_store import download_storage_file
 from .metrics_compute import format_int, numeric_series, percent_text
@@ -514,7 +515,10 @@ def generate_summary_infographic_png(payload: dict[str, Any]) -> bytes:
     pie_ax = fig.add_axes([0.070, 0.427, 0.220, 0.145])
     pie_ax.axis("equal")
     values = [max(pos, 0), max(neu, 0), max(neg, 0)]
-    colors = ["#22c55e", "#9ca3af", "#ef4444"]
+    # Те же цвета, что и на живом дашборде (services/chart_style.py) - иначе
+    # тональность выглядела бы разными оттенками зелёного/красного на экране
+    # и в выгруженном PNG/PDF/DOCX одного и того же периода.
+    colors = list(SENTIMENT_COLOR_RANGE)
     labels = ["Позитив", "Нейтрал", "Негатив"]
     if sum(values) <= 0:
         values = [1]

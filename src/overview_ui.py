@@ -34,11 +34,10 @@ from services.project_settings import (
 from services.chart_style import (
     LINE_INTERPOLATE,
     PERIOD_AXIS,
+    SENTIMENT_COLOR_DOMAIN,
+    SENTIMENT_COLOR_RANGE,
     fixed_color_scale,
 )
-
-SENTIMENT_COLOR_DOMAIN = ["Позитив", "Нейтрал", "Негатив"]
-SENTIMENT_COLOR_RANGE = ["#2ca02c", "#9e9e9e", "#d62728"]
 
 # Порядок метрик закреплён здесь же, где строится их цветовая шкала — тот же
 # порядок, что в metrics_cols ниже, чтобы цвет метрики не зависел от того, в
