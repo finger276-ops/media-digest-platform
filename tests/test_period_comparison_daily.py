@@ -43,11 +43,16 @@ os.environ.setdefault("SUPABASE_SERVICE_ROLE_KEY", "test-key")
 import pandas as pd  # noqa: E402
 
 from services.period_comparison import (  # noqa: E402
+    available_buckets,
     build_comparison_metrics,
     daily_metrics_for_comparison,
+    filter_messages_by_buckets,
+    monthly_metrics_for_comparison,
     period_row_label,
     selected_period_label,
     short_period_chart_label,
+    unresolved_date_count,
+    weekly_metrics_for_comparison,
 )
 
 failures = []
@@ -253,6 +258,145 @@ check(
     period_row_label(auto_named_periods.iloc[0]) == "24.04–30.04",
     period_row_label(auto_named_periods.iloc[0]),
 )
+
+print("8. weekly_/monthly_metrics_for_comparison: та же форма, что и daily_, но по неделям/месяцам")
+# Опорная точка: 2024-01-01 - понедельник (исторический факт, не требует
+# вычислений). Неделя A: 01.01 (пн) .. 07.01 (вс); неделя B: 08.01 (пн) ..
+# 14.01 (вс) - ровно следующая неделя.
+weekly_rows = []
+for day, n in [("2024-01-01", 2), ("2024-01-03", 1), ("2024-01-07", 3), ("2024-01-08", 4), ("2024-01-10", 1)]:
+    for i in range(n):
+        weekly_rows.append(
+            {
+                "message_id": f"{day}_m{i}",
+                "datetime": f"{day}T09:00:00",
+                "sentiment": "позитив",
+                "views": 100,
+                "audience": 50,
+                "engagement": 5,
+            }
+        )
+weekly_messages = pd.DataFrame(weekly_rows)
+weekly = weekly_metrics_for_comparison(weekly_messages)
+check("две недели -> две точки (01-07.01 и 08-14.01 объединены в бакеты, не 5 дней)", len(weekly) == 2, str(len(weekly)))
+if len(weekly) == 2:
+    check(
+        "подпись недели - диапазон пн-вс без года (01.01–07.01)",
+        weekly[0]["label"] == "01.01–07.01",
+        weekly[0]["label"],
+    )
+    check(
+        "первая неделя объединила все сообщения 01/03/07.01 (2+1+3=6), не только последний день",
+        weekly[0]["messages"] == 6,
+        str(weekly[0]),
+    )
+    check(
+        "вторая неделя - 08.01 (4) + 10.01 (1) = 5",
+        weekly[1]["messages"] == 5,
+        str(weekly[1]),
+    )
+
+monthly_rows = []
+for day, n in [("2024-01-05", 2), ("2024-01-20", 3), ("2024-02-10", 4)]:
+    for i in range(n):
+        monthly_rows.append(
+            {
+                "message_id": f"{day}_m{i}",
+                "datetime": f"{day}T09:00:00",
+                "sentiment": "позитив",
+                "views": 100,
+                "audience": 50,
+                "engagement": 5,
+            }
+        )
+monthly_messages = pd.DataFrame(monthly_rows)
+monthly = monthly_metrics_for_comparison(monthly_messages)
+check("два месяца -> две точки", len(monthly) == 2, str(len(monthly)))
+if len(monthly) == 2:
+    check(
+        "подпись месяца - название по-русски и год (Январь 2024)",
+        monthly[0]["label"] == "Январь 2024",
+        monthly[0]["label"],
+    )
+    check(
+        "январь объединил оба дня (05.01 и 20.01): 2+3=5",
+        monthly[0]["messages"] == 5,
+        str(monthly[0]),
+    )
+    check("февраль - 4 сообщения", monthly[1]["messages"] == 4, str(monthly[1]))
+
+print("9. available_buckets: список для пикера, минимум 1 бакет (не 2, как для сравнения)")
+one_week_messages = pd.DataFrame(
+    [
+        {"message_id": "a", "datetime": "2024-01-01T09:00:00", "sentiment": "позитив", "views": 1, "audience": 1, "engagement": 1},
+        {"message_id": "b", "datetime": "2024-01-02T09:00:00", "sentiment": "позитив", "views": 1, "audience": 1, "engagement": 1},
+    ]
+)
+check(
+    "недельных точек для сравнения нет (обе даты в одной неделе -> daily/weekly_metrics_for_comparison пуст)",
+    weekly_metrics_for_comparison(one_week_messages) == [],
+)
+check(
+    "но available_buckets всё равно отдаёт этот один бакет - пикеру есть что показать",
+    len(available_buckets(one_week_messages, "week")) == 1,
+    str(available_buckets(one_week_messages, "week")),
+)
+check(
+    "available_buckets по дням для тех же данных - 2 дня (01.01 и 02.01)",
+    len(available_buckets(one_week_messages, "day")) == 2,
+)
+check(
+    "неизвестная/'period' гранулярность -> пустой список (пикер не нужен)",
+    available_buckets(one_week_messages, "period") == [] and available_buckets(one_week_messages, "bogus") == [],
+)
+
+print("10. filter_messages_by_buckets: сужает по собственной дате сообщения, не по period_id")
+mixed_messages = pd.DataFrame(
+    [
+        {"message_id": "a", "period_id": "p1", "datetime": "2024-01-01T09:00:00"},
+        {"message_id": "b", "period_id": "p1", "datetime": "2024-01-08T09:00:00"},
+        {"message_id": "c", "period_id": "p1", "datetime": None},
+    ]
+)
+only_first_day = filter_messages_by_buckets(mixed_messages, "day", ["2024-01-01"])
+check(
+    "выбран один день -> осталось только его сообщение",
+    list(only_first_day["message_id"]) == ["a"],
+    str(list(only_first_day["message_id"])),
+)
+check(
+    "сообщение без даты не попало ни в один день (не потерялось молча в другую сторону - просто не выбрано)",
+    "c" not in set(only_first_day["message_id"]),
+)
+check(
+    "granularity='period' -> сообщения не сужаются (весь file/период как есть)",
+    len(filter_messages_by_buckets(mixed_messages, "period", ["2024-01-01"])) == len(mixed_messages),
+)
+check(
+    "пустой список выбранных бакетов -> сообщения не сужаются (не пустой дашборд по ошибке)",
+    len(filter_messages_by_buckets(mixed_messages, "day", [])) == len(mixed_messages),
+)
+both_weeks = filter_messages_by_buckets(mixed_messages, "week", ["2024-01-01", "2024-01-08"])
+check(
+    "две выбранные недели -> обе датированные строки на месте (a и b), без даты - нет",
+    set(both_weeks["message_id"]) == {"a", "b"},
+    str(set(both_weeks["message_id"])),
+)
+
+print("11. unresolved_date_count: сколько сообщений не попадёт ни в один день/неделю/месяц")
+check(
+    "одно сообщение без даты из трёх",
+    unresolved_date_count(mixed_messages) == 1,
+    str(unresolved_date_count(mixed_messages)),
+)
+check("нет колонки datetime -> 0, не исключение", unresolved_date_count(pd.DataFrame({"x": [1]})) == 0)
+check("пустой датафрейм -> 0", unresolved_date_count(pd.DataFrame()) == 0)
+
+print("12. build_comparison_metrics(granularity='week'/'month') - новые значения гранулярности работают")
+week_agg = build_comparison_metrics(weekly_messages, pd.DataFrame(), [], granularity="week")
+check("granularity='week' даёт агрегат с недельными точками", week_agg is not None and len(week_agg["comparison_sequence"]) == 2)
+month_agg = build_comparison_metrics(monthly_messages, pd.DataFrame(), [], granularity="month")
+check("granularity='month' даёт агрегат с месячными точками", month_agg is not None and len(month_agg["comparison_sequence"]) == 2)
 
 print()
 if failures:

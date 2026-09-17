@@ -69,7 +69,11 @@ from services.observability import report_failure
 from services.perf import perf_block, render_perf_sidebar, reset_perf_events
 from services.formatting import fmt_date, fmt_period
 from services.roles import role_rank
-from services.manual_moderation import apply_manual_overrides, blocked_title_merges
+from services.manual_moderation import (
+    apply_manual_overrides,
+    blocked_title_merges,
+    recompute_event_counts,
+)
 from services.event_enrichment import enrich_messages, aggregate_events
 from summary_ui import render_period_summary
 from sidebar_ui import (
@@ -92,9 +96,11 @@ from upload_history_ui import (
 from services.period_comparison import (
     period_metrics_for_comparison,
     build_comparison_metrics,
+    filter_messages_by_buckets,
     previous_period_id,
     selected_period_label,
 )
+from granularity_ui import render_granularity_selector
 from overview_ui import (
     render_period_comparison_metrics,
     render_period_metrics_line,
@@ -658,6 +664,34 @@ def main() -> None:
                             st.rerun()
                         except Exception as exc:
                             st.warning(f"Не удалось сохранить: {exc}")
+
+    # Гранулярность (день/неделя/месяц) поверх уже загруженных файлов —
+    # выбор файлов в сайдбаре («Периоды») не трогаем: он остаётся тем, ЧТО
+    # загружать в сессию. Здесь дробим уже загруженные сообщения по их
+    # СОБСТВЕННОЙ дате. Пороги выше («⚙️ Вид» — мин. сообщений в
+    # инфоповоде, сила склейки заголовков) сознательно посчитаны ДО этого
+    # места, по полным файловым данным: это настройки сборки/кластеризации
+    # проекта, они не должны «прыгать» при переключении гранулярности
+    # отображения.
+    granularity, selected_bucket_ids = render_granularity_selector(
+        enriched_messages, project_id, selected_period_ids
+    )
+    granularity_key = ""
+    if granularity != "period":
+        narrowed_messages = filter_messages_by_buckets(
+            enriched_messages, granularity, selected_bucket_ids
+        )
+        granularity_key = f"{granularity}::{'|'.join(sorted(str(x) for x in selected_bucket_ids))}"
+        if len(narrowed_messages) != len(enriched_messages):
+            # Пересчитать счётчики инфоповодов под суженный набор сообщений -
+            # тот же приём, что apply_manual_overrides уже делает при каждой
+            # загрузке (recompute_event_counts — чистый pandas, дёшево).
+            # Членство сообщения в инфоповоде не меняется (оно определено
+            # один раз при импорте), меняются только счётчики.
+            enriched_messages = narrowed_messages
+            events = recompute_event_counts(events, enriched_messages)
+            raw_events_agg = aggregate_events(events)
+
     # Смысловая склейка заголовков идёт до порога по числу сообщений: иначе
     # одна тема, разбитая источником на три формулировки по два сообщения,
     # отсекается как мелочь, хотя вместе это шесть сообщений.
@@ -671,6 +705,7 @@ def main() -> None:
             tuple(selected_period_ids),
             float(event_title_merge_threshold),
             tuple(sorted(blocked_merge_titles)),
+            granularity_key,
         )
     except Exception:  # noqa: BLE001 — граница отказа
         LOGGER.exception("Склейка заголовков не отработала для проекта %s", project_id)
@@ -791,6 +826,7 @@ def main() -> None:
                 enriched_messages,
                 periods,
                 selected_period_ids,
+                granularity=granularity,
                 chart_label_settings=chart_label_settings,
                 comparison_visible_charts=dashboard_view_settings.get(
                     "comparison_visible_charts"
@@ -805,7 +841,7 @@ def main() -> None:
         elif page == "Отчёт":
             report_metrics = (
                 build_comparison_metrics(
-                    enriched_messages, periods, selected_period_ids
+                    enriched_messages, periods, selected_period_ids, granularity=granularity
                 )
                 or metrics
             )

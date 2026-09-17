@@ -155,6 +155,101 @@ def period_metrics_for_comparison(
     return result
 
 
+_MONTH_NAMES_RU = {
+    1: "Январь",
+    2: "Февраль",
+    3: "Март",
+    4: "Апрель",
+    5: "Май",
+    6: "Июнь",
+    7: "Июль",
+    8: "Август",
+    9: "Сентябрь",
+    10: "Октябрь",
+    11: "Ноябрь",
+    12: "Декабрь",
+}
+
+
+def _bucket_start(messages: pd.DataFrame, granularity: str) -> pd.Series | None:
+    """Начало бакета (день/понедельник недели/1-е число месяца) для каждого
+    сообщения по его СОБСТВЕННОЙ дате - единая точка истины для границ
+    бакета, чтобы подсчёт метрик (*_metrics_for_comparison) и фильтр
+    сообщений (filter_messages_by_buckets) не могли разъехаться в подсчёте
+    (иначе в списке дней для выбора одно число, а на странице другое)."""
+    if (
+        not isinstance(messages, pd.DataFrame)
+        or messages.empty
+        or "datetime" not in messages.columns
+    ):
+        return None
+    dt = pd.to_datetime(messages["datetime"], errors="coerce")
+    if granularity == "day":
+        return dt.dt.floor("D")
+    if granularity == "week":
+        return (dt - pd.to_timedelta(dt.dt.weekday, unit="D")).dt.floor("D")
+    if granularity == "month":
+        return dt.dt.to_period("M").dt.to_timestamp()
+    return None
+
+
+def _bucket_id(bucket_start: pd.Timestamp, granularity: str) -> str:
+    if granularity == "month":
+        return bucket_start.strftime("%Y-%m")
+    return bucket_start.strftime("%Y-%m-%d")
+
+
+def _bucket_label(bucket_start: pd.Timestamp, granularity: str) -> str:
+    if granularity == "week":
+        end = bucket_start + pd.Timedelta(days=6)
+        return f"{bucket_start.strftime('%d.%m')}–{end.strftime('%d.%m')}"
+    if granularity == "month":
+        name = _MONTH_NAMES_RU.get(bucket_start.month, bucket_start.strftime("%m"))
+        return f"{name} {bucket_start.year}"
+    return bucket_start.strftime("%d.%m")
+
+
+def _bucketed_metrics(
+    messages: pd.DataFrame, granularity: str, *, min_buckets: int = 1
+) -> list[dict[str, Any]]:
+    bucket_start = _bucket_start(messages, granularity)
+    if bucket_start is None:
+        return []
+    work = messages.copy()
+    work["_bucket"] = bucket_start
+    work = work.dropna(subset=["_bucket"])
+    if work.empty:
+        return []
+    buckets = sorted(work["_bucket"].unique())
+    if len(buckets) < min_buckets:
+        return []
+
+    result: list[dict[str, Any]] = []
+    for bucket in buckets:
+        subset = work[work["_bucket"] == bucket]
+        metrics = overview_metrics(subset)
+        sent = metrics.get("sentiment", {})
+        total = max(1, int(sent.get("total", 0) or 0))
+        bucket_ts = pd.Timestamp(bucket)
+        metrics.update(
+            {
+                "period_id": _bucket_id(bucket_ts, granularity),
+                "label": _bucket_label(bucket_ts, granularity),
+                "positive_share": (
+                    float(sent.get("positive", 0) or 0) / total if total else 0.0
+                ),
+                "neutral_share": (
+                    float(sent.get("neutral", 0) or 0) / total if total else 0.0
+                ),
+                "negative_share": (
+                    float(sent.get("negative", 0) or 0) / total if total else 0.0
+                ),
+            }
+        )
+        result.append(metrics)
+    return result
+
+
 def daily_metrics_for_comparison(messages: pd.DataFrame) -> list[dict[str, Any]]:
     """То же самое, что period_metrics_for_comparison, но по календарным дням.
 
@@ -169,46 +264,77 @@ def daily_metrics_for_comparison(messages: pd.DataFrame) -> list[dict[str, Any]]
     (те же ключи: period_id/label/messages/.../*_share), поэтому всё
     остальное — build_comparison_metrics, comparison_visual_rows, таблица,
     круговые диаграммы — работает без изменений, просто на других точках.
+    Недельная/месячная разбивка (weekly_/monthly_metrics_for_comparison)
+    следуют тому же контракту.
     """
+    return _bucketed_metrics(messages, "day", min_buckets=2)
+
+
+def weekly_metrics_for_comparison(messages: pd.DataFrame) -> list[dict[str, Any]]:
+    """daily_metrics_for_comparison, но по неделям (пн-вс) - авто-группировка
+    для длинных периодов, где день-в-день даёт слишком много точек."""
+    return _bucketed_metrics(messages, "week", min_buckets=2)
+
+
+def monthly_metrics_for_comparison(messages: pd.DataFrame) -> list[dict[str, Any]]:
+    """daily_metrics_for_comparison, но по календарным месяцам."""
+    return _bucketed_metrics(messages, "month", min_buckets=2)
+
+
+GRANULARITY_FUNCS = {
+    "day": daily_metrics_for_comparison,
+    "week": weekly_metrics_for_comparison,
+    "month": monthly_metrics_for_comparison,
+}
+
+
+def available_buckets(messages: pd.DataFrame, granularity: str) -> list[dict[str, Any]]:
+    """Список дней/недель/месяцев для пикера гранулярности - в отличие от
+    *_metrics_for_comparison (которым для СРАВНЕНИЯ нужно минимум 2 точки),
+    здесь достаточно одного бакета: показать в пикере "24.04 (12 сообщ.)"
+    нужно, даже если в выборке всего один день."""
+    if granularity not in GRANULARITY_FUNCS:
+        return []
+    return _bucketed_metrics(messages, granularity, min_buckets=1)
+
+
+def unresolved_date_count(messages: pd.DataFrame) -> int:
+    """Сколько сообщений не попадут ни в один день/неделю/месяц - у них не
+    распозналась дата при импорте. daily_/weekly_/monthly_metrics_for_
+    comparison и filter_messages_by_buckets молча их пропускают; это число -
+    чтобы предупредить аналитика, а не тихо терять данные."""
     if (
         not isinstance(messages, pd.DataFrame)
         or messages.empty
         or "datetime" not in messages.columns
     ):
-        return []
-    work = messages.copy()
-    work["_day"] = pd.to_datetime(work["datetime"], errors="coerce").dt.floor("D")
-    work = work.dropna(subset=["_day"])
-    if work.empty:
-        return []
-    days = sorted(work["_day"].unique())
-    if len(days) < 2:
-        return []
+        return 0
+    return int(pd.to_datetime(messages["datetime"], errors="coerce").isna().sum())
 
-    result: list[dict[str, Any]] = []
-    for day in days:
-        subset = work[work["_day"] == day]
-        metrics = overview_metrics(subset)
-        sent = metrics.get("sentiment", {})
-        total = max(1, int(sent.get("total", 0) or 0))
-        day_ts = pd.Timestamp(day)
-        metrics.update(
-            {
-                "period_id": day_ts.strftime("%Y-%m-%d"),
-                "label": day_ts.strftime("%d.%m"),
-                "positive_share": (
-                    float(sent.get("positive", 0) or 0) / total if total else 0.0
-                ),
-                "neutral_share": (
-                    float(sent.get("neutral", 0) or 0) / total if total else 0.0
-                ),
-                "negative_share": (
-                    float(sent.get("negative", 0) or 0) / total if total else 0.0
-                ),
-            }
-        )
-        result.append(metrics)
-    return result
+
+def filter_messages_by_buckets(
+    messages: pd.DataFrame, granularity: str, selected_bucket_ids: list[str] | None
+) -> pd.DataFrame:
+    """Сузить сообщения до выбранных дней/недель/месяцев по СОБСТВЕННОЙ дате
+    каждого сообщения - независимо от того, каким файлом/периодом оно было
+    загружено. Один файл на 15 дней дробится ровно так же, как пять файлов
+    по 3 дня - фильтр не знает и не спрашивает, откуда пришли сообщения.
+
+    granularity="period" (гранулярность "Файлы целиком") или пустой выбор
+    бакетов - сообщения не сужаются: иначе "ничего не выбрано" молча дал бы
+    пустой дашборд вместо всей выборки."""
+    if granularity not in GRANULARITY_FUNCS or not selected_bucket_ids:
+        return messages
+    bucket_start = _bucket_start(messages, granularity)
+    if bucket_start is None:
+        return messages
+    valid = bucket_start.notna()
+    ids = pd.Series(pd.NA, index=messages.index, dtype="object")
+    ids[valid] = [
+        _bucket_id(pd.Timestamp(ts), granularity) for ts in bucket_start[valid]
+    ]
+    selected = {str(x) for x in selected_bucket_ids}
+    return messages[ids.isin(selected)]
 
 
 def selected_period_label(periods: pd.DataFrame, period_ids: list[str]) -> str:
@@ -273,16 +399,15 @@ def build_comparison_metrics(
     Нужна и разделу «Динамика», и выгрузкам в разделе «Отчёт», поэтому расчёт
     отделён от интерфейса.
 
-    granularity="day" — точки по календарным дням внутри выбранных периодов
-    (см. daily_metrics_for_comparison), с откатом на period_metrics_for_
-    comparison, если дней с датой меньше двух (например, дата не
-    распозналась при импорте). По умолчанию — «period», как было: отчёт в
-    разделе «Отчёт» специально не переключен на дни, чтобы не менять
-    поведение выгрузок.
+    granularity="day"/"week"/"month" — точки по календарным дням/неделям/
+    месяцам внутри выбранных периодов (см. GRANULARITY_FUNCS), с откатом на
+    period_metrics_for_comparison, если точек меньше двух (например, дата
+    не распозналась при импорте, или сообщения из одного дня). По
+    умолчанию — «period»: раздел «Отчёт» и любой другой вызов без явной
+    гранулярности сравнивает загруженные периоды целиком, а не дробит их.
     """
-    comparison = (
-        daily_metrics_for_comparison(messages) if granularity == "day" else []
-    )
+    func = GRANULARITY_FUNCS.get(granularity)
+    comparison = func(messages) if func else []
     if len(comparison) < 2:
         comparison = period_metrics_for_comparison(messages, periods, period_ids)
     if len(comparison) < 2:

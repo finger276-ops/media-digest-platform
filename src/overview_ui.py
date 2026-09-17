@@ -648,12 +648,15 @@ def render_period_comparison_metrics(
     periods: pd.DataFrame,
     period_ids: list[str],
     *,
+    granularity: str = "day",
     chart_label_settings: dict[str, Any] | None = None,
     comparison_visible_charts: list[str] | None = None,
 ) -> dict[str, Any] | None:
-    """Render sequential comparison, broken down by calendar day where possible."""
+    """Render sequential comparison, broken down by the active granularity
+    (day/week/month by default; falls back to whole periods when fewer than
+    two points come out of it — see build_comparison_metrics)."""
     aggregate_metrics = build_comparison_metrics(
-        messages, periods, period_ids, granularity="day"
+        messages, periods, period_ids, granularity=granularity
     )
     if aggregate_metrics is None:
         return None
@@ -772,6 +775,7 @@ def render_project_intro(
     period_ids: list[str],
     *,
     profile_label: str = "",
+    granularity: str = "day",
     chart_label_settings: dict[str, Any] | None = None,
     comparison_visible_charts: list[str] | None = None,
     show_comparison: bool = True,
@@ -858,6 +862,7 @@ def render_project_intro(
             messages,
             periods,
             period_ids,
+            granularity=granularity,
             chart_label_settings=chart_label_settings,
             comparison_visible_charts=comparison_visible_charts,
         )

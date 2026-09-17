@@ -77,8 +77,11 @@ jobs:
       - name: Общий top_report_tags/top_report_events для отчёта
         run: python tests/test_report_highlights.py
 
-      - name: Дневная динамика, подпись периода без года/дублей
+      - name: Дневная/недельная/месячная динамика, подпись периода
         run: python tests/test_period_comparison_daily.py
+
+      - name: Гранулярность день/неделя/месяц (сквозной тест от экрана до данных)
+        run: python tests/test_granularity_ui.py
 
       - name: Короткие даты, подпись периода (общие хелперы)
         run: python tests/test_formatting.py

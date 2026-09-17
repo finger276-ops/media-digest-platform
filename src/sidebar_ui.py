@@ -80,6 +80,7 @@ def _cached_merge_similar_events(
     period_ids_key: tuple[str, ...],
     threshold: float,
     blocked_key: tuple[str, ...],
+    granularity_key: str,
     data_version: int,
     manual_version: int,
 ):
@@ -95,12 +96,20 @@ def cached_merge_similar_events(
     period_ids: tuple[str, ...],
     threshold: float,
     blocked: tuple[str, ...],
+    granularity_key: str = "",
 ):
     """Склейка заголовков с кэшем по дешёвым ключам.
 
     Сам кадр в ключ кэша не попадает (аргумент с подчёркиванием) — вместо него
     версии данных проекта. Хеширование DataFrame однажды уже стоило платформе
     секунд на каждом перерисовывании.
+
+    granularity_key — гранулярность + выбранные дни/недели/месяцы
+    (granularity_ui.render_granularity_selector). events_agg сам не
+    хэшируется (см. выше), поэтому без этого ключа переключение
+    гранулярности с теми же period_ids молча отдавало бы из кэша склейку,
+    посчитанную для ДРУГОГО (несуженного или иначе суженного) набора
+    инфоповодов.
     """
     return _cached_merge_similar_events(
         events_agg,
@@ -108,6 +117,7 @@ def cached_merge_similar_events(
         tuple(period_ids),
         float(threshold),
         tuple(blocked),
+        granularity_key,
         cache_version(project_id, "data"),
         cache_version(project_id, "manual"),
     )

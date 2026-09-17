@@ -22,7 +22,8 @@ python tests/test_event_titles.py            # склейка похожих з�
 python tests/test_event_enrichment.py        # связь сообщений с инфоповодами, агрегация
 python tests/test_ai_summary.py              # тексты от ИИ (YandexGPT/GigaChat) — без сети
 python tests/test_report_highlights.py       # общий top_report_tags/top_report_events для отчёта
-python tests/test_period_comparison_daily.py # дневная динамика, подпись периода без года/дублей
+python tests/test_period_comparison_daily.py # дневная/недельная/месячная динамика, подпись периода
+python tests/test_granularity_ui.py          # гранулярность день/неделя/месяц - сквозной тест от экрана до данных
 python tests/test_formatting.py              # короткие даты, подпись периода (общие хелперы)
 python tests/test_report_export.py           # выгрузки саммари: PNG-инфографика, Word, PDF
 python tests/test_summary_ui.py              # автотекст саммари без ИИ: метрики, динамика, без дублей
