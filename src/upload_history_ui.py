@@ -17,7 +17,7 @@ from services.cached_store import (
     update_period_metadata,
     update_project,
 )
-from services.formatting import fmt_period
+from services.formatting import fmt_period, period_picker_label
 from services.import_report import normalization_lines, summarize_import
 from services.ingest import IngestError, process_canonical, read_canonical_bytes
 from services.metrics_compute import format_int
@@ -30,6 +30,62 @@ from noise_filter_ui import render_noise_filter_block
 from tag_hierarchy_ui import render_tag_hierarchy_block
 
 
+def _render_clustering_algorithm_settings() -> tuple[float, float, float]:
+    """Пороги кластеризации обсуждений в инфоповоды текстом (без сюжетов).
+
+    Работают только для выгрузок БЕЗ готовой разметки сюжетов Brand
+    Analytics (обычный CSV, Медиалогия) - для самих BA-выгрузок платформа
+    берёт сюжет прямо из данных, эти пороги там ни на что не влияют. Не
+    путать с «Что платформа считает инфоповодом» выше: та настройка,
+    наоборот, работает только для Brand Analytics — достраивает сюжеты,
+    которых не хватает в выгрузке, и отсеивает одиночные публикации. Разные
+    выгрузки, разные пороги, поэтому названия и похожи, а смысл — нет.
+
+    Свёрнуто по умолчанию: для большинства загрузок (Brand Analytics) эти
+    ползунки вообще не применяются, и держать их развёрнутыми на каждой
+    выгрузке — лишний шум на странице.
+    """
+    with st.expander("Алгоритм: как собирать инфоповоды без сюжетов", expanded=False):
+        st.caption(
+            "Применяется только к выгрузкам без готовой разметки сюжетов "
+            "(обычный CSV, Медиалогия). Для Brand Analytics эти пороги "
+            "не используются — там сюжет уже есть в данных."
+        )
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            threshold = st.slider(
+                "Похожесть текстов при сборке",
+                0.10,
+                0.60,
+                0.30,
+                0.01,
+                help="Ниже — смелее объединяет разные публикации в один инфоповод.",
+            )
+        with c2:
+            event_gap_hours = st.slider(
+                "Разрыв между волнами, часов",
+                1.0,
+                24.0,
+                3.0,
+                1.0,
+                help="Тишина дольше этого — начинается новая волна той же темы.",
+            )
+        with c3:
+            event_window_hours = st.slider(
+                "Макс. окно инфоповода, часов",
+                4.0,
+                72.0,
+                16.0,
+                4.0,
+                help=(
+                    "Потолок длины одной волны, даже без тишины — защита от "
+                    "общего тега, который иначе склеит события за несколько "
+                    "дней в один инфоповод."
+                ),
+            )
+    return threshold, event_gap_hours, event_window_hours
+
+
 def render_period_selector(project_id: str) -> tuple[list[str], pd.DataFrame]:
     periods = list_periods(project_id, include_inactive=False)
     if periods.empty:
@@ -38,7 +94,7 @@ def render_period_selector(project_id: str) -> tuple[list[str], pd.DataFrame]:
     labels = {}
     for _, r in periods.iterrows():
         period_id = str(r["period_id"])
-        labels[period_id] = f"{r.get('period_name') or period_id} · {fmt_period(r)}"
+        labels[period_id] = period_picker_label(r, fallback=period_id)
     # Раньше по умолчанию открывались три периода — втрое больше данных при
     # каждом заходе. Достаточно последнего; остальные добавляются вручную.
     default = periods["period_id"].astype(str).head(1).tolist()
@@ -169,9 +225,10 @@ def render_story_build_settings(
                         "Ниже — платформа смелее склеивает разные публикации в "
                         "один сюжет, выше — оставляет их раздельно. Работает на "
                         "выгрузках Brand Analytics, где часть сюжетов платформа "
-                        "достраивает сама. Это не тот же порог, что «Похожесть» "
-                        "в форме загрузки ниже: тот отвечает за кластеризацию "
-                        "выгрузок без готовых сюжетов."
+                        "достраивает сама. Это не тот же порог, что «Похожесть "
+                        "текстов при сборке» в раскрывашке «Алгоритм» ниже: тот "
+                        "отвечает за кластеризацию выгрузок без готовых сюжетов "
+                        "и для Brand Analytics не используется."
                     ),
                 )
             if st.form_submit_button("Сохранить пороги"):
@@ -205,10 +262,20 @@ def render_upload_page(
 
     render_tag_hierarchy_block(project_id)
     render_story_build_settings(project_id, project_settings)
+    threshold, event_gap_hours, event_window_hours = (
+        _render_clustering_algorithm_settings()
+    )
 
     with st.form("upload_form"):
         period_name = st.text_input(
-            "Название периода", placeholder="Например: 24.04.2026–30.04.2026"
+            "Название периода (необязательно)",
+            placeholder="Оставьте пустым — платформа назовёт период по датам ниже",
+            help=(
+                "Заполняйте только если хотите своё название (например, "
+                "«Апрельская волна»). Без названия период подпишется "
+                "диапазоном дат из полей «Дата начала»/«Дата окончания» — "
+                "тем же способом, что уже используется на графиках."
+            ),
         )
         date_col1, date_col2 = st.columns(2)
         with date_col1:
@@ -229,27 +296,12 @@ def render_upload_page(
         uploaded = st.file_uploader(
             "CSV или Excel", type=["csv", "xlsx", "xls", "xlsm"]
         )
-        st.caption("Алгоритм")
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            threshold = st.slider("Похожесть", 0.10, 0.60, 0.30, 0.01)
-        with c2:
-            event_gap_hours = st.slider(
-                "Разрыв между волнами, часов", 1.0, 24.0, 3.0, 1.0
-            )
-        with c3:
-            event_window_hours = st.slider(
-                "Макс. окно инфоповода, часов", 4.0, 72.0, 16.0, 4.0
-            )
         submitted = st.form_submit_button("Обработать и сохранить", type="primary")
 
     if not submitted:
         return
     if uploaded is None:
         st.error("Загрузите файл.")
-        return
-    if not period_name.strip():
-        st.error("Укажите название периода.")
         return
     if date_from and date_to and date_from > date_to:
         st.error("Дата начала не может быть позже даты окончания.")
