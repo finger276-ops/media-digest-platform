@@ -51,7 +51,7 @@ def period_row_label(row: pd.Series, fallback: str = "") -> str:
     # period_picker_label - тот же хелпер, что и подписи в сайдбаре: без
     # года, без дублирования даты, если название периода и так уже дата.
     # Этот "label" попадает и в "Последний период: ..." на инфографике, и в
-    # текст для ИИ (_comparison_block) - раньше там оседали полные даты.
+    # текст для ИИ (comparison_block) - раньше там оседали полные даты.
     return period_picker_label(row, fallback=fallback or "период")
 
 

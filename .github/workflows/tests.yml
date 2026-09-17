@@ -74,8 +74,20 @@ jobs:
       - name: Тексты от ИИ (YandexGPT/GigaChat, без сети)
         run: python tests/test_ai_summary.py
 
+      - name: Общий top_report_tags/top_report_events для отчёта
+        run: python tests/test_report_highlights.py
+
+      - name: Дневная динамика, подпись периода без года/дублей
+        run: python tests/test_period_comparison_daily.py
+
+      - name: Короткие даты, подпись периода (общие хелперы)
+        run: python tests/test_formatting.py
+
       - name: Выгрузки саммари (PNG/DOCX/PDF)
         run: python tests/test_report_export.py
+
+      - name: Автотекст саммари без ИИ (метрики, динамика, без дублей)
+        run: python tests/test_summary_ui.py
 
       - name: Живые сессии платформы
         run: python tests/test_session_presence.py

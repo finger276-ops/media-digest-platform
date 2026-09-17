@@ -13,6 +13,7 @@ import streamlit as st
 from ai_summary_ui import render_ai_summary_panel
 from client_insights_ui import build_client_insights_summary
 from report_export_ui import render_summary_export_buttons
+from services.ai_summary import comparison_block, metrics_block
 from services.cached_store import (
     ManualEditConflict,
     clear_platform_caches,
@@ -21,9 +22,21 @@ from services.cached_store import (
     get_manual_version,
     save_manual,
 )
-from services.metrics_compute import overview_metrics
+from services.metrics_compute import format_int, overview_metrics
 from services.period_comparison import selected_period_label
+from services.report_highlights import event_title_column, top_report_events
 from services.roles import role_rank
+
+
+def _as_subheading(block: str) -> str:
+    """Помечает первую строку блока как подзаголовок ("## ") - тот же
+    маркер, что Streamlit и так рисует как заголовок в live-превью
+    (st.markdown), а при экспорте в PDF/DOCX превращается в оформленный
+    подзаголовок вместо обычного абзаца (см. report_export._render_summary_text_line)."""
+    if not block:
+        return block
+    head, _, rest = block.partition("\n")
+    return f"## {head}\n{rest}" if rest else f"## {head}"
 
 
 def build_auto_summary(
@@ -31,20 +44,23 @@ def build_auto_summary(
     events_agg: pd.DataFrame,
     periods: pd.DataFrame,
     selected_period_ids: list[str],
+    *,
+    metrics: dict | None = None,
 ) -> str:
+    """Читаемый текст саммари без ИИ - пока никто не сгенерировал и не \
+сохранил версию от модели, аналитик и экспорт видят именно это.
+
+    Раньше это была россыпь предложений без структуры и без самих метрик/
+    динамики (только число сообщений и доля негатива). metrics_block/
+    comparison_block - те же функции, что собирают карточку данных для ИИ
+    (services/ai_summary.py) - дают готовые, проверенные блоки "Метрики
+    периода"/"Динамика", здесь их не пересчитывают заново.
+    """
+    metrics = metrics or overview_metrics(messages)
     total = len(messages)
     chats = messages["chat_title"].nunique() if "chat_title" in messages.columns else 0
     authors = messages["author"].nunique() if "author" in messages.columns else 0
-    neg = 0
-    if "sentiment" in messages.columns:
-        neg = int(
-            messages["sentiment"]
-            .fillna("")
-            .astype(str)
-            .str.lower()
-            .str.contains("нег")
-            .sum()
-        )
+    neg = int((metrics.get("sentiment") or {}).get("negative", 0) or 0)
     neg_share = (neg / total * 100) if total else 0
     period_names = []
     if not periods.empty:
@@ -54,7 +70,15 @@ def build_auto_summary(
         period_names = [
             str(x) for x in subset.get("period_name", pd.Series(dtype=str)).tolist()
         ]
-    top_events = events_agg.head(5)["title"].tolist() if not events_agg.empty else []
+    # top_report_events - та же выборка (без служебных "Без сюжета" и
+    # похожих, отсортирована по числу сообщений), что и остальной отчёт -
+    # раньше здесь был третий по счёту способ выбрать топ (events_agg.head(5)
+    # без фильтра и без гарантированной сортировки).
+    top_events_rows = top_report_events(events_agg, limit=5)
+    top_events = []
+    if not top_events_rows.empty:
+        title_col = event_title_column(top_events_rows) or "title"
+        top_events = top_events_rows[title_col].astype(str).tolist()
     top_chats = []
     if "chat_title" in messages.columns:
         top_chats = (
@@ -68,30 +92,35 @@ def build_auto_summary(
             .index.tolist()
         )
 
-    lines = []
-    lines.append(
-        f"За выбранный период обработано {total:,} сообщений из {chats:,} чатов; уникальных авторов — {authors:,}.".replace(
-            ",", " "
-        )
-    )
-    lines.append(f"Негативных сообщений: {neg:,} ({neg_share:.1f}%).".replace(",", " "))
+    intro = [
+        f"За выбранный период обработано {format_int(total)} сообщений из "
+        f"{format_int(chats)} чатов; уникальных авторов — {format_int(authors)}.",
+        f"Негативных сообщений: {format_int(neg)} ({neg_share:.1f}%).",
+    ]
     if period_names:
-        lines.append(
+        intro.append(
             "Периоды: "
             + "; ".join(period_names[:6])
             + ("…" if len(period_names) > 6 else "")
         )
     if top_events:
-        lines.append("Основные инфоповоды: " + "; ".join(top_events) + ".")
+        intro.append("Основные инфоповоды: " + "; ".join(top_events) + ".")
     if top_chats:
-        lines.append("Наиболее активные чаты: " + "; ".join(top_chats) + ".")
+        intro.append("Наиболее активные чаты: " + "; ".join(top_chats) + ".")
+
+    blocks = ["\n".join(intro), _as_subheading(metrics_block(messages, metrics))]
+
+    comparison = (metrics or {}).get("comparison") or {}
+    if comparison.get("previous") and comparison.get("current"):
+        blocks.append(_as_subheading(comparison_block(metrics)))
 
     client_overview = build_client_insights_summary(
         messages, events_agg, periods, selected_period_ids
     )
     if client_overview:
-        lines.append(client_overview)
-    return "\n\n".join(lines)
+        blocks.append(client_overview)
+
+    return "\n\n".join(block for block in blocks if block)
 
 
 def summary_storage_key(period_ids: list[str], profile: str = "") -> str:
@@ -119,7 +148,7 @@ def render_period_summary(
     st.subheader("Саммари периода")
     key = summary_storage_key(period_ids, profile)
     manual = get_manual(project_id, key)
-    auto_summary = build_auto_summary(messages, events_agg, periods, period_ids)
+    auto_summary = build_auto_summary(messages, events_agg, periods, period_ids, metrics=metrics)
     summary_text = str((manual or {}).get("summary") or "").strip() or auto_summary
     st.markdown(summary_text.replace("\n", "  \n"))
     if str((manual or {}).get("source") or "") == "ai":

@@ -51,8 +51,24 @@ def first_existing_col(df: pd.DataFrame, columns: list[str | None]) -> str | Non
 def clean_summary_for_export(text: str) -> str:
     value = str(text or "").strip()
     value = value.replace("**", "")
-    value = re.sub(r"^\s*•\s*", "", value, flags=re.MULTILINE)
     return value
+
+
+def _classify_summary_line(raw: str) -> tuple[str, str]:
+    """Разобрать одну строку summary_text на (тип, видимый текст).
+
+    Строки текста саммари (автотекст из summary_ui.build_auto_summary или
+    вручную отредактированный) размечены минимально: "## " - подзаголовок
+    раздела (тот же маркер, что Streamlit понимает "из коробки" в live-
+    превью через st.markdown), "• "/"- " - пункт списка. И PDF, и DOCX
+    рисуют эти три вида по-разному вместо одного и того же стиля абзаца на
+    каждую строку."""
+    line = raw.strip()
+    if line.startswith("## "):
+        return "heading", line[3:].strip()
+    if line.startswith("• ") or line.startswith("- "):
+        return "bullet", line[2:].strip()
+    return "text", line
 
 
 def safe_export_filename(project_name: str, period_label: str, ext: str) -> str:
@@ -128,7 +144,12 @@ def export_top_events(
 def summary_highlights(summary_text: str, limit: int = 4) -> list[str]:
     lines: list[str] = []
     for raw in str(summary_text or "").replace("\r", "\n").split("\n"):
-        line = raw.strip().strip("•-").strip()
+        kind, line = _classify_summary_line(raw)
+        # Подзаголовки ("## ...") - не наблюдение, а название раздела; сами
+        # по себе в "Главное" не годятся (там и так рядом отдельный блок
+        # метрик/тональности - см. _VISUAL_SECTIONS).
+        if kind == "heading":
+            continue
         if line and line not in lines:
             lines.append(line)
         if len(lines) >= limit:
@@ -863,6 +884,12 @@ def generate_summary_docx(payload: dict[str, Any]) -> bytes:
     styles["Heading 2"].font.name = docx_font
     styles["Heading 2"].font.size = Pt(13)
     styles["Heading 2"].font.color.rgb = accent_rgb
+    # Подзаголовки ВНУТРИ текста саммари (build_auto_summary размечает их
+    # "## ...") - на ступень мельче "Heading 2", чтобы не спорить визуально
+    # с заголовками разделов отчёта.
+    styles["Heading 3"].font.name = docx_font
+    styles["Heading 3"].font.size = Pt(11.5)
+    styles["Heading 3"].font.color.rgb = accent_rgb
 
     p = doc.add_paragraph()
     r = p.add_run(str(payload.get("report_title") or "Дайджест упоминаний"))
@@ -953,10 +980,17 @@ def generate_summary_docx(payload: dict[str, Any]) -> bytes:
 
     if "summary_text" in sections:
         doc.add_heading("Саммари периода", level=2)
-        for block in str(payload.get("summary_text") or "").split("\n"):
-            block = block.strip()
-            if block:
-                para = doc.add_paragraph(block)
+        for raw in str(payload.get("summary_text") or "").split("\n"):
+            kind, text = _classify_summary_line(raw)
+            if not text:
+                continue
+            if kind == "heading":
+                doc.add_heading(text, level=3)
+            elif kind == "bullet":
+                para = doc.add_paragraph(text, style="List Bullet")
+                para.paragraph_format.space_after = Pt(2)
+            else:
+                para = doc.add_paragraph(text)
                 para.paragraph_format.space_after = Pt(4)
 
     out = BytesIO()
@@ -1413,6 +1447,26 @@ def generate_summary_pdf(payload: dict[str, Any]) -> bytes:
         spaceAfter=6,
         textColor=accent_color,
     )
+    # Подзаголовки ВНУТРИ текста саммари ("## ..." от build_auto_summary) -
+    # на ступень мельче heading, чтобы не спорить визуально с заголовками
+    # разделов отчёта ("Саммари периода" и т.д.).
+    subheading = ParagraphStyle(
+        "PlatformSubheading",
+        parent=normal,
+        fontName=bold_font_name,
+        fontSize=10.5,
+        leading=14,
+        spaceBefore=8,
+        spaceAfter=3,
+        textColor=accent_color,
+    )
+    bullet_style = ParagraphStyle(
+        "PlatformBullet",
+        parent=normal,
+        leftIndent=12,
+        bulletIndent=0,
+        spaceAfter=2,
+    )
 
     # Обёртка, которая просто зовёт draw(canv, x, top, width) у одного из
     # блоков выше - так каждый блок (карточки/донат/топ-списки) остаётся
@@ -1533,10 +1587,16 @@ def generate_summary_pdf(payload: dict[str, Any]) -> bytes:
         if story:
             story.append(PageBreak())
         story.append(Paragraph("Саммари периода", heading))
-        for block in str(payload.get("summary_text") or "").split("\n"):
-            block = block.strip()
-            if block:
-                story.append(Paragraph(xml_escape(block), normal))
+        for raw in str(payload.get("summary_text") or "").split("\n"):
+            kind, text = _classify_summary_line(raw)
+            if not text:
+                continue
+            if kind == "heading":
+                story.append(Paragraph(xml_escape(text), subheading))
+            elif kind == "bullet":
+                story.append(Paragraph(xml_escape(text), bullet_style, bulletText="•"))
+            else:
+                story.append(Paragraph(xml_escape(text), normal))
 
     if not story:
         # Аналитик снял вообще все разделы - пустой PDF выглядел бы как баг,

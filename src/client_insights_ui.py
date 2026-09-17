@@ -141,7 +141,18 @@ def build_client_insights_summary(
     *,
     profile: str = "",
 ) -> str:
-    """Return a text version of the client-insights block for automatic summaries."""
+    """Text version of the client-insights block for automatic summaries.
+
+    Раньше здесь ещё дублировались агрегатные дельты периода ("Что
+    изменилось к предыдущему периоду") и топ тегов/инфоповодов со своей
+    статистикой - оба куска дублируют контент, у которого уже есть
+    отдельное место: агрегатная динамика теперь строится один раз в
+    summary_ui.build_auto_summary (services.ai_summary.comparison_block),
+    а топ тегов/инфоповодов - отдельный оформленный блок отчёта
+    (report_export._PdfTopListsBlock и аналог в DOCX). Здесь остаётся то,
+    что больше нигде не считается: риск-фрейминг для клиента и движения
+    на уровне отдельных тегов (не агрегата).
+    """
     metrics = overview_metrics(messages)
     sent = metrics.get("sentiment", {}) or {}
     total = int(sent.get("total", 0) or 0)
@@ -155,21 +166,13 @@ def build_client_insights_summary(
     )
 
     lines: list[str] = []
-    lines.append("Клиентский обзор")
+    lines.append("## Клиентский обзор")
     lines.append(
         f"Риск негатива: {risk_level}; негативных сообщений — {format_int(negative)} ({negative_share * 100:.1f}%)."
     )
     lines.append(f"Суммарная вовлеченность: {format_int(engagement)}.")
 
     if len(selected_period_ids or []) >= 2:
-        change_lines = build_period_change_insights(
-            messages, periods, selected_period_ids
-        )
-        if change_lines:
-            lines.append("Что изменилось к предыдущему периоду:")
-            for item in change_lines[:5]:
-                lines.append(f"• {item}")
-
         tag_changes = build_tag_change_table(
             messages, periods, selected_period_ids, limit=5
         )
@@ -199,24 +202,6 @@ def build_client_insights_summary(
                 if details:
                     parts.append("; ".join(details))
                 lines.append("• " + " — ".join([p for p in parts if p]))
-
-    tags = top_client_tags(messages, limit=5)
-    if tags is not None and not tags.empty:
-        lines.append("Топ тегов для отчета:")
-        for _, row in tags.iterrows():
-            lines.append(
-                f"• {row.get('Тег', '')} — {format_int(row.get('Сообщений', 0))} сообщ.; "
-                f"охват {format_int(row.get('Охват', 0))}; вовлеченность {format_int(row.get('Вовлеченность', 0))}."
-            )
-
-    top_events = top_client_events(events_agg, limit=5)
-    if top_events is not None and not top_events.empty:
-        title_col = event_title_col(top_events) or "title"
-        lines.append("Топ инфоповодов для отчета:")
-        for _, row in top_events.iterrows():
-            lines.append(
-                f"• {row.get(title_col, '')} — {format_int(row.get('message_count', 0))} сообщ."
-            )
 
     return "\n".join(line for line in lines if str(line).strip())
 

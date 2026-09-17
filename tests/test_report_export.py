@@ -24,6 +24,7 @@ from services.dashboard_config import (  # noqa: E402
 )
 from services.metrics_compute import overview_metrics  # noqa: E402
 from services.report_export import (  # noqa: E402
+    _classify_summary_line,
     export_top_events,
     export_top_tags,
     first_existing_col,
@@ -33,6 +34,7 @@ from services.report_export import (  # noqa: E402
     resolve_report_sections,
     safe_export_filename,
     summary_export_payload,
+    summary_highlights,
 )
 
 failures = []
@@ -556,6 +558,78 @@ check(
     huge_pages is not None and short_pages is not None and huge_pages > short_pages,
     f"huge={huge_pages} short={short_pages}",
 )
+
+print("14. Текст саммари: подзаголовки («## ») и пункты списка не превращаются в голые абзацы")
+check(
+    "«## Заголовок» распознан как heading, маркер убран",
+    _classify_summary_line("## Метрики периода:") == ("heading", "Метрики периода:"),
+    str(_classify_summary_line("## Метрики периода:")),
+)
+check(
+    "«• пункт» распознан как bullet, маркер убран",
+    _classify_summary_line("• Что-то случилось") == ("bullet", "Что-то случилось"),
+    str(_classify_summary_line("• Что-то случилось")),
+)
+check(
+    "«- пункт» (дефис) тоже bullet",
+    _classify_summary_line("- было 3, стало 5") == ("bullet", "было 3, стало 5"),
+)
+check(
+    "обычная строка - text как есть",
+    _classify_summary_line("Просто предложение.") == ("text", "Просто предложение."),
+)
+
+marked_summary = (
+    "Вступительное предложение саммари.\n\n"
+    "## Метрики периода:\n"
+    "Сообщений: 60\n"
+    "Суммарная аудитория площадок: 20 000\n\n"
+    "## Динамика (Период 1 → Период 2):\n"
+    "- сообщения: было 3, стало 5 (+67%)\n"
+    "- охват: было 100, стало 200 (+100%)"
+)
+check(
+    "summary_highlights пропускает подзаголовки (это не наблюдение, а название раздела)",
+    all(not h.startswith("##") for h in summary_highlights(marked_summary)),
+    str(summary_highlights(marked_summary)),
+)
+check(
+    "summary_highlights всё равно берёт содержательные строки",
+    "Вступительное предложение саммари." in summary_highlights(marked_summary),
+    str(summary_highlights(marked_summary)),
+)
+
+marked_payload = summary_export_payload(
+    "ТЕХНОНИКОЛЬ",
+    "24.04.2026–30.04.2026",
+    marked_summary,
+    metrics,
+    messages=MESSAGES,
+    events_agg=EVENTS_AGG,
+    branding=BRANDING,
+    sections=["summary_text"],
+)
+
+marked_docx = Document(BytesIO(generate_summary_docx(marked_payload)))
+heading3_texts = [p.text for p in marked_docx.paragraphs if p.style.name == "Heading 3"]
+check(
+    "DOCX: «## »-строка стала настоящим подзаголовком (Heading 3), а не абзацем со звёздочками",
+    "Метрики периода:" in heading3_texts and "Динамика (Период 1 → Период 2):" in heading3_texts,
+    str(heading3_texts),
+)
+bullet_texts = [p.text for p in marked_docx.paragraphs if p.style.name == "List Bullet"]
+check(
+    "DOCX: «- »-строка стала настоящим пунктом списка (List Bullet), маркер не остался текстом",
+    any("было 3, стало 5" in t for t in bullet_texts) and all(not t.startswith("-") for t in bullet_texts),
+    str(bullet_texts),
+)
+check(
+    "DOCX: обычная строка осталась обычным абзацем",
+    any(p.text == "Вступительное предложение саммари." and p.style.name != "Heading 3" for p in marked_docx.paragraphs),
+)
+
+marked_pdf = generate_summary_pdf(marked_payload)
+check("PDF с разметкой «## »/«- » генерируется без исключений", marked_pdf[:5] == b"%PDF-")
 
 print()
 if failures:

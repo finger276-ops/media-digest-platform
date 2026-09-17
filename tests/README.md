@@ -21,7 +21,11 @@ python tests/test_brand_metrics.py           # индексы бренда пр�
 python tests/test_event_titles.py            # склейка похожих заголовков инфоповодов
 python tests/test_event_enrichment.py        # связь сообщений с инфоповодами, агрегация
 python tests/test_ai_summary.py              # тексты от ИИ (YandexGPT/GigaChat) — без сети
+python tests/test_report_highlights.py       # общий top_report_tags/top_report_events для отчёта
+python tests/test_period_comparison_daily.py # дневная динамика, подпись периода без года/дублей
+python tests/test_formatting.py              # короткие даты, подпись периода (общие хелперы)
 python tests/test_report_export.py           # выгрузки саммари: PNG-инфографика, Word, PDF
+python tests/test_summary_ui.py              # автотекст саммари без ИИ: метрики, динамика, без дублей
 python tests/test_session_presence.py        # живые сессии: heartbeat, окно онлайна, очистка
 python tests/test_ingest_queue.py            # логика очереди: захват, гонки, ретраи, источники
 python tests/test_worker_e2e.py              # воркер целиком: очередь → файл → период проекта
@@ -30,6 +34,7 @@ python tests/test_manual_conflict.py         # блокировка правок
 python tests/test_manual_moderation.py       # ручная модерация: правки, слияния, переносы, счётчики
 python tests/test_observability.py           # доставка ошибок владельцу (Sentry/вебхук)
 python tests/test_except_hygiene.py          # гигиена except: молчание должно быть обосновано
+python tests/test_tag_tier_analytics.py      # аналитика по уровням тегов: own/subtree, покрытие
 python tests/test_ui_smoke.py                # интерфейс: приложение стартует, разделы рисуются
 ```
 

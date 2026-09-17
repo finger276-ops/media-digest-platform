@@ -136,7 +136,7 @@ def _events_block(events_agg: pd.DataFrame) -> str:
     return "Крупнейшие инфоповоды:\n" + "\n".join(lines)
 
 
-def _metrics_block(messages: pd.DataFrame, metrics: dict[str, Any] | None) -> str:
+def metrics_block(messages: pd.DataFrame, metrics: dict[str, Any] | None) -> str:
     base = dict(metrics or overview_metrics(messages))
     sentiment = base.get("sentiment") or sentiment_counts(messages)
     total = int(base.get("messages") or 0)
@@ -155,7 +155,7 @@ def _metrics_block(messages: pd.DataFrame, metrics: dict[str, Any] | None) -> st
     return "Метрики периода:\n" + "\n".join(lines)
 
 
-def _comparison_block(metrics: dict[str, Any] | None) -> str:
+def comparison_block(metrics: dict[str, Any] | None) -> str:
     """Динамика к предыдущему периоду, если она посчитана платформой."""
     comparison = (metrics or {}).get("comparison") or {}
     previous = comparison.get("previous") or {}
@@ -202,7 +202,7 @@ def _comparison_block(metrics: dict[str, Any] | None) -> str:
 def _daily_highlight_block(messages: pd.DataFrame) -> str | None:
     """Пиковые дни внутри периода — календарная разбивка, а не сам период.
 
-    _comparison_block выше — период к периоду, это и есть заголовочная
+    comparison_block выше — период к периоду, это и есть заголовочная
     динамика отчёта, её менять нельзя (на ней держатся цифры в PNG/DOCX/
     PDF). Этот блок — дополнение: даёт модели повод сказать «пик негатива
     пришёлся на 27.04», а не только «негатив вырос на 12%». Возвращает
@@ -307,8 +307,8 @@ def build_data_card(
     blocks = [
         f"Проект: {project_name}",
         f"Период: {_period_label(periods, period_ids)}",
-        _metrics_block(messages, metrics),
-        _comparison_block(metrics),
+        metrics_block(messages, metrics),
+        comparison_block(metrics),
         _tags_block(messages),
         _events_block(events_agg),
         _brand_metrics_block(brand_cards),
