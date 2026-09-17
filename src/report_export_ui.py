@@ -1,8 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Кнопки выгрузки саммари: Word / PDF / PNG-инфографика с выбором шаблона отчёта.
+"""Кнопки выгрузки саммари: Word / PDF / PNG-инфографика с конструктором разделов.
 
 Сама генерация документов — в services/report_export.py (без Streamlit);
-здесь только форма выбора шаблона и три download_button.
+здесь только форма выбора разделов и три download_button. Раньше рядом был
+ещё выбор «шаблона отчёта» (Краткое саммари/Клиентский обзор/Сравнительный/
+Полный) — все варианты, кроме подписи в шапке, вели себя одинаково
+(реальный набор блоков всегда определял этот же конструктор), поэтому
+шаблон убрали — аналитик сразу собирает то, что нужно.
 """
 
 from __future__ import annotations
@@ -12,7 +16,7 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
-from services.dashboard_config import REPORT_SECTION_OPTIONS, REPORT_TEMPLATE_OPTIONS
+from services.dashboard_config import REPORT_SECTION_OPTIONS
 from services.project_settings import report_sections_from_project_settings
 from services.report_export import (
     generate_summary_docx,
@@ -37,15 +41,6 @@ def render_summary_export_buttons(
     project_id: str = "",
     role_can_edit: bool = False,
 ) -> None:
-    report_template = st.selectbox(
-        "Шаблон отчета",
-        list(REPORT_TEMPLATE_OPTIONS.keys()),
-        index=0,
-        format_func=lambda x: REPORT_TEMPLATE_OPTIONS.get(x, x),
-        key=f"{key_prefix}_template",
-        help="Шаблон меняет длину списков тегов/инфоповодов (5 или 8 позиций).",
-    )
-
     default_sections = report_sections_from_project_settings(project_settings)
     selected_sections = st.multiselect(
         "Разделы отчёта",
@@ -85,7 +80,6 @@ def render_summary_export_buttons(
         metrics,
         messages=messages,
         events_agg=events_agg,
-        report_template=report_template,
         branding=branding,
         sections=selected_sections,
     )

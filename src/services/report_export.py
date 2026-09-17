@@ -23,7 +23,6 @@ from .chart_style import SENTIMENT_COLOR_RANGE
 from .dashboard_config import (
     DEFAULT_REPORT_SECTIONS,
     REPORT_SECTION_OPTIONS,
-    REPORT_TEMPLATE_OPTIONS,
 )
 from .cached_store import download_storage_file
 from .metrics_compute import format_int, percent_text
@@ -215,14 +214,10 @@ def summary_export_payload(
     messages: pd.DataFrame | None = None,
     events_agg: pd.DataFrame | None = None,
     *,
-    report_template: str = "summary",
     branding: dict[str, Any] | None = None,
     sections: list[str] | None = None,
 ) -> dict[str, Any]:
     sent = metrics.get("sentiment", {}) if isinstance(metrics, dict) else {}
-    report_template = (
-        report_template if report_template in REPORT_TEMPLATE_OPTIONS else "summary"
-    )
     sections = resolve_report_sections(sections)
     branding = report_branding_from_project_settings(
         {"report_branding": branding or {}}, project_name=project_name
@@ -239,10 +234,6 @@ def summary_export_payload(
         "logo_filename": branding.get("logo_filename") or "",
         "logo_mime_type": branding.get("logo_mime_type") or "",
         "logo_bytes": _load_report_logo_bytes(branding),
-        "report_template": report_template,
-        "report_template_label": REPORT_TEMPLATE_OPTIONS.get(
-            report_template, report_template
-        ),
         "sections": sections,
         "period_label": period_label,
         "summary_text": clean_summary_for_export(summary_text),
@@ -256,12 +247,11 @@ def summary_export_payload(
         "negative": int(sent.get("negative", 0) or 0),
         "total": int(sent.get("total", 0) or 0),
         "comparison_sequence": metrics.get("comparison_sequence") or [],
-        "top_tags": export_top_tags(
-            messages, limit=8 if report_template == "full" else 5
-        ),
-        "top_events": export_top_events(
-            events_agg, limit=8 if report_template == "full" else 5
-        ),
+        # limit=5: столько же всегда и рисуют PNG/DOCX/PDF (items[:5]) -
+        # раньше "полный" шаблон запрашивал 8, но лишние 3 нигде не
+        # показывались, просто отбрасывались слоем отрисовки.
+        "top_tags": export_top_tags(messages, limit=5),
+        "top_events": export_top_events(events_agg, limit=5),
         "created_at": datetime.now().strftime("%d.%m.%Y %H:%M"),
     }
 
@@ -710,7 +700,6 @@ def generate_summary_infographic_png(payload: dict[str, Any]) -> bytes:
     report_title = _short_label(
         payload.get("report_title") or "Дайджест упоминаний", 44
     )
-    template_label = _short_label(payload.get("report_template_label") or "", 34)
     period = _short_label(payload.get("period_label") or "выбранный период", 56)
     created = str(payload.get("created_at") or "")
     comparison = payload.get("comparison_sequence") or []
@@ -743,7 +732,7 @@ def generate_summary_infographic_png(payload: dict[str, Any]) -> bytes:
     ax.text(
         0.060,
         0.904,
-        f"{template_label} · {period}".strip(" ·"),
+        period,
         fontsize=8.6,
         color="#e5e7eb",
         va="top",
@@ -909,7 +898,6 @@ def generate_summary_docx(payload: dict[str, Any]) -> bytes:
 
     meta = doc.add_paragraph()
     meta_lines = [
-        f"Шаблон: {payload.get('report_template_label') or ''}",
         f"Период: {payload.get('period_label') or 'выбранный период'}",
         f"Дата выгрузки: {payload.get('created_at') or ''}",
     ]
@@ -1364,9 +1352,7 @@ def generate_summary_pdf(payload: dict[str, Any]) -> bytes:
     project_text = _short_label(
         payload.get("client_name") or payload.get("project_name") or "Проект", 46
     )
-    meta_text = f"{payload.get('report_template_label') or ''} · {payload.get('period_label') or 'выбранный период'}".strip(
-        " ·"
-    )
+    meta_text = str(payload.get("period_label") or "выбранный период")
     created_text = str(payload.get("created_at") or "")
     footer_text = _short_label(
         str(

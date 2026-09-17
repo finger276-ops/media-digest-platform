@@ -124,12 +124,10 @@ payload = summary_export_payload(
     metrics,
     messages=MESSAGES,
     events_agg=EVENTS_AGG,
-    report_template="full",
     branding=BRANDING,
 )
 check("payload содержит числа из metrics, а не выдуманные", payload["messages"] == 3, str(payload["messages"]))
 check("payload несёт бренд-настройки без обращения к Storage", payload["client_name"] == "ТЕХНОНИКОЛЬ")
-check("шаблон отчета сохранён", payload["report_template"] == "full")
 check("топ-тегов и топ-инфоповодов собраны в payload", bool(payload["top_tags"]) and bool(payload["top_events"]))
 
 print("3. PNG-инфографика")
@@ -202,7 +200,6 @@ full_docx = generate_summary_docx(
         metrics,
         messages=MESSAGES,
         events_agg=EVENTS_AGG,
-        report_template="full",
     )
 )
 full_headings = _docx_headings(full_docx)
@@ -220,7 +217,6 @@ summary_only_docx = generate_summary_docx(
         metrics,
         messages=MESSAGES,
         events_agg=EVENTS_AGG,
-        report_template="full",
         sections=["summary_text"],
     )
 )
@@ -241,7 +237,6 @@ metrics_only_docx = generate_summary_docx(
         metrics,
         messages=MESSAGES,
         events_agg=EVENTS_AGG,
-        report_template="full",
         sections=["metrics"],
     )
 )
@@ -396,7 +391,6 @@ full_payload = summary_export_payload(
     metrics,
     messages=MESSAGES,
     events_agg=EVENTS_AGG,
-    report_template="full",
 )
 fig = plt.figure(figsize=(8.27, 11.69), dpi=170)
 ax = fig.add_axes([0, 0, 1, 1])
@@ -519,7 +513,6 @@ native_payload = summary_export_payload(
     messages=MESSAGES,
     events_agg=EVENTS_AGG,
     branding=BRANDING,
-    report_template="full",
 )
 native_pdf = generate_summary_pdf(native_payload)
 check(
@@ -548,7 +541,6 @@ huge_payload = summary_export_payload(
     messages=MESSAGES,
     events_agg=EVENTS_AGG,
     branding=BRANDING,
-    report_template="full",
 )
 huge_pdf = generate_summary_pdf(huge_payload)
 huge_pages = _pdf_page_count(huge_pdf)
