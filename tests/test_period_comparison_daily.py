@@ -45,6 +45,8 @@ import pandas as pd  # noqa: E402
 from services.period_comparison import (  # noqa: E402
     build_comparison_metrics,
     daily_metrics_for_comparison,
+    period_row_label,
+    selected_period_label,
     short_period_chart_label,
 )
 
@@ -206,6 +208,50 @@ check(
 check(
     "пустая подпись -> запасное 'Период', не падение",
     short_period_chart_label("") == "Период",
+)
+
+print("7. selected_period_label/period_row_label: без года, без дублирования даты")
+# Реальный баг с живой платформы: имя файла выгрузки саммари содержало дату
+# ДВАЖДЫ с годом ("summary_Песочница_24.04.2026_30.04.2026_24.04.2026_
+# 30.04.2026.pdf") - period_label для отчёта шёл через отдельную функцию
+# (selected_period_label), которую при чистке подписей периодов не трогали;
+# она не дедуплицировала "имя · дата", даже когда имя периода и так дата.
+auto_named_periods = pd.DataFrame(
+    [
+        {
+            "period_id": "p1",
+            "period_name": "24.04.2026–30.04.2026",
+            "date_from": "2026-04-24",
+            "date_to": "2026-04-30",
+        }
+    ]
+)
+check(
+    "период с одним периодом: дата не дублируется и без года (как раньше в имени файла выгрузки)",
+    selected_period_label(auto_named_periods, ["p1"]) == "24.04–30.04",
+    selected_period_label(auto_named_periods, ["p1"]),
+)
+custom_named_periods = pd.DataFrame(
+    [
+        {
+            "period_id": "p1",
+            "period_name": "Апрельская волна",
+            "date_from": "2026-04-24",
+            "date_to": "2026-04-30",
+        }
+    ]
+)
+check(
+    "осмысленное название периода не теряется, дата рядом без года",
+    selected_period_label(custom_named_periods, ["p1"]) == "Апрельская волна · 24.04–30.04",
+    selected_period_label(custom_named_periods, ["p1"]),
+)
+check(
+    # Этот label уходит и в "Последний период: ..." на PNG-инфографике, и в
+    # текст карточки для ИИ (_comparison_block) - тот же баг, та же причина.
+    "period_row_label (подпись для карточки сравнения) тоже без года и без дублирования",
+    period_row_label(auto_named_periods.iloc[0]) == "24.04–30.04",
+    period_row_label(auto_named_periods.iloc[0]),
 )
 
 print()

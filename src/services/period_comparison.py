@@ -12,7 +12,7 @@ from typing import Any
 
 import pandas as pd
 
-from .formatting import fmt_date, fmt_period
+from .formatting import fmt_date_short, period_picker_label
 from .metrics_compute import format_int, overview_metrics, percent_text
 
 
@@ -46,13 +46,13 @@ def previous_period_id(
 
 
 def period_row_label(row: pd.Series, fallback: str = "") -> str:
-    name = (
-        str(row.get("period_name") or "").strip() if isinstance(row, pd.Series) else ""
-    )
-    period = fmt_period(row) if isinstance(row, pd.Series) else ""
-    if name and period:
-        return f"{name} · {period}"
-    return name or period or fallback or "период"
+    if not isinstance(row, pd.Series):
+        return fallback or "период"
+    # period_picker_label - тот же хелпер, что и подписи в сайдбаре: без
+    # года, без дублирования даты, если название периода и так уже дата.
+    # Этот "label" попадает и в "Последний период: ..." на инфографике, и в
+    # текст для ИИ (_comparison_block) - раньше там оседали полные даты.
+    return period_picker_label(row, fallback=fallback or "период")
 
 
 def selected_period_rows(periods: pd.DataFrame, period_ids: list[str]) -> pd.DataFrame:
@@ -224,10 +224,12 @@ def selected_period_label(periods: pd.DataFrame, period_ids: list[str]) -> str:
         return ", ".join(ids[:3]) + (f" и еще {len(ids) - 3}" if len(ids) > 3 else "")
 
     if len(subset) == 1:
-        row = subset.iloc[0]
-        name = str(row.get("period_name") or "").strip()
-        period = fmt_period(row)
-        return f"{name} · {period}" if name and period else name or period or ids[0]
+        # period_picker_label - тот же хелпер, что и подписи в сайдбаре: не
+        # дублирует дату дважды, если название периода и так уже дата
+        # ("24.04.2026-30.04.2026 · 24.04.2026-30.04.2026" было ровно такой
+        # подписью раньше - видно даже в имени файла выгрузки), и не тащит
+        # год туда, где он не нужен.
+        return period_picker_label(subset.iloc[0], fallback=ids[0])
 
     dates: list[pd.Timestamp] = []
     for col in ["date_from", "date_to", "start_date", "end_date"]:
@@ -237,8 +239,8 @@ def selected_period_label(periods: pd.DataFrame, period_ids: list[str]) -> str:
             ).dropna()
             dates.extend(parsed.tolist())
     if dates:
-        start_s = fmt_date(min(dates))
-        end_s = fmt_date(max(dates))
+        start_s = fmt_date_short(min(dates))
+        end_s = fmt_date_short(max(dates))
         date_part = (
             f"{start_s}–{end_s}"
             if start_s and end_s and start_s != end_s
