@@ -12,7 +12,7 @@ REPO = Path(__file__).resolve().parent.parent
 for _p in (REPO / "src", REPO / "scripts", REPO / "tests"):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 os.environ["SUPABASE_URL"] = "https://test.supabase.co"
 os.environ["SUPABASE_SERVICE_ROLE_KEY"] = "test-key"
@@ -587,6 +587,89 @@ check(
     not any("Выгрузка по категории" == str(h.value).strip() for h in at.subheader),
     str([h.value for h in at.subheader]),
 )
+
+print("3.02. Индексы бренда: диапазон дат сужает выборку карточек")
+# Сообщения периода p_2026_04 размечены тремя разными датами (24-26.04:
+# основные, отзывы, остаток без сюжета) - ровно тот случай, ради которого
+# нужен диапазон: посмотреть индексы за часть периода, а не только целиком.
+range_expander = [e for e in at.expander if str(e.label) == "Диапазон дат"]
+check(
+    "раскрывашка «Диапазон дат» найдена (в данных больше одного дня)",
+    bool(range_expander),
+    str([e.label for e in at.expander]),
+)
+if range_expander:
+    date_inputs = {str(d.label): d for d in at.date_input}
+    check(
+        "оба поля диапазона на месте (С / По)",
+        "С" in date_inputs and "По" in date_inputs,
+        str(list(date_inputs.keys())),
+    )
+    if "С" in date_inputs and "По" in date_inputs:
+        original_from = date_inputs["С"].value
+        original_to = date_inputs["По"].value
+        check(
+            "по умолчанию диапазон открыт на весь период (С раньше По)",
+            original_from < original_to,
+            str((original_from, original_to)),
+        )
+        cards_before = {
+            str(m.label): str(m.value) for m in at.metric if " · " in str(m.label)
+        }
+
+        date_inputs["С"].set_value(original_from + timedelta(days=1)).run()
+        check("сужение диапазона не роняет раздел", not at.exception, str(at.exception))
+        captions_after = [str(c.value) for c in at.caption]
+        check(
+            "подпись честно называет число отфильтрованных сообщений",
+            any(
+                "Выбрано:" in c and "сообщений из" in c for c in captions_after
+            ),
+            str(captions_after)[:300],
+        )
+        check(
+            "дельта к предыдущему периоду скрыта для произвольного диапазона",
+            any(
+                "Изменение к предыдущему периоду не показано" in c
+                for c in captions_after
+            ),
+            str(captions_after)[:300],
+        )
+        cards_after = {
+            str(m.label): str(m.value) for m in at.metric if " · " in str(m.label)
+        }
+        check(
+            "хотя бы одна карточка индекса пересчиталась на суженном диапазоне",
+            cards_before != cards_after,
+            str((cards_before, cards_after))[:300],
+        )
+
+        # Инвертированный диапазон (начало позже конца) не должен падать -
+        # ожидаем явное предупреждение и откат на полный период, а не тихий сбой.
+        date_inputs = {str(d.label): d for d in at.date_input}
+        date_inputs["По"].set_value(original_from).run()
+        check(
+            "инвертированный диапазон не роняет раздел", not at.exception, str(at.exception)
+        )
+        check(
+            "инвертированный диапазон честно предупреждён, а не тихо проглочен",
+            any(
+                "Начало диапазона позже конца" in str(w.value) for w in at.warning
+            ),
+            str([str(w.value) for w in at.warning]),
+        )
+
+        # Возвращаем диапазон к исходному - дальше тест полагается на карточки
+        # без сужения.
+        date_inputs = {str(d.label): d for d in at.date_input}
+        date_inputs["С"].set_value(original_from).run()
+        date_inputs = {str(d.label): d for d in at.date_input}
+        date_inputs["По"].set_value(original_to).run()
+        check(
+            "возврат диапазона к исходному не роняет раздел",
+            not at.exception,
+            str(at.exception),
+        )
 
 print("3.1. Динамика индексов: свёрнута и в хронологическом порядке")
 # Периоды выбираются в обратном порядке: май, потом апрель. График динамики

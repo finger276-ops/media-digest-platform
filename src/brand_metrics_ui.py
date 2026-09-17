@@ -851,6 +851,81 @@ def render_category_upload(
 
 
 # ---------------------------------------------------------------------------
+# Диапазон дат
+# ---------------------------------------------------------------------------
+
+
+def _date_range_filter(
+    messages: pd.DataFrame, project_id: str
+) -> tuple[pd.DataFrame, bool]:
+    """Сузить сообщения до произвольного диапазона дат внутри выбранных периодов.
+
+    Карточки считались одним числом на весь текущий выбор периодов целиком -
+    посмотреть "как дела за эту неделю" внутри длинного периода было нельзя.
+    Диапазон необязательный: по умолчанию открыт на весь выбор и ничего не
+    меняет, пока аналитик не сузит его сам.
+
+    Возвращает (сообщения, сужен ли диапазон) - второе нужно вызывающему,
+    чтобы честно спрятать "изменение к предыдущему периоду" (для
+    произвольного куска периода "предыдущий период" не определён) и
+    предупредить про SOV/ReachScore (см. render_brand_metrics_page).
+    """
+    if (
+        not isinstance(messages, pd.DataFrame)
+        or messages.empty
+        or "datetime" not in messages.columns
+    ):
+        return messages, False
+    dt = pd.to_datetime(messages["datetime"], errors="coerce")
+    valid = dt.dropna()
+    if valid.empty:
+        return messages, False
+    min_date, max_date = valid.min().date(), valid.max().date()
+    if min_date == max_date:
+        return messages, False
+
+    with st.expander("Диапазон дат", expanded=False):
+        st.caption(
+            f"По умолчанию — весь выбранный период "
+            f"({min_date.strftime('%d.%m.%Y')}–{max_date.strftime('%d.%m.%Y')}). "
+            "Сузьте, чтобы посмотреть индексы только за часть периода — "
+            "например, за одну неделю."
+        )
+        col1, col2 = st.columns(2)
+        with col1:
+            start = st.date_input(
+                "С",
+                value=min_date,
+                min_value=min_date,
+                max_value=max_date,
+                format="DD.MM.YYYY",
+                key=f"brand_metrics_range_from_{project_id}",
+            )
+        with col2:
+            end = st.date_input(
+                "По",
+                value=max_date,
+                min_value=min_date,
+                max_value=max_date,
+                format="DD.MM.YYYY",
+                key=f"brand_metrics_range_to_{project_id}",
+            )
+        if start > end:
+            st.warning("Начало диапазона позже конца — показан весь период.")
+            return messages, False
+        if start == min_date and end == max_date:
+            return messages, False
+        mask = (dt.dt.date >= start) & (dt.dt.date <= end)
+        filtered = messages[mask.fillna(False)]
+        st.caption(
+            f"Выбрано: {len(filtered):,} сообщений из {len(messages):,}.".replace(
+                ",", " "
+            )
+        )
+        return filtered, True
+
+
+# ---------------------------------------------------------------------------
 # Точка входа раздела
 # ---------------------------------------------------------------------------
 
@@ -870,6 +945,8 @@ def render_brand_metrics_page(
         "них означает для бренда — в столбце «Вывод»."
     )
 
+    scoped_messages, range_active = _date_range_filter(messages, project_id)
+
     settings = project_metric_settings(project_settings)
 
     benchmarks: dict[str, dict[str, Any]] = {}
@@ -883,29 +960,51 @@ def render_brand_metrics_page(
     # загрузка по категории не нужна — она просила бы те же данные второй раз.
     brand_map = category_brands_from_project_settings(project_settings)
     benchmark = category_store.benchmark_from_messages(
-        messages, brand_map["own"], brand_map["competitors"]
+        scoped_messages, brand_map["own"], brand_map["competitors"]
     )
     # Загруженная выгрузка по категории главнее: в ней есть бренды, которых нет
-    # в теговой разметке проекта, то есть картина рынка шире.
+    # в теговой разметке проекта, то есть картина рынка шире. Она же не знает
+    # про сужение диапазона дат — выгружается на период целиком (см. caption
+    # ниже, когда diапазон активен и используется именно этот источник).
     if benchmarks:
         benchmark = category_store.merged_benchmark(benchmarks) or benchmark
 
-    cards = compute_brand_metrics(messages, benchmark=benchmark, settings=settings)
+    cards = compute_brand_metrics(scoped_messages, benchmark=benchmark, settings=settings)
 
-    previous = previous_period_metrics(
-        project_id,
-        previous_period_id(periods, selected_period_ids),
-        settings,
-        brand_map,
+    # «Предыдущий период» не определён для произвольного куска периода —
+    # честнее спрятать дельту, чем сравнить сужение с чем-то, что ему не
+    # соответствует.
+    previous = (
+        None
+        if range_active
+        else previous_period_metrics(
+            project_id,
+            previous_period_id(periods, selected_period_ids),
+            settings,
+            brand_map,
+        )
     )
     render_metric_cards(cards, previous)
     if previous:
         st.caption("Изменения — к предыдущему периоду.")
+    elif range_active:
+        st.caption(
+            "Изменение к предыдущему периоду не показано: выбран произвольный "
+            "диапазон дат внутри периода."
+        )
     render_category_source_notice(benchmark, brand_map)
+    if range_active and benchmarks:
+        st.caption(
+            "SOV и ReachScore по-прежнему сравниваются с категорией за весь "
+            "период загрузки — выгрузка по категории не разбита по дням, "
+            "поэтому сужение диапазона дат их не меняет."
+        )
     render_metric_conclusions(
         project_id, cards, selected_period_ids, role_can_edit=role_can_edit
     )
 
+    # Полные, не суженные сообщения: график динамики остаётся по периодам
+    # целиком (это отдельная, более крупная переделка — см. обсуждение).
     render_metrics_dynamics(
         project_id, messages, periods, selected_period_ids, benchmarks, settings
     )
