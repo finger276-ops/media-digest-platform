@@ -20,6 +20,7 @@ from services.reviews import (
     complaints,
     praise_phrases,
     review_overview,
+    review_rows,
     reviews_by_product,
     select_reviews,
 )
@@ -27,6 +28,7 @@ from services.reviews import (
 # Дальше этого числа список претензий превращается в ленту, которую не читают.
 MAX_COMPLAINTS_SHOWN = 60
 MAX_PRODUCTS_SHOWN = 25
+MAX_REVIEWS_SHOWN = 100
 
 
 def _rating_bar(counts: dict[int, int], total: int) -> None:
@@ -137,6 +139,30 @@ def render_reviews(messages: pd.DataFrame) -> None:
                 f"Показаны первые {MAX_COMPLAINTS_SHOWN} из "
                 f"{len(complaint_rows)} — сначала с самой низкой оценкой."
             )
+
+    st.divider()
+
+    st.markdown("**Все отзывы периода**")
+    rows = review_rows(messages)
+    st.caption(
+        "Претензии выше — только негатив. Здесь весь набор, который попал в "
+        "раздел: сначала с самой низкой оценкой, отзывы без оценки следом."
+    )
+    shown_reviews = rows.head(MAX_REVIEWS_SHOWN).copy()
+    shown_reviews["Оценка"] = shown_reviews["Оценка"].map(
+        lambda v: "—" if pd.isna(v) else f"{float(v):.0f}"
+    )
+    st.dataframe(
+        shown_reviews,
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "Ссылка": st.column_config.LinkColumn("Ссылка", display_text="Открыть"),
+            "Отзыв": st.column_config.TextColumn("Отзыв", width="large"),
+        },
+    )
+    if len(rows) > MAX_REVIEWS_SHOWN:
+        st.caption(f"Показаны первые {MAX_REVIEWS_SHOWN} из {len(rows)}.")
 
     st.divider()
 

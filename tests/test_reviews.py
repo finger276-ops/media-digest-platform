@@ -26,6 +26,7 @@ from services.reviews import (  # noqa: E402
     praise_phrases,
     rating_values,
     review_overview,
+    review_rows,
     reviews_by_product,
     select_reviews,
 )
@@ -211,6 +212,44 @@ check(
     len(no_title) == 1 and no_title.iloc[0]["Товар"] == "Товар не указан",
     str(no_title.to_dict("records")),
 )
+
+print("8.5. Полный список отзывов, а не только претензии")
+# Поштучно раздел показывал лишь претензии. Когда их ноль, блок выглядел пустым
+# при непустом счётчике: «Отзывов 14», а прочитать их негде.
+rows = review_rows(period)
+check("в список попали все отзывы, посты — нет", len(rows) == 4, str(len(rows)))
+check(
+    "сначала худшая оценка",
+    float(rows.iloc[0]["Оценка"]) == 2.0,
+    str(rows["Оценка"].tolist()),
+)
+check(
+    "плюсы и минусы не теряются, а собираются в одну строку",
+    "Плюсы: хорошее качество, внешний вид" in rows["Отзыв"].tolist(),
+    str(rows["Отзыв"].tolist()),
+)
+only_positive = pd.DataFrame([review("Плюсы товара: качество", rating="5")])
+check(
+    "отзыв без претензий всё равно виден в списке",
+    len(review_rows(only_positive)) == 1,
+    str(review_rows(only_positive).to_dict("records")),
+)
+# Ровно случай владельца: отзывы есть, оценок нет — раздел обязан их показать.
+no_rating = pd.DataFrame(
+    [review("Пришло вовремя, качество среднее", rating=""), review("Без оценки", rating="")]
+)
+no_rating_rows = review_rows(no_rating)
+check(
+    "отзывы без оценки не выпадают из списка",
+    len(no_rating_rows) == 2,
+    str(no_rating_rows.to_dict("records")),
+)
+check(
+    "у отзыва без оценки в списке пусто, а не ноль",
+    not no_rating_rows.empty and pd.isna(no_rating_rows.iloc[0]["Оценка"]),
+    str(no_rating_rows["Оценка"].tolist()),
+)
+check("пустой период не падает", review_rows(pd.DataFrame()).empty)
 
 print("9. Выгрузка без признака отзывов")
 # Медиалогия и универсальный формат не отдают тип площадки: раздел просто

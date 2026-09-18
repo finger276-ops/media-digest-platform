@@ -1,4 +1,4 @@
-"""Репутация товара: отзывы покупателей на маркетплейсах и площадках отзывов.
+﻿"""Репутация товара: отзывы покупателей на маркетплейсах и площадках отзывов.
 
 Раздел появился из наблюдения на выгрузках RUFLEX: почти весь негатив периода
 лежит в отзывах — 18 из 20 за июль и 11 из 13 за август. В ленте инфоповодов
@@ -252,6 +252,59 @@ def complaints(messages: pd.DataFrame) -> pd.DataFrame:
         },
         index=selected.index,
     )
+    return out.sort_values("Оценка", na_position="last").reset_index(drop=True)
+
+
+def _review_text(pros: str, cons: str, comment: str) -> str:
+    """Собрать отзыв обратно в одну читаемую строку, ничего не потеряв.
+
+    complaints() выбирает что-то одно, потому что там нужна суть претензии. В
+    общем списке так нельзя: отзыв с плюсами, минусами и комментарием сразу —
+    обычное дело на маркетплейсе, и показать из него только треть значит
+    соврать про содержание.
+    """
+    parts = []
+    if comment:
+        parts.append(comment)
+    if pros:
+        parts.append(f"Плюсы: {pros}")
+    if cons:
+        parts.append(f"Минусы: {cons}")
+    return " · ".join(parts)
+
+
+def review_rows(messages: pd.DataFrame) -> pd.DataFrame:
+    """Все отзывы периода списком, а не только претензии.
+
+    Поштучно раздел показывал лишь претензии. Когда их ноль, он выглядит пустым
+    при непустом счётчике: «Отзывов 14», а прочитать эти четырнадцать негде —
+    ровно то, на что смотрел владелец. Разбор шаблона здесь тот же, что в
+    complaints(), но без фильтра по негативу.
+    """
+    columns = ["Оценка", "Товар", "Отзыв", "Тональность", "Дата", "Ссылка"]
+    reviews = select_reviews(messages)
+    if reviews.empty:
+        return pd.DataFrame(columns=columns)
+
+    parsed = parse_reviews(reviews)
+    text = [
+        _review_text(row["pros"], row["cons"], row["comment"])
+        for _, row in parsed.iterrows()
+    ]
+    out = pd.DataFrame(
+        {
+            "Оценка": rating_values(reviews),
+            "Товар": _column(reviews, _PRODUCT_COLUMNS).str.strip().replace("", "—"),
+            "Отзыв": pd.Series(text, index=reviews.index),
+            "Тональность": _column(reviews, ("sentiment", "Тональность")).str.strip(),
+            "Дата": _column(reviews, ("date", "Дата")),
+            "Ссылка": _column(reviews, ("message_link", "Ссылка")),
+        },
+        index=reviews.index,
+    )
+    # Сначала худшие оценки — раздел про репутацию, а не про ленту. Отзывы без
+    # оценки идут следом: их нельзя ранжировать, но и прятать в конец нельзя,
+    # потому что в выгрузках без колонки оценки это вообще все отзывы.
     return out.sort_values("Оценка", na_position="last").reset_index(drop=True)
 
 
