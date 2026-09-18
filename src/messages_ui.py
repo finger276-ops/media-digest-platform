@@ -83,7 +83,10 @@ def render_messages_block(
     filtered by that event: top messages and the full feed show only messages
     from the selected infopoint.
     """
-    st.subheader("Ключевые сообщения")
+    # Заголовок нейтрален к режиму: ниже есть переключатель "Ключевые
+    # сообщения"/"Вся лента", и если здесь написать "Ключевые сообщения",
+    # заголовок будет врать при выбранной "Всей ленте".
+    st.subheader("Сообщения")
     if messages is None or messages.empty:
         st.info("Сообщения не найдены.")
         return

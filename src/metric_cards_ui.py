@@ -24,6 +24,25 @@ DELTA_NEUTRAL = "off"
 
 DEFAULT_COLUMNS = 4
 
+# st.metric не переносит длинную подпись/значение по словам — при узкой
+# карточке текст просто выходит за её границы и визуально прячется под
+# следующей карточкой в ряду (не аккуратное "...", а буквальное наложение
+# текста). Перенос строк задаёт не сам stMetricLabel/stMetricValue, а
+# вложенный <p> внутри stMarkdownContainer — именно там остаётся
+# white-space: nowrap, если переопределить стиль только на внешнем блоке.
+# Разрешаем перенос строк — карточка станет выше, а не обрежет соседнюю.
+# Один инжект на всю платформу, так как карточки везде общие.
+_WRAP_CSS = """
+<style>
+[data-testid="stMetricLabel"] p,
+[data-testid="stMetricValue"] p {
+    white-space: normal !important;
+    overflow-wrap: break-word;
+    word-break: break-word;
+}
+</style>
+"""
+
 
 def metric_card(
     label: str,
@@ -57,6 +76,7 @@ def render_metric_row(
     items = [card for card in cards if card]
     if not items:
         return
+    st.markdown(_WRAP_CSS, unsafe_allow_html=True)
     width = max(1, int(columns))
     for start in range(0, len(items), width):
         chunk = items[start : start + width]

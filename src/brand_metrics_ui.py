@@ -526,6 +526,7 @@ def render_brand_map_settings(
                 options,
                 default=[x for x in brand_map["own"] if x in options],
                 format_func=lambda x: labels.get(x, x),
+                placeholder="Выберите теги",
                 help=(
                     "Головной бренд и всё, что относится к группе: дочерние "
                     "компании, отдельные марки. Их упоминания складываются."
@@ -540,6 +541,7 @@ def render_brand_map_settings(
                     if x in options and x not in set(own)
                 ],
                 format_func=lambda x: labels.get(x, x),
+                placeholder="Выберите теги",
                 help="Остальные бренды категории — знаменатель доли голоса.",
             )
             if st.form_submit_button("Сохранить разметку брендов"):
@@ -793,6 +795,7 @@ def render_category_upload(
             candidates or list(table.columns),
             default=candidates[:12],
             key="category_brand_columns",
+            placeholder="Выберите колонки",
         )
         brands = category_store.aggregate_by_brand_columns(table, brand_columns)
         brand_source = ", ".join(brand_columns)

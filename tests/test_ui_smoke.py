@@ -939,7 +939,9 @@ print("3.7. Раздел «Сообщения»: топ и вся лента р�
 open_section("Сообщения")
 check("раздел открылся без исключений", not at.exception, str(at.exception))
 texts = [m.value for m in at.markdown] + [h.value for h in at.subheader]
-check("заголовок раздела на месте", any("Ключевые сообщения" in str(t) for t in texts))
+# Заголовок нейтрален к режиму (см. messages_ui.render_messages_block) -
+# раньше здесь было "Ключевые сообщения", что врало при "Всей ленте".
+check("заголовок раздела на месте", any("Сообщения" in str(t) for t in texts))
 mode_control = [r for r in at.radio if str(r.label) == "Режим просмотра сообщений"]
 check("переключатель режима на месте", bool(mode_control), str([str(r.label) for r in at.radio]))
 if mode_control:

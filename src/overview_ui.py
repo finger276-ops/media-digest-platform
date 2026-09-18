@@ -15,6 +15,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
+from metric_cards_ui import metric_card, render_metric_row
 from services.dashboard_config import COMPARISON_CHART_BLOCKS, DEFAULT_DASHBOARD_VIEW_SETTINGS
 from services.metrics_compute import format_int, overview_metrics, percent_text
 from services.period_comparison import (
@@ -685,23 +686,31 @@ def render_period_comparison_metrics(
         ("Охват", "reach"),
         ("Вовлеченность", "engagement"),
     ]
-    for column, (label, key) in zip(st.columns(4), volume):
-        with column, st.container(border=True):
-            st.metric(
+    render_metric_row(
+        [
+            metric_card(
                 label,
                 format_int(current[key]),
                 delta=metric_delta(current[key], previous[key]),
             )
+            for label, key in volume
+        ],
+        columns=4,
+    )
 
     tone = [("Позитив", "positive"), ("Нейтрал", "neutral"), ("Негатив", "negative")]
-    for column, (label, key) in zip(st.columns(3), tone):
-        with column, st.container(border=True):
-            st.metric(
+    render_metric_row(
+        [
+            metric_card(
                 label,
                 f"{current[f'{key}_share'] * 100:.0f}%",
                 delta=pp_delta(current[f"{key}_share"], previous[f"{key}_share"]),
-                help=f"{format_int(current['sentiment'].get(key, 0))} сообщений в последнем периоде",
+                help_text=f"{format_int(current['sentiment'].get(key, 0))} сообщений в последнем периоде",
             )
+            for label, key in tone
+        ],
+        columns=3,
+    )
 
     render_period_comparison_charts(
         comparison,
@@ -831,19 +840,27 @@ def render_project_intro(
         ("Охват", "reach"),
         ("Вовлеченность", "engagement"),
     ]
-    for column, (label, key) in zip(st.columns(4), volume_cards):
-        with column, st.container(border=True):
-            st.metric(label, format_int(metrics.get(key, 0)), delta=_delta(key))
+    render_metric_row(
+        [
+            metric_card(label, format_int(metrics.get(key, 0)), delta=_delta(key))
+            for label, key in volume_cards
+        ],
+        columns=4,
+    )
 
     tone_cards = [("Позитив", "positive"), ("Нейтрал", "neutral"), ("Негатив", "negative")]
-    for column, (label, key) in zip(st.columns(3), tone_cards):
-        with column, st.container(border=True):
-            st.metric(
+    render_metric_row(
+        [
+            metric_card(
                 label,
                 percent_text(sent.get(key, 0), total),
                 delta=_share_delta(key),
-                help=f"{format_int(sent.get(key, 0))} сообщений",
+                help_text=f"{format_int(sent.get(key, 0))} сообщений",
             )
+            for label, key in tone_cards
+        ],
+        columns=3,
+    )
 
     if previous_label:
         st.caption(f"Изменения — к предыдущему периоду: {previous_label}")
