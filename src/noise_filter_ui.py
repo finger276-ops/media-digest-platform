@@ -13,6 +13,7 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+from metric_cards_ui import metric_card, render_metric_row
 from services.noise_filter import filter_dataframe
 
 
@@ -33,14 +34,18 @@ def render_noise_filter_block(canonical: pd.DataFrame, text_column: str = "Со�
                 st.warning(f"Фильтр: {stats['error']}")
                 return
 
-            c1, c2, c3 = st.columns(3)
-            c1.metric(
-                "Помечено шумом",
-                f"{stats['noise_total']} ({stats['noise_percent']}%)",
-                help="Сообщения без смысловой нагрузки. Не удаляются — только помечаются.",
+            render_metric_row(
+                [
+                    metric_card(
+                        "Помечено шумом",
+                        f"{stats['noise_total']} ({stats['noise_percent']}%)",
+                        help_text="Сообщения без смысловой нагрузки. Не удаляются — только помечаются.",
+                    ),
+                    metric_card("Ответы продавцов", stats["seller_replies"]),
+                    metric_card("Пустые отзывы", stats["empty_reviews"]),
+                ],
+                columns=3,
             )
-            c2.metric("Ответы продавцов", stats["seller_replies"])
-            c3.metric("Пустые отзывы", stats["empty_reviews"])
 
             if stats["noise_total"] == 0:
                 st.info(

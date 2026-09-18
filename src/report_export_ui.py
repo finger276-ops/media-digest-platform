@@ -114,7 +114,7 @@ def render_summary_export_buttons(
     with c3:
         try:
             st.download_button(
-                "Скачать инфографику PNG",
+                "Скачать PNG",
                 data=generate_summary_infographic_png(payload),
                 file_name=safe_export_filename(project_name, period_label, "png"),
                 mime="image/png",

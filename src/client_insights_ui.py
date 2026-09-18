@@ -14,6 +14,7 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
+from metric_cards_ui import metric_card, render_metric_row
 from services.metrics_compute import format_int, overview_metrics
 from services.period_comparison import ordered_period_ids, period_metrics_for_comparison
 from services.report_highlights import is_technical_event_title
@@ -241,9 +242,10 @@ def render_client_insights(
             "",
         ),
     ]
-    for column, (label, value, hint) in zip(st.columns(4), top_cards):
-        with column, st.container(border=True):
-            st.metric(label, value, help=hint or None)
+    render_metric_row(
+        [metric_card(label, value, help_text=hint) for label, value, hint in top_cards],
+        columns=4,
+    )
 
     signals: list[dict[str, Any]] = []
     if negative > 0:

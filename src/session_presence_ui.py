@@ -22,6 +22,7 @@ import uuid
 import pandas as pd
 import streamlit as st
 
+from metric_cards_ui import metric_card, render_metric_row
 from services.cached_store import list_projects
 from services.perf import perf_block
 from services.session_presence import (
@@ -147,13 +148,17 @@ def render_session_presence_page() -> None:
         else {}
     )
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Сейчас онлайн", len(online))
-    c2.metric(
-        "Проектов с активностью",
-        online["project_id"].nunique() if not online.empty else 0,
+    render_metric_row(
+        [
+            metric_card("Сейчас онлайн", len(online)),
+            metric_card(
+                "Проектов с активностью",
+                online["project_id"].nunique() if not online.empty else 0,
+            ),
+            metric_card("Недавно ушли", len(recently_left)),
+        ],
+        columns=3,
     )
-    c3.metric("Недавно ушли", len(recently_left))
     st.caption(
         f"«Онлайн» — heartbeat вкладки за последние {ONLINE_WINDOW_SECONDS} сек. "
         f"«Недавно ушли» — были активны за последние {RECENT_WINDOW_SECONDS // 60} мин, но сейчас не онлайн. "

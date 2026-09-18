@@ -15,6 +15,7 @@ import pandas as pd
 import streamlit as st
 import altair as alt
 
+from metric_cards_ui import inject_metric_css
 from services.cached_store import (
     supabase_configured,
     list_projects,
@@ -388,6 +389,7 @@ def main() -> None:
     args = parse_args()
     reset_perf_events()
     st.set_page_config(page_title=APP_TITLE, layout="wide")
+    inject_metric_css()
 
     if not supabase_configured():
         st.error(

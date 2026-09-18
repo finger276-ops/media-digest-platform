@@ -16,6 +16,7 @@ import pandas as pd
 import streamlit as st
 
 import platform_store as store
+from metric_cards_ui import metric_card, render_metric_row
 from services import ingest_queue as queue
 from services.cached_store import clear_platform_caches
 from services.ingest import IngestError, file_sha256, ingest_file_bytes
@@ -166,9 +167,13 @@ def render_ingest_queue_block(project_id: str, work_dir: str) -> None:
         )
     else:
         counts = tasks["status"].value_counts().to_dict()
-        cols = st.columns(len(queue.STATUS_LABELS))
-        for col, (status, label) in zip(cols, queue.STATUS_LABELS.items()):
-            col.metric(f"{STATUS_ICONS.get(status, '')} {label}", int(counts.get(status, 0)))
+        render_metric_row(
+            [
+                metric_card(f"{STATUS_ICONS.get(status, '')} {label}", int(counts.get(status, 0)))
+                for status, label in queue.STATUS_LABELS.items()
+            ],
+            columns=len(queue.STATUS_LABELS),
+        )
 
         st.dataframe(
             _tasks_view(tasks).drop(columns=["task_id"]),
@@ -176,7 +181,7 @@ def render_ingest_queue_block(project_id: str, work_dir: str) -> None:
             hide_index=True,
         )
 
-    action_cols = st.columns([1, 1, 2])
+    action_cols = st.columns([2, 1, 1])
     with action_cols[0]:
         if st.button("Обработать очередь сейчас", type="primary"):
             _run_queue_now(project_id, work_dir)
