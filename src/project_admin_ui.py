@@ -37,6 +37,7 @@ from services.metrics_compute import format_int
 from services.project_settings import (
     chart_label_settings_from_project_settings,
     dashboard_view_settings_from_project_settings,
+    merged_dashboard_view_settings,
     project_settings_from_row,
     report_branding_from_project_settings,
     report_sections_from_project_settings,
@@ -501,12 +502,17 @@ def render_project_manager(projects: pd.DataFrame) -> None:
                 updated_settings["report_sections"] = list(report_sections) or list(
                     REPORT_SECTION_OPTIONS.keys()
                 )
-                updated_settings["dashboard_view_settings"] = {
-                    "default_view_mode": default_view_mode,
-                    "start_section": start_section,
-                    "comparison_visible_charts": list(default_comparison_charts),
-                    "client_hide_technical": bool(client_hide_technical),
-                }
+                updated_settings["dashboard_view_settings"] = (
+                    merged_dashboard_view_settings(
+                        current_settings,
+                        {
+                            "default_view_mode": default_view_mode,
+                            "start_section": start_section,
+                            "comparison_visible_charts": list(default_comparison_charts),
+                            "client_hide_technical": bool(client_hide_technical),
+                        },
+                    )
+                )
                 update_project(
                     project_id,
                     project_name=new_name,

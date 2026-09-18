@@ -89,7 +89,12 @@ COMPARISON_CHART_BLOCKS = [
 ]
 
 DEFAULT_DASHBOARD_VIEW_SETTINGS = {
-    "default_view_mode": "client",  # client / analyst
+    # Кого этот дефолт касается: только редактора и владельца — зритель всегда
+    # в клиентском виде независимо от настройки. Раньше здесь стоял "client", и
+    # это было безобидно, пока клиентский вид почти ничего не прятал. Теперь он
+    # прячет правку целиком, и прежний дефолт означал бы, что аналитик
+    # открывает проект без единого рабочего инструмента.
+    "default_view_mode": "analyst",  # client / analyst
     "start_section": "Обзор",
     "comparison_visible_charts": ["Динамика основных метрик", "Динамика тональности"],
     "client_hide_technical": True,

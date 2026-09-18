@@ -121,3 +121,6 @@ jobs:
 
       - name: Дымовой тест интерфейса
         run: python tests/test_ui_smoke.py
+
+      - name: Роли и клиентский предпросмотр
+        run: python tests/test_roles.py

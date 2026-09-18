@@ -563,6 +563,19 @@ def main() -> None:
     hide_technical = client_view and bool(
         dashboard_view_settings.get("client_hide_technical", True)
     )
+    # Клиентский вид — это предпросмотр кабинета заказчика, а не смена
+    # оформления. Раньше он прятал ровно две настройки в поповере «Вид» и одно
+    # слово в подписи, поэтому владелец справедливо не видел разницы: правка
+    # инфоповодов, формулы методики, веса BPI, разметка брендов и «Редактировать
+    # саммари» оставались на экране — то есть показать проект заказчику «как он
+    # его увидит» было нельзя. Теперь внутри разделов роль понижается до зрителя.
+    #
+    # Понижение только сужает права, расширить их так нельзя: у зрителя
+    # role_rank уже минимальный, и content_role никогда не выше настоящей роли.
+    # Сайдбар и панель «⚙️ Вид» считаются по настоящей роли — иначе из
+    # предпросмотра нельзя было бы выйти.
+    client_preview = hide_technical and role_rank(role) >= role_rank("editor")
+    content_role = "viewer" if client_preview else role
     saved_blocks = set(
         dashboard_view_settings.get("main_visible_blocks")
         or ["metrics", "comparison", "summary", "threshold"]
@@ -793,7 +806,7 @@ def main() -> None:
                 enriched_messages,
                 periods,
                 selected_period_ids,
-                role_rank(role) >= role_rank("editor"),
+                role_rank(content_role) >= role_rank("editor"),
             )
             render_saved_ai_text(
                 project_id,
@@ -806,7 +819,7 @@ def main() -> None:
         elif page == "Инфоповоды":
             _section_events(
                 project_id,
-                role,
+                content_role,
                 events_agg,
                 enriched_messages,
                 manual_state,
@@ -854,11 +867,12 @@ def main() -> None:
                 enriched_messages,
                 events_agg,
                 periods,
-                role,
+                content_role,
                 profile=project_profile,
                 metrics=report_metrics,
                 branding=report_branding,
                 project_settings=current_project_settings,
+                client_preview=client_preview,
             )
 
     render_section_safely(page, _render_selected_section, _details=show_error_details)

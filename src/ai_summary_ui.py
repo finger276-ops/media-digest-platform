@@ -249,9 +249,13 @@ def render_ai_summary_panel(
     role: str = "",
     metrics: dict[str, Any] | None = None,
     project_settings: dict[str, Any] | None = None,
+    client_preview: bool = False,
 ) -> None:
     """Блок «Тексты от ИИ» в разделе «Отчёт»."""
-    owner = is_platform_owner()
+    # В предпросмотре клиентского вида владелец смотрит на проект глазами
+    # заказчика, а заказчик генерацию не видит никогда. Признак владельца здесь
+    # живёт отдельно от роли (session_state), поэтому понижения роли мало.
+    owner = is_platform_owner() and not client_preview
     if not can_generate_ai(role, project_settings, is_platform_owner=owner):
         return
 

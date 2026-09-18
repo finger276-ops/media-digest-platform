@@ -143,6 +143,7 @@ def render_period_summary(
     metrics: dict[str, Any] | None = None,
     branding: dict[str, Any] | None = None,
     project_settings: dict[str, Any] | None = None,
+    client_preview: bool = False,
 ) -> None:
     """Unified editable/exportable period summary for all project profiles."""
     st.subheader("Саммари периода")
@@ -167,6 +168,7 @@ def render_period_summary(
         role=role,
         metrics=metrics,
         project_settings=project_settings,
+        client_preview=client_preview,
     )
 
     metrics = metrics or overview_metrics(messages)

@@ -37,6 +37,7 @@ python tests/test_observability.py           # доставка ошибок в�
 python tests/test_except_hygiene.py          # гигиена except: молчание должно быть обосновано
 python tests/test_tag_tier_analytics.py      # аналитика по уровням тегов: own/subtree, покрытие
 python tests/test_ui_smoke.py                # интерфейс: приложение стартует, разделы рисуются
+python tests/test_roles.py                   # роли: что видит зритель/редактор/владелец, клиентский предпросмотр
 ```
 
 Каждый тест печатает список проверок и завершается с ненулевым кодом при провале,

@@ -36,6 +36,27 @@ def project_settings_from_row(row) -> dict[str, Any]:
     return settings if isinstance(settings, dict) else {}
 
 
+def merged_dashboard_view_settings(
+    current_settings: dict[str, Any] | None, updates: dict[str, Any]
+) -> dict[str, Any]:
+    """Дополнить настройки вида, а не заменить их целиком.
+
+    В одном словаре живут две группы ключей с разными хозяевами: карточка
+    проекта пишет вид по умолчанию, стартовый раздел, набор графиков сравнения
+    и «скрывать техническое», а поповер «⚙️ Вид» — порог склейки заголовков и
+    набор блоков в шапке. Карточка про вторую группу не знает и, записывая
+    словарь целиком, молча её стирала: владелец заходил поправить название
+    проекта и сбрасывал порог склейки и «Метрики периода в шапке». По зрителю
+    било сильнее всего — у него набор блоков берётся только отсюда, и
+    переопределить его в интерфейсе нечем.
+    """
+    merged = dict(
+        (current_settings or {}).get("dashboard_view_settings") or {}
+    )
+    merged.update(updates)
+    return merged
+
+
 def valid_hex_color(value: Any, fallback: str) -> str:
     text = str(value or "").strip()
     if re.match(r"^#[0-9a-fA-F]{6}$", text):
