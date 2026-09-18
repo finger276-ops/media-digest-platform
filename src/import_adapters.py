@@ -1,4 +1,4 @@
-"""Import adapters for different monitoring-system exports.
+﻿"""Import adapters for different monitoring-system exports.
 
 The dashboard works with one canonical table that is close to the original
 Mediologia CSV schema. This module reads CSV/XLSX files from different systems
@@ -167,6 +167,9 @@ CANONICAL_COLUMNS = [
     # всех отзывов и ровно ни у чего другого — это их собственная метрика, и
     # без неё раздел репутации товара показывать нечего.
     "Оценка",
+    # Название товара, к которому относится отзыв. Без него раздел репутации
+    # сводит все отзывы в одну группу «Товар не указан».
+    "Товар",
     # Поля, которые система отдаёт, а платформа до сих пор выбрасывала. Сверка
     # csv и xlsx одной выгрузки показала, что мимо канона проходит девять
     # колонок с данными, и «Роль объекта» с «Языком» заполнены у всех строк.
@@ -655,6 +658,39 @@ def _note_normalized(kind: str, count: int) -> None:
         normalized[kind] = normalized.get(kind, 0) + int(count)
 
 
+def first_filled(df: pd.DataFrame, candidates: Iterable[str]) -> pd.Series:
+    """Первая колонка, в которой есть хоть одно значение.
+
+    first_existing останавливается на первом ПОДХОДЯЩЕМ ИМЕНИ, даже если
+    колонка пустая насквозь. На реальной выгрузке это выглядело так: в файле
+    есть и «Оценка», и «Рейтинг», оценка пустая, рейтинг заполнен — и раздел
+    отзывов показывал прочерк вместо средней, потому что до «Рейтинга» дело не
+    доходило.
+
+    От _coalesce отличается сознательно: там значения берутся построчно из
+    разных колонок, здесь выбирается одна колонка целиком. Для оценки построчно
+    нельзя — если «Оценка» заполнена только у отзывов, а «Рейтинг» есть у всех
+    строк и означает рейтинг источника, построчная склейка выдала бы оценку
+    товара у каждой новости.
+    """
+    lower_map = {str(c).strip().lower(): c for c in df.columns}
+    fallback: str | None = None
+    for candidate in candidates:
+        column = lower_map.get(candidate.strip().lower())
+        if column is None:
+            continue
+        if fallback is None:
+            fallback = column
+        values = df[column].fillna("").astype(str)
+        if values.str.strip().ne("").any():
+            _note_consumed(column)
+            return values
+    if fallback is None:
+        return pd.Series([""] * len(df), index=df.index, dtype="object")
+    _note_consumed(fallback)
+    return df[fallback].fillna("").astype(str)
+
+
 def _coalesce(df: pd.DataFrame, candidates: Iterable[str]) -> pd.Series:
     """Первое непустое значение по строке, а не первая непустая колонка.
 
@@ -916,7 +952,7 @@ def _canonicalize_cleaned(
     recognized = first_existing(
         df, ["Автораспознанный текст", "Распознанный текст", "OCR", "Расшифровка"]
     )
-    title = first_existing(df, ["Заголовок", "Title"])
+    title = first_filled(df, ["Заголовок", "Title"])
     if detected == "brand_analytics":
         out["Сообщение"] = _join_text_parts(title, message)
     else:
@@ -972,8 +1008,28 @@ def _canonicalize_cleaned(
     )
     # Дробные значения вроде «4.8» — это сводный рейтинг карточки, а не ошибка,
     # поэтому колонка остаётся текстовой и разбирается числом уже в аналитике.
-    out["Оценка"] = first_existing(
-        df, ["Оценка", "Оценка от 1 до 5", "Рейтинг", "Оценка товара", "Rating", "Score"]
+    out["Оценка"] = first_filled(
+        df,
+        [
+            "Оценка",
+            "Оценка от 1 до 5",
+            "Оценка товара",
+            "Оценка пользователя",
+            "Рейтинг товара",
+            "Балл",
+            "Звёзды",
+            "Звезды",
+            "Рейтинг",
+            "Rating",
+            "Stars",
+            "Score",
+        ],
+    )
+    # Название товара в отзыве. У Brand Analytics оно приезжает «Заголовком»
+    # карточки, но выгрузки маркетплейсов и универсальный CSV называют колонку
+    # прямо — и до сих пор она выбрасывалась целиком.
+    out["Товар"] = first_filled(
+        df, ["Товар", "Название товара", "Продукт", "Product", "Item"]
     )
     out["Роль объекта"] = first_existing(
         df, ["Роль объекта", "Роль", "Object role", "Object Role"]

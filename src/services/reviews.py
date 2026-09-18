@@ -38,7 +38,9 @@ _MARKER_PATTERN = re.compile(
 
 _TEXT_COLUMNS = ("text_clean", "Сообщение", "message_raw", "Текст")
 _RATING_COLUMNS = ("rating", "Оценка")
-_PRODUCT_COLUMNS = ("title", "Заголовок")
+# Отдельная колонка товара главнее заголовка: у Brand Analytics товар приезжает
+# заголовком карточки, но если выгрузка назвала колонку прямо, верить надо ей.
+_PRODUCT_COLUMNS = ("product", "Товар", "title", "Заголовок")
 
 # Оценки приходят и дробные — это сводный рейтинг карточки товара, а не ошибка.
 RATING_MIN = 1.0
@@ -49,9 +51,24 @@ LOW_RATING = 3.0
 
 
 def _column(messages: pd.DataFrame, names: tuple[str, ...]) -> pd.Series:
+    """Первая из колонок, в которой есть хоть что-то.
+
+    Пустую колонку пропускаем сознательно. Импорт заводит «Товар» всегда, даже
+    когда в файле такой колонки не было, — и если брать просто первую
+    существующую, пустой «Товар» заслонит «Заголовок», в котором у Brand
+    Analytics и лежит название товара.
+    """
+    fallback: pd.Series | None = None
     for name in names:
-        if name in messages.columns:
-            return messages[name].fillna("").astype(str)
+        if name not in messages.columns:
+            continue
+        values = messages[name].fillna("").astype(str)
+        if fallback is None:
+            fallback = values
+        if values.str.strip().ne("").any():
+            return values
+    if fallback is not None:
+        return fallback
     return pd.Series([""] * len(messages), index=messages.index, dtype="object")
 
 

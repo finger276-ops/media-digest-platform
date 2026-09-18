@@ -251,6 +251,32 @@ check(
 )
 check("пустой период не падает", review_rows(pd.DataFrame()).empty)
 
+print("8.7. Источник товара: отдельная колонка главнее заголовка, но пустая не в счёт")
+# Импорт заводит «Товар» всегда, даже когда в файле такой колонки не было.
+# Если брать первую существующую, пустой «Товар» заслонит «Заголовок», где у
+# Brand Analytics и лежит название товара.
+with_empty_product = pd.DataFrame(
+    [dict(review("Отзыв", rating="5", title="Гибкая черепица 3м2"), product="")]
+)
+check(
+    "пустая колонка товара не заслоняет заголовок",
+    reviews_by_product(with_empty_product).iloc[0]["Товар"] == "Гибкая черепица 3м2",
+    str(reviews_by_product(with_empty_product).to_dict("records")),
+)
+with_product = pd.DataFrame(
+    [
+        dict(
+            review("Отзыв", rating="5", title="Карточка на маркетплейсе"),
+            product="Гвозди кровельные",
+        )
+    ]
+)
+check(
+    "заполненная колонка товара главнее заголовка",
+    reviews_by_product(with_product).iloc[0]["Товар"] == "Гвозди кровельные",
+    str(reviews_by_product(with_product).to_dict("records")),
+)
+
 print("9. Выгрузка без признака отзывов")
 # Медиалогия и универсальный формат не отдают тип площадки: раздел просто
 # останется пустым, но ничего не сломает и не выдумает.
