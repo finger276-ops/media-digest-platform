@@ -24,6 +24,7 @@ import streamlit as st
 
 from metric_cards_ui import metric_card, render_metric_row
 from services.cached_store import list_projects
+from services.roles import ROLE_TITLES
 from services.perf import perf_block
 from services.session_presence import (
     cleanup_stale_sessions,
@@ -42,7 +43,9 @@ HEARTBEAT_MIN_INTERVAL_SECONDS = 30
 ONLINE_WINDOW_SECONDS = 100
 RECENT_WINDOW_SECONDS = 30 * 60
 
-ROLE_LABELS = {"owner": "Владелец", "editor": "Редактор", "viewer": "Просмотр"}
+# Названия ролей живут в одном месте — services/roles.py. Свой словарь здесь
+# уже разошёлся с остальным интерфейсом («Редактор» против «Аналитика»).
+ROLE_LABELS = ROLE_TITLES
 
 
 def _session_id() -> str:

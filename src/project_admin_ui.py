@@ -34,7 +34,7 @@ from services.dashboard_config import (
 )
 from services.formatting import fmt_date
 from services.metrics_compute import format_int
-from services.roles import role_rank
+from services.roles import role_rank, role_title
 from services.project_settings import (
     DEMO_AI_LIMIT,
     chart_label_settings_from_project_settings,
@@ -80,7 +80,7 @@ def render_project_access(is_admin: bool) -> tuple[str | None, str, pd.DataFrame
             if not project_row.empty
             else project_id
         )
-        st.sidebar.success(f"Доступ: {project_name} · {role}")
+        st.sidebar.success(f"Доступ: {project_name} · {role_title(role)}")
         if st.sidebar.button("Сменить проект / выйти"):
             st.session_state.pop("platform_project_id", None)
             st.session_state.pop("platform_project_role", None)
@@ -135,7 +135,7 @@ def render_project_manager(
     if not is_admin:
         st.caption(
             "Показан проект, в который вы вошли. Созданный проект открывается "
-            "кодом редактора, который вы ему зададите."
+            "кодом аналитика, который вы ему зададите."
         )
     with st.expander("Создать проект", expanded=projects.empty):
         name = st.text_input("Название проекта", key="new_project_name")
@@ -148,10 +148,16 @@ def render_project_manager(
             help="Профиль не привязывает платформу к одной отрасли: по умолчанию темы берутся из колонок выгрузки и универсальных правил.",
         )
         viewer_code = st.text_input(
-            "Код просмотра", type="password", key="new_viewer_code"
+            "Код пользователя",
+            type="password",
+            key="new_viewer_code",
+            help="Смотрит аналитику, выбирает периоды и скачивает отчёт.",
         )
         editor_code = st.text_input(
-            "Код редактора", type="password", key="new_editor_code"
+            "Код аналитика",
+            type="password",
+            key="new_editor_code",
+            help="Всё то же плюс правка данных, загрузка выгрузок и настройки проекта.",
         )
         if st.button("Создать проект", type="primary"):
             if not name.strip():
@@ -171,7 +177,7 @@ def render_project_manager(
                     # надо сразу, иначе человек будет искать его в списке.
                     st.info(
                         "Чтобы перейти в новый проект, нажмите «Сменить проект "
-                        "/ выйти» и войдите кодом редактора, который вы только "
+                        "/ выйти» и войдите кодом аналитика, который вы только "
                         "что задали."
                     )
                 else:
@@ -497,12 +503,12 @@ def render_project_manager(
 
             st.caption("Коды доступа заполняйте только если хотите заменить текущие.")
             new_viewer_code = st.text_input(
-                "Новый код просмотра",
+                "Новый код пользователя",
                 type="password",
                 key=f"edit_viewer_code_{project_id}",
             )
             new_editor_code = st.text_input(
-                "Новый код редактора",
+                "Новый код аналитика",
                 type="password",
                 key=f"edit_editor_code_{project_id}",
             )

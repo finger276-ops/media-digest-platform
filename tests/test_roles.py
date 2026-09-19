@@ -551,8 +551,41 @@ check(
     danger[-200:],
 )
 
+print("13. Подписи ролей отдельно от идентификаторов")
+from services.roles import ROLE_TITLES, role_rank, role_title  # noqa: E402
+
+# Идентификаторы лежат в сохранённых настройках, сессиях и записях присутствия.
+# Переименование ради вывески сломало бы уже выданные доступы, поэтому здесь
+# проверяется, что менялись именно подписи.
+check("идентификатор зрителя не переименован", role_rank("viewer") == 1)
+check("идентификатор редактора не переименован", role_rank("editor") == 2)
+check("идентификатор владельца не переименован", role_rank("owner") == 3)
+check("зритель показывается как «Пользователь»", role_title("viewer") == "Пользователь")
+check("редактор показывается как «Аналитик»", role_title("editor") == "Аналитик")
+check("владелец подписан полностью", role_title("owner") == "Владелец платформы")
+check("незнакомая роль показывается как есть", role_title("хз") == "хз")
+check("пустая роль не падает", role_title(None) == "")
+
+from session_presence_ui import ROLE_LABELS  # noqa: E402
+
+check(
+    "таблица сессий берёт подписи оттуда же, а не свои",
+    ROLE_LABELS is ROLE_TITLES,
+    str(ROLE_LABELS),
+)
+
+analyst_side = open_as("editor")
+sidebar_text = " ".join(
+    str(m.value) for m in analyst_side.sidebar.markdown
+) + " ".join(str(s.value) for s in analyst_side.sidebar.success)
+check(
+    "в сайдбаре роль подписана по-человечески, а не идентификатором",
+    "editor" not in sidebar_text,
+    sidebar_text[:200],
+)
+
 print()
 if failures:
     print(f"ПРОВАЛЕНО: {len(failures)} → {failures}")
     raise SystemExit(1)
-print("Роли, клиентский вид, демо-режим и настройки проекта работают.")
+print("Роли, клиентский вид, демо-режим, настройки проекта и подписи работают.")
