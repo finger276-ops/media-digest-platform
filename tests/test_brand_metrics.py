@@ -1,4 +1,4 @@
-"""Проверка индексов бренда на примерах расчёта из гайда.
+﻿"""Проверка индексов бренда на примерах расчёта из гайда.
 
 Каждый блок воспроизводит пример из Metric Calculation Guide и сверяет
 результат платформы с числом, которое указано в гайде.
@@ -449,6 +449,26 @@ check("пустые настройки дают пустые списки",
       category_brands_from_project_settings({}) == {"own": [], "competitors": []})
 check("None не падает",
       category_brands_from_project_settings(None) == {"own": [], "competitors": []})
+
+print("Подписи изменений на карточках")
+# Числа на платформе пишутся с запятой, но замена по всей строке заодно
+# съедала точки в единице измерения: на карточке стояло «+1,14 п,п,».
+from brand_metrics_ui import _metric_delta  # noqa: E402
+
+card = {"code": "NSS", "value": 4.35, "available": True}
+text, _color = _metric_delta(card, {"NSS": 3.21})
+check("десятичная запятая в числе", text is not None and "1,14" in text, str(text))
+check("единица измерения не искажена", text is not None and text.endswith(" п.п."), str(text))
+check("в подписи нет «п,п,»", text is not None and "п,п," not in text, str(text))
+down, _ = _metric_delta({"code": "NSS", "value": 3.0, "available": True}, {"NSS": 4.5})
+check("падение показывается со знаком минус", down == "-1,50 п.п.", str(down))
+same, _ = _metric_delta({"code": "NSS", "value": 4.35, "available": True}, {"NSS": 4.35})
+check("изменение меньше сотой не показывается", same is None, str(same))
+check(
+    "без предыдущего периода изменения нет",
+    _metric_delta(card, None)[0] is None,
+    str(_metric_delta(card, None)),
+)
 
 print()
 if failures:

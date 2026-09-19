@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """Раздел «Индексы бренда».
 
 Показывает рассчитанные индексы (BPI, NSS, SES, ToneVolumeScore, SOV,
@@ -186,7 +186,9 @@ def _metric_delta(
     if abs(change) < 0.005:
         return None, DELTA_NEUTRAL
     color = DELTA_NORMAL if metric_direction(code) == "up" else DELTA_NEUTRAL
-    return f"{change:+.2f} п.п.".replace(".", ","), color
+    # Запятая вместо точки — только в числе. Замена по всей строке превращала
+    # единицу измерения в «п,п,»: точки в «п.п.» попадали под ту же замену.
+    return f"{change:+.2f}".replace(".", ",") + " п.п.", color
 
 
 def render_metric_cards(

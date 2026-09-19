@@ -444,9 +444,16 @@ def metric_delta(current: float, previous: float) -> str:
 
 
 def pp_delta(current_share: float, previous_share: float) -> str:
+    """Изменение доли в процентных пунктах.
+
+    Запятая ставится только в числе: точки в «п.п.» — часть единицы измерения,
+    и замена по всей строке превращала бы их в «п,п,». Этот разделитель был
+    последним местом, где число писалось с точкой, — рядом на том же экране
+    карточки индексов бренда показывали запятую.
+    """
     diff = (float(current_share or 0) - float(previous_share or 0)) * 100
     sign = "+" if diff > 0 else ""
-    return f"{sign}{diff:.1f} п.п."
+    return f"{sign}{diff:.1f}".replace(".", ",") + " п.п."
 
 
 def comparison_row(

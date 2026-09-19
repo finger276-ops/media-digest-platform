@@ -398,6 +398,18 @@ check("granularity='week' даёт агрегат с недельными точ
 month_agg = build_comparison_metrics(monthly_messages, pd.DataFrame(), [], granularity="month")
 check("granularity='month' даёт агрегат с месячными точками", month_agg is not None and len(month_agg["comparison_sequence"]) == 2)
 
+print("13. Изменение доли в процентных пунктах")
+# Разделитель был последним местом, где число писалось с точкой: на одном
+# экране карточки индексов бренда показывали «+1,14», а карточки тональности
+# рядом — «+1.4». Точки в самой единице измерения при этом трогать нельзя.
+from services.period_comparison import pp_delta  # noqa: E402
+
+check("рост со знаком и запятой", pp_delta(0.48, 0.44) == "+4,0 п.п.", pp_delta(0.48, 0.44))
+check("падение со знаком минус", pp_delta(0.40, 0.52) == "-12,0 п.п.", pp_delta(0.40, 0.52))
+check("единица измерения не искажена", pp_delta(0.48, 0.44).endswith(" п.п."), pp_delta(0.48, 0.44))
+check("в подписи нет «п,п,»", "п,п," not in pp_delta(0.48, 0.44), pp_delta(0.48, 0.44))
+check("без изменения знак не рисуется", pp_delta(0.5, 0.5) == "0,0 п.п.", pp_delta(0.5, 0.5))
+
 print()
 if failures:
     print(f"ПРОВАЛЕНО: {len(failures)}")
