@@ -41,6 +41,7 @@ from services.metrics_compute import (
     percent_text,
     sentiment_counts,
 )
+from services.project_settings import DEMO_MESSAGE
 from services.roles import role_rank
 from services.story_recovery import (
     ORIGIN_CLUSTERED,
@@ -100,6 +101,7 @@ def render_events_table(
     *,
     can_edit: bool,
     manual_state: dict[str, Any] | None = None,
+    read_only: bool = False,
 ) -> pd.Series | None:
     """Таблица инфоповодов: описание правится прямо здесь.
 
@@ -115,14 +117,20 @@ def render_events_table(
     opened = str(st.session_state.get(state_key) or "")
     keys = [str(k) for k in events.get("group_key", pd.Series(dtype=str))]
     editor_key = f"events_editor_{project_id}"
+    # В демо столбец описания остаётся на виду — гость должен видеть, что тема
+    # правится руками, — но запись выключена. Поэтому «показывать как
+    # аналитику» и «разрешать запись» здесь разные условия.
+    can_write = can_edit and not read_only
     # До создания виджета: версии должны быть заморожены в тот же момент,
     # когда таблица впервые показана редактору.
-    versions = _captured_versions(editor_key, manual_state) if can_edit else {}
+    versions = _captured_versions(editor_key, manual_state) if can_write else {}
 
     work = show.copy()
     work.insert(0, OPEN_COLUMN, [key == opened for key in keys])
 
-    if not can_edit:
+    if read_only:
+        st.caption(f"Описание правится прямо в таблице. {DEMO_MESSAGE}.")
+    elif not can_edit:
         st.caption("Отметьте инфоповод, чтобы раскрыть его сообщения.")
 
     edited = st.data_editor(
@@ -147,12 +155,12 @@ def render_events_table(
         },
         disabled=(
             ["Сюжет / инфоповод", "Период", "Сообщений", "Источников", "Негатив", "Важность"]
-            if can_edit
+            if can_write
             else [c for c in work.columns if c != OPEN_COLUMN]
         ),
     )
 
-    if can_edit:
+    if can_write:
         _save_edited_descriptions(
             project_id, show, edited, events, versions=versions, editor_key=editor_key
         )
@@ -288,6 +296,7 @@ def _residual_messages_table(
     *,
     can_edit: bool,
     manual_state: dict[str, Any] | None = None,
+    read_only: bool = False,
 ) -> None:
     """Сообщения вне инфоповодов — с возможностью отнести их к теме.
 
@@ -332,6 +341,29 @@ def _residual_messages_table(
             column_config={
                 "Ссылка": st.column_config.LinkColumn("Ссылка", display_text="Открыть")
             },
+        )
+        return
+
+    if read_only:
+        # Столбец переноса оставляем на виду, но запертым: в демо важно, что
+        # видно саму возможность отнести сообщение к теме.
+        st.caption(
+            "Если сообщение относится к одной из тем периода, его можно "
+            f"отнести туда последним столбцом. {DEMO_MESSAGE}."
+        )
+        st.data_editor(
+            view,
+            hide_index=True,
+            width="stretch",
+            key=f"residual_moves_{project_id}",
+            column_config={
+                "Ссылка": st.column_config.LinkColumn("Ссылка", display_text="Открыть"),
+                "Сообщение": st.column_config.TextColumn("Сообщение", width="large"),
+                MOVE_COLUMN: st.column_config.SelectboxColumn(
+                    MOVE_COLUMN, options=options, width="medium", required=False
+                ),
+            },
+            disabled=True,
         )
         return
 
@@ -405,6 +437,7 @@ def render_residual_events(
     *,
     can_edit: bool = False,
     manual_state: dict[str, Any] | None = None,
+    read_only: bool = False,
 ) -> None:
     """Показать то, что не собралось в инфоповоды, отдельным блоком.
 
@@ -466,6 +499,7 @@ def render_residual_events(
                     events_agg,
                     can_edit=can_edit,
                     manual_state=manual_state,
+                    read_only=read_only,
                 )
                 if len(subset) > RESIDUAL_MESSAGES_SHOWN:
                     st.caption(
@@ -725,12 +759,14 @@ def render_title_merge_report(
     events_agg: pd.DataFrame,
     can_edit: bool,
     manual_state: dict[str, Any] | None = None,
+    read_only: bool = False,
 ) -> None:
     """Показать, какие заголовки платформа объединила автоматически.
 
     Автоматическая склейка полезна ровно до тех пор, пока её видно: аналитик
     должен уметь проверить каждое решение и отменить неверное.
     """
+    demo_help = DEMO_MESSAGE if read_only else None
     report = st.session_state.get(f"title_merge_report_{project_id}") or []
     threshold = float(
         st.session_state.get(f"title_merge_threshold_{project_id}") or 0.0
@@ -747,6 +783,8 @@ def render_title_merge_report(
                         "Вернуть",
                         key=f"reallow_title_{project_id}_{abs(hash(title))}",
                         width="stretch",
+                        disabled=read_only,
+                        help=demo_help,
                     ):
                         delete_manual(
                             project_id,
@@ -788,6 +826,8 @@ def render_title_merge_report(
                             "Не склеивать",
                             key=f"unmerge_title_{project_id}_{index}_{abs(hash(variant))}",
                             width="stretch",
+                            disabled=read_only,
+                            help=demo_help,
                         ):
                             row_key = (
                                 "title_merge_block::"
@@ -879,10 +919,15 @@ def render_events(
     events_agg: pd.DataFrame,
     messages: pd.DataFrame,
     manual_state: dict[str, Any],
+    read_only: bool = False,
 ) -> None:
     st.subheader("Инфоповоды")
     render_assembly_notice(messages)
+    # can_edit решает, показывать ли блоки правки; read_only — разрешать ли
+    # запись. В демо первое остаётся истиной, второе нет.
     can_edit = role_rank(role) >= role_rank("editor")
+    can_write = can_edit and not read_only
+    demo_help = DEMO_MESSAGE if read_only else None
 
     if can_edit:
         with st.expander("Создать инфоповод вручную", expanded=False):
@@ -892,7 +937,11 @@ def render_events(
             description = st.text_area("Описание", key="new_manual_event_description")
             tags = st.text_input("Теги", key="new_manual_event_tags")
             if st.button(
-                "Создать инфоповод", type="primary", key="create_manual_event"
+                "Создать инфоповод",
+                type="primary",
+                key="create_manual_event",
+                disabled=read_only,
+                help=demo_help,
             ):
                 if not title.strip():
                     st.error("Укажите название инфоповода.")
@@ -905,7 +954,9 @@ def render_events(
         st.info("Инфоповоды не найдены.")
         return
 
-    render_title_merge_report(project_id, events_agg, can_edit, manual_state)
+    render_title_merge_report(
+        project_id, events_agg, can_edit, manual_state, read_only=read_only
+    )
 
     word = st.text_input(
         "Фильтр по слову в сообщениях",
@@ -1031,7 +1082,12 @@ def render_events(
         }
     )
     selected_row = render_events_table(
-        project_id, show, filtered_events, can_edit=can_edit, manual_state=manual_state
+        project_id,
+        show,
+        filtered_events,
+        can_edit=can_edit,
+        manual_state=manual_state,
+        read_only=read_only,
     )
 
     render_residual_events(
@@ -1041,6 +1097,7 @@ def render_events(
         filtered_events,
         can_edit=can_edit,
         manual_state=manual_state,
+        read_only=read_only,
     )
 
     if selected_row is None:
@@ -1078,6 +1135,8 @@ def render_events(
                 if st.button(
                     "Сохранить правки",
                     key=f"save_event_edit_{selected.get('group_key')}",
+                    disabled=read_only,
+                    help=demo_help,
                 ):
                     try:
                         for event_id in selected_ids:
@@ -1103,7 +1162,10 @@ def render_events(
                         st.rerun()
             with c2:
                 if st.button(
-                    "Скрыть инфоповод", key=f"hide_event_{selected.get('group_key')}"
+                    "Скрыть инфоповод",
+                    key=f"hide_event_{selected.get('group_key')}",
+                    disabled=read_only,
+                    help=demo_help,
                 ):
                     try:
                         for event_id in selected_ids:
@@ -1139,7 +1201,10 @@ def render_events(
                         key=f"merge_target_{selected.get('group_key')}",
                     )
                     if st.button(
-                        "Объединить", key=f"merge_event_{selected.get('group_key')}"
+                        "Объединить",
+                        key=f"merge_event_{selected.get('group_key')}",
+                        disabled=read_only,
+                        help=demo_help,
                     ):
                         target_event_id = target[0]
                         try:

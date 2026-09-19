@@ -340,8 +340,129 @@ check(
     "",
 )
 
+print("8. Демо-проект: видно как аналитику, менять нельзя ничего")
+from services.project_settings import (  # noqa: E402
+    DEMO_AI_LIMIT,
+    demo_ai_runs_left,
+    demo_ai_runs_used,
+    is_demo_project,
+)
+
+
+import streamlit as st  # noqa: E402
+
+
+def set_demo(enabled, runs_used=None):
+    """Переключить демо-режим прямо в поддельной базе.
+
+    Кеш сбрасывается целиком, а не через clear_platform_caches: тот работает
+    бампом версии, а версия живёт в session_state, и у каждого нового AppTest
+    она начинается заново — приложение увидело бы настройки первого запуска.
+    """
+    settings = CLIENT.db["platform_projects"][0]["settings"]
+    settings["demo_mode"] = enabled
+    if runs_used is not None:
+        settings["demo_ai_runs"] = runs_used
+    st.cache_data.clear()
+
+
+check("обычный проект демо-режимом не считается", not is_demo_project({}))
+check("мусор в флаге — не демо", not is_demo_project({"demo_mode": "да"}))
+check("явное True — демо", is_demo_project({"demo_mode": True}))
+# Счётчик не сбрасывается, поэтому его чтение обязано быть устойчивым:
+# демо-проект живёт долго, и мусор в настройках не должен открывать лимит заново.
+check("счётчик запусков: мусор считается нулём", demo_ai_runs_used({"demo_ai_runs": "три"}) == 0)
+check("счётчик запусков: отрицательное считается нулём", demo_ai_runs_used({"demo_ai_runs": -5}) == 0)
+check(
+    "остаток лимита не уходит в минус",
+    demo_ai_runs_left({"demo_ai_runs": DEMO_AI_LIMIT + 7}) == 0,
+)
+check(
+    "у нетронутого демо доступен весь лимит",
+    demo_ai_runs_left({}) == DEMO_AI_LIMIT,
+)
+
+set_demo(True)
+demo = open_as("editor", section="Инфоповоды")
+check("демо-проект открылся", not demo.exception, str(demo.exception))
+demo_side = sidebar_buttons(demo)
+for closed in ["Загрузка файла", "История периодов", "Автозагрузка"]:
+    check(f"в демо закрыта «{closed}»", closed not in demo_side, str(demo_side))
+demo_labels = labels(demo)
+# Блоки остаются на виду: демо для того и нужно, чтобы показать возможности.
+check(
+    "блок ручного создания инфоповода в демо виден",
+    "Создать инфоповод вручную" in demo_labels,
+    str(demo_labels),
+)
+create_buttons = [b for b in demo.button if str(b.label) == "Создать инфоповод"]
+check("кнопка создания найдена", bool(create_buttons), str([str(b.label) for b in demo.button]))
+check(
+    "кнопка создания в демо выключена",
+    bool(create_buttons) and create_buttons[0].disabled,
+    str([(str(b.label), b.disabled) for b in demo.button]),
+)
+
+demo_report = open_as("editor", section="Отчёт")
+check("раздел «Отчёт» в демо открылся", not demo_report.exception, str(demo_report.exception))
+demo_report_labels = labels(demo_report)
+check(
+    "правка саммари в демо видна, но заперта",
+    "Редактировать саммари" in demo_report_labels,
+    str(demo_report_labels),
+)
+save_summary = [b for b in demo_report.button if str(b.label) == "Сохранить саммари"]
+check(
+    "кнопка сохранения саммари в демо выключена",
+    bool(save_summary) and save_summary[0].disabled,
+    str([(str(b.label), b.disabled) for b in demo_report.button]),
+)
+check(
+    "выгрузка отчёта в демо остаётся",
+    "Выгрузить саммари" in demo_report_labels,
+    str(demo_report_labels),
+)
+
+print("9. Доступ к ИИ в демо")
+# Провайдер в тестах не настроен, поэтому панель выходит на сообщении «не
+# настроена» и до кнопок генерации не доходит — проверять их выключенность
+# здесь было бы самообманом. Проверяем то, что реально ново: демо открывает
+# саму панель, не спрашивая настройку ai_access, которая по умолчанию
+# разрешает генерацию только владельцу. Арифметика лимита проверена выше на
+# demo_ai_runs_left/used.
+set_demo(True)
+demo_ai = open_as("editor", section="Отчёт")
+check(
+    "в демо панель «Тексты от ИИ» открыта редактору без настройки ai_access",
+    "Тексты от ИИ" in labels(demo_ai),
+    str(labels(demo_ai)),
+)
+set_demo(False)
+plain_ai = open_as("editor", section="Отчёт")
+check(
+    "вне демо той же роли панель ИИ закрыта",
+    "Тексты от ИИ" not in labels(plain_ai),
+    str(labels(plain_ai)),
+)
+
+print("10. Владельца платформы демо-режим не ограничивает")
+set_demo(True)
+demo_owner = open_as("owner", section="Инфоповоды")
+owner_create = [b for b in demo_owner.button if str(b.label) == "Создать инфоповод"]
+check(
+    "владелец в демо-проекте по-прежнему правит",
+    bool(owner_create) and not owner_create[0].disabled,
+    str([(str(b.label), b.disabled) for b in demo_owner.button]),
+)
+check(
+    "владельцу в демо доступна загрузка файлов",
+    "Загрузка файла" in sidebar_buttons(demo_owner),
+    str(sidebar_buttons(demo_owner)),
+)
+set_demo(False)
+
 print()
 if failures:
     print(f"ПРОВАЛЕНО: {len(failures)} → {failures}")
     raise SystemExit(1)
-print("Роли и клиентский вид работают.")
+print("Роли, клиентский вид и демо-режим работают.")

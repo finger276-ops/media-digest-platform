@@ -36,6 +36,39 @@ def project_settings_from_row(row) -> dict[str, Any]:
     return settings if isinstance(settings, dict) else {}
 
 
+# Демо-проект: витрина для показа платформы. Смотреть можно почти всё, менять
+# нельзя ничего. Флаг ставит владелец платформы в карточке проекта.
+DEMO_MESSAGE = "Тестовый доступ, редактура недоступна"
+DEMO_AI_LIMIT = 10
+
+
+def is_demo_project(project_settings: dict[str, Any] | None) -> bool:
+    """Демо-режим проекта. Мусор и отсутствие ключа — обычный проект.
+
+    Включать демо должно быть явным решением: случайно включённый режим тихо
+    отнимет у команды правку, и искать причину будут долго.
+    """
+    return bool((project_settings or {}).get("demo_mode") is True)
+
+
+def demo_ai_runs_used(project_settings: dict[str, Any] | None) -> int:
+    """Сколько генераций ИИ уже израсходовано в демо-проекте.
+
+    Счётчик не сбрасывается: демо выдаётся многим, и ежемесячное обнуление
+    превратило бы лимит в бесконечный. Отрицательные значения и мусор считаем
+    нулём, значения выше лимита не обрезаем — лимит проверяется отдельно.
+    """
+    raw = (project_settings or {}).get("demo_ai_runs")
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 0
+
+
+def demo_ai_runs_left(project_settings: dict[str, Any] | None) -> int:
+    return max(0, DEMO_AI_LIMIT - demo_ai_runs_used(project_settings))
+
+
 def merged_dashboard_view_settings(
     current_settings: dict[str, Any] | None, updates: dict[str, Any]
 ) -> dict[str, Any]:

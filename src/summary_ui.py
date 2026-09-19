@@ -24,6 +24,7 @@ from services.cached_store import (
 )
 from services.metrics_compute import format_int, overview_metrics
 from services.period_comparison import selected_period_label
+from services.project_settings import DEMO_MESSAGE
 from services.report_highlights import event_title_column, top_report_events
 from services.roles import role_rank
 
@@ -144,6 +145,7 @@ def render_period_summary(
     branding: dict[str, Any] | None = None,
     project_settings: dict[str, Any] | None = None,
     client_preview: bool = False,
+    read_only: bool = False,
 ) -> None:
     """Unified editable/exportable period summary for all project profiles."""
     st.subheader("Саммари периода")
@@ -212,11 +214,21 @@ def render_period_summary(
                     project_id, key, "summaries"
                 )
             edited = st.text_area(
-                "Текст саммари", value=summary_text, height=220, key=widget_key
+                "Текст саммари",
+                value=summary_text,
+                height=220,
+                key=widget_key,
+                disabled=read_only,
+                help=DEMO_MESSAGE if read_only else None,
             )
             c1, c2 = st.columns(2)
             with c1:
-                if st.button("Сохранить саммари", key=f"save_{key}"):
+                if st.button(
+                    "Сохранить саммари",
+                    key=f"save_{key}",
+                    disabled=read_only,
+                    help=DEMO_MESSAGE if read_only else None,
+                ):
                     try:
                         save_manual(
                             project_id,
@@ -243,7 +255,12 @@ def render_period_summary(
                         st.success("Саммари сохранено.")
                         st.rerun()
             with c2:
-                if st.button("Вернуть автоматическое", key=f"auto_{key}"):
+                if st.button(
+                    "Вернуть автоматическое",
+                    key=f"auto_{key}",
+                    disabled=read_only,
+                    help=DEMO_MESSAGE if read_only else None,
+                ):
                     delete_manual(project_id, key)
                     st.success("Вернули автоматическое саммари.")
                     st.rerun()

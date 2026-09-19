@@ -51,6 +51,12 @@ from services.cached_store import (
     save_manual,
     update_project,
 )
+from services.project_settings import (
+    DEMO_AI_LIMIT,
+    demo_ai_runs_left,
+    demo_ai_runs_used,
+    is_demo_project,
+)
 
 SETUP_HINT = """
 ```toml
@@ -256,8 +262,16 @@ def render_ai_summary_panel(
     # заказчика, а заказчик генерацию не видит никогда. Признак владельца здесь
     # живёт отдельно от роли (session_state), поэтому понижения роли мало.
     owner = is_platform_owner() and not client_preview
-    if not can_generate_ai(role, project_settings, is_platform_owner=owner):
+    # Демо-проект показывают снаружи, и генерация — главное, ради чего его
+    # смотрят: без неё демонстрировать нечего. Поэтому доступ здесь не зависит
+    # от настройки ai_access, но ограничен счётчиком запусков на весь проект.
+    demo = is_demo_project(project_settings) and not client_preview
+    if not demo and not can_generate_ai(
+        role, project_settings, is_platform_owner=owner
+    ):
         return
+    demo_left = demo_ai_runs_left(project_settings) if demo and not owner else None
+    demo_exhausted = demo_left is not None and demo_left <= 0
 
     config = load_ai_config()
     with st.expander("Тексты от ИИ", expanded=False):
@@ -301,7 +315,20 @@ def render_ai_summary_panel(
                 )
             return
 
-        if not owner:
+        if demo_left is not None:
+            message = (
+                f"Вам доступно {demo_left} запусков ИИ-генерации из "
+                f"{DEMO_AI_LIMIT} на этот демонстрационный проект."
+            )
+            if demo_exhausted:
+                st.warning(
+                    "Запуски ИИ-генерации в демонстрационном проекте "
+                    "закончились. Тексты, сгенерированные раньше, остаются "
+                    "на месте."
+                )
+            else:
+                st.info(message)
+        elif not owner:
             st.caption(
                 "Доступ к генерации открыт владельцем платформы. "
                 "Каждый запуск тратит платный запрос к модели."
@@ -353,13 +380,42 @@ def render_ai_summary_panel(
                     KIND_TITLES[kind],
                     key=f"ai_generate_{kind}_{project_id}",
                     width="stretch",
+                    disabled=demo_exhausted,
+                    help=(
+                        "Лимит запусков демонстрационного проекта исчерпан."
+                        if demo_exhausted
+                        else None
+                    ),
                 ):
                     _run_generation(
                         project_id, kind, base_args, extra, config
                     )
+                    # Счёт ведётся по нажатию, а не по успеху: иначе неудачный
+                    # запрос к модели, который всё равно оплачен, лимит бы не
+                    # тратил и демо можно было бы крутить бесконечно.
+                    if demo_left is not None:
+                        _spend_demo_run(project_id, project_settings)
 
         for kind in kinds:
             _render_generated_block(project_id, kind, period_ids)
+
+
+def _spend_demo_run(project_id: str, project_settings: dict[str, Any] | None) -> None:
+    """Списать один запуск ИИ в демо-проекте.
+
+    Счётчик живёт в настройках проекта и не сбрасывается: демо-доступ выдаётся
+    многим, и обнуление по времени сделало бы лимит бесконечным. Сбросить его
+    может только владелец платформы вручную в карточке проекта.
+    """
+    updated = dict(project_settings or {})
+    updated["demo_ai_runs"] = demo_ai_runs_used(project_settings) + 1
+    try:
+        update_project(project_id, settings=updated)
+        clear_platform_caches(project_id)
+    except Exception as exc:  # noqa: BLE001
+        # Списание не должно ронять уже сделанную генерацию: текст у человека
+        # на экране, а несписанный запуск — меньшее зло, чем упавший раздел.
+        st.warning(f"Не удалось обновить счётчик запусков: {exc}")
 
 
 def _run_generation(

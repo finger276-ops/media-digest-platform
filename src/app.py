@@ -133,6 +133,9 @@ from services.dashboard_config import (
     SECTION_ALIASES,
 )
 from services.project_settings import (
+    DEMO_MESSAGE,
+    demo_ai_runs_left,
+    is_demo_project,
     project_settings_from_row,
     valid_hex_color,
     dashboard_view_settings_from_project_settings,
@@ -361,9 +364,12 @@ def _section_events(
     hidden_events: int,
     hidden_messages: int,
     min_event_messages: int,
+    read_only: bool = False,
 ) -> None:
     render_small_events_notice(hidden_events, hidden_messages, min_event_messages)
-    render_events(project_id, role, events_agg, messages, manual_state)
+    render_events(
+        project_id, role, events_agg, messages, manual_state, read_only=read_only
+    )
 
 
 @_as_fragment
@@ -374,6 +380,7 @@ def _section_brand_metrics(
     periods: pd.DataFrame,
     period_ids: list[str],
     role_can_edit: bool,
+    read_only: bool = False,
 ) -> None:
     render_brand_metrics_page(
         project_id,
@@ -382,6 +389,7 @@ def _section_brand_metrics(
         periods,
         period_ids,
         role_can_edit=role_can_edit,
+        read_only=read_only,
     )
 
 
@@ -432,13 +440,23 @@ def main() -> None:
         current_project_settings
     )
 
+    # Демо-проект: витрина. Смотреть можно всё, что видит аналитик, включая
+    # формулы, настройки индексов и тексты от ИИ, — иначе демонстрировать
+    # нечего. Менять нельзя ничего: запрет висит не на видимости блоков, а на
+    # самих элементах записи, поэтому гость видит интерфейс целиком и понимает,
+    # что именно он получит. Владельца платформы демо не касается: ему проект
+    # надо готовить.
+    demo_project = is_demo_project(current_project_settings)
+    demo_read_only = demo_project and not is_admin
+
     # --- боковое меню: разделы аналитики, работа с данными, платформа ---
     section_options = list(DASHBOARD_SECTION_OPTIONS)
     groups: list[tuple[str, list[str]]] = []
     if project_id:
         groups.append(("Аналитика", section_options))
         # Зрителю страницы загрузки не нужны: он туда всё равно не может.
-        if role_rank(role) >= role_rank("editor"):
+        # В демо их нет и у редактора: работа идёт с тем, что уже загружено.
+        if role_rank(role) >= role_rank("editor") and not demo_read_only:
             groups.append(
                 ("Данные", ["Загрузка файла", "История периодов", "Автозагрузка"])
             )
@@ -576,6 +594,11 @@ def main() -> None:
     # предпросмотра нельзя было бы выйти.
     client_preview = hide_technical and role_rank(role) >= role_rank("editor")
     content_role = "viewer" if client_preview else role
+    # Демо и клиентский предпросмотр запрещают правку по-разному, и это
+    # намеренно. Предпросмотр показывает кабинет заказчика, поэтому прячет
+    # аналитические блоки целиком. Демо наоборот — оставляет их на виду и
+    # гасит только элементы записи: гость должен увидеть, что умеет платформа.
+    read_only = demo_read_only
     saved_blocks = set(
         dashboard_view_settings.get("main_visible_blocks")
         or ["metrics", "comparison", "summary", "threshold"]
@@ -679,6 +702,14 @@ def main() -> None:
                             st.rerun()
                         except Exception as exc:
                             st.warning(f"Не удалось сохранить: {exc}")
+
+    if demo_read_only:
+        st.info(
+            f"Тестовый доступ к демонстрационному проекту. Разделы и аналитика "
+            f"открыты целиком, но изменить ничего нельзя, а новые выгрузки не "
+            f"загружаются. Генерация ИИ доступна: осталось "
+            f"{demo_ai_runs_left(current_project_settings)} запусков."
+        )
 
     # Гранулярность (день/неделя/месяц) поверх уже загруженных файлов —
     # выбор файлов в сайдбаре («Периоды») не трогаем: он остаётся тем, ЧТО
@@ -807,6 +838,7 @@ def main() -> None:
                 periods,
                 selected_period_ids,
                 role_rank(content_role) >= role_rank("editor"),
+                read_only,
             )
             render_saved_ai_text(
                 project_id,
@@ -826,6 +858,7 @@ def main() -> None:
                 hidden_events,
                 hidden_messages,
                 int(min_event_messages or 0),
+                read_only,
             )
         elif page == "Отзывы":
             render_reviews(enriched_messages)
@@ -873,6 +906,7 @@ def main() -> None:
                 branding=report_branding,
                 project_settings=current_project_settings,
                 client_preview=client_preview,
+                read_only=read_only,
             )
 
     render_section_safely(page, _render_selected_section, _details=show_error_details)

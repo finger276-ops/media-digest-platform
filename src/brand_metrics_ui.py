@@ -48,7 +48,10 @@ from services.metric_notes import (
     save_note,
 )
 from services.period_comparison import ordered_period_ids, previous_period_id
-from services.project_settings import category_brands_from_project_settings
+from services.project_settings import (
+    DEMO_MESSAGE,
+    category_brands_from_project_settings,
+)
 from services.chart_style import LINE_INTERPOLATE, PERIOD_AXIS, fixed_color_scale
 
 METRIC_ORDER = ["BPI", "NSS", "SES", "TVS", "SOV", "ReachScore", "ER", "ERR"]
@@ -219,6 +222,7 @@ def render_metric_conclusions(
     period_ids: list[str],
     *,
     role_can_edit: bool = False,
+    read_only: bool = False,
 ) -> None:
     """Таблица метрик с выводом аналитика вместо формулы.
 
@@ -237,6 +241,24 @@ def render_metric_conclusions(
 
     if not role_can_edit:
         st.dataframe(table, width="stretch", hide_index=True)
+        _render_metrics_download(table)
+        return
+
+    if read_only:
+        # Таблицу показываем ту же, со столбцом вывода: в демо важно, чтобы
+        # было видно, что это поле вообще существует и заполняется руками.
+        st.caption(
+            "Столбец «Вывод» заполняется вручную: что метрика означает для "
+            f"бренда. {DEMO_MESSAGE}."
+        )
+        st.dataframe(
+            table,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Вывод": st.column_config.TextColumn("Вывод аналитика", width="large")
+            },
+        )
         _render_metrics_download(table)
         return
 
@@ -489,6 +511,8 @@ def render_brand_map_settings(
     project_settings: dict[str, Any],
     messages: pd.DataFrame,
     brand_map: dict[str, list[str]],
+    *,
+    read_only: bool = False,
 ) -> None:
     """Разметка тегов: где свои бренды, где конкуренты, где не бренд.
 
@@ -544,7 +568,11 @@ def render_brand_map_settings(
                 placeholder="Выберите теги",
                 help="Остальные бренды категории — знаменатель доли голоса.",
             )
-            if st.form_submit_button("Сохранить разметку брендов"):
+            if st.form_submit_button(
+                "Сохранить разметку брендов",
+                disabled=read_only,
+                help=DEMO_MESSAGE if read_only else None,
+            ):
                 updated = dict(project_settings or {})
                 updated["category_brands"] = {
                     "own": list(own),
@@ -570,7 +598,11 @@ def render_brand_map_settings(
 
 
 def render_metric_settings(
-    project_id: str, project_settings: dict[str, Any], settings: dict[str, Any]
+    project_id: str,
+    project_settings: dict[str, Any],
+    settings: dict[str, Any],
+    *,
+    read_only: bool = False,
 ) -> None:
     with st.expander("Настройка индекса BPI", expanded=False):
         st.caption(
@@ -623,7 +655,12 @@ def render_metric_settings(
                 ),
                 horizontal=False,
             )
-            submitted = st.form_submit_button("Сохранить настройки", type="primary")
+            submitted = st.form_submit_button(
+                "Сохранить настройки",
+                type="primary",
+                disabled=read_only,
+                help=DEMO_MESSAGE if read_only else None,
+            )
 
         if submitted:
             scales = {BPI_AVAILABLE_METRICS[k] for k in weights}
@@ -683,7 +720,12 @@ def render_category_source_notice(
 
 
 def render_category_upload(
-    project_id: str, periods: pd.DataFrame, period_ids: list[str], role_can_edit: bool
+    project_id: str,
+    periods: pd.DataFrame,
+    period_ids: list[str],
+    role_can_edit: bool,
+    *,
+    read_only: bool = False,
 ) -> None:
     st.caption(
         "Если конкурентов нет в выгрузке проекта — например, тема мониторинга "
@@ -731,7 +773,10 @@ def render_category_upload(
                     f"обновлено: {str(record.get('updated_at') or '')[:16].replace('T', ' ')}"
                 )
                 if role_can_edit and st.button(
-                    "Удалить данные категории", key=f"del_bench_{period_id}"
+                    "Удалить данные категории",
+                    key=f"del_bench_{period_id}",
+                    disabled=read_only,
+                    help=DEMO_MESSAGE if read_only else None,
                 ):
                     category_store.delete_benchmark(project_id, period_id)
                     st.success("Данные удалены.")
@@ -834,7 +879,12 @@ def render_category_upload(
         hide_index=True,
     )
 
-    if st.button("Сохранить данные категории", type="primary"):
+    if st.button(
+        "Сохранить данные категории",
+        type="primary",
+        disabled=read_only,
+        help=DEMO_MESSAGE if read_only else None,
+    ):
         try:
             category_store.save_benchmark(
                 project_id=project_id,
@@ -941,6 +991,7 @@ def render_brand_metrics_page(
     selected_period_ids: list[str],
     *,
     role_can_edit: bool = False,
+    read_only: bool = False,
 ) -> None:
     st.subheader("Индексы бренда")
     st.caption(
@@ -1003,7 +1054,11 @@ def render_brand_metrics_page(
             "поэтому сужение диапазона дат их не меняет."
         )
     render_metric_conclusions(
-        project_id, cards, selected_period_ids, role_can_edit=role_can_edit
+        project_id,
+        cards,
+        selected_period_ids,
+        role_can_edit=role_can_edit,
+        read_only=read_only,
     )
 
     # Полные, не суженные сообщения: график динамики остаётся по периодам
@@ -1013,15 +1068,23 @@ def render_brand_metrics_page(
     )
 
     if role_can_edit:
-        render_brand_map_settings(project_id, project_settings, messages, brand_map)
+        render_brand_map_settings(
+            project_id, project_settings, messages, brand_map, read_only=read_only
+        )
         # Формулы остались доступны там, где настраиваются веса: аналитику
         # проверить цифру нужно, заказчику — нет.
         render_metric_details(cards)
-        render_metric_settings(project_id, project_settings, settings)
+        render_metric_settings(
+            project_id, project_settings, settings, read_only=read_only
+        )
         # Запасной путь, а не основной: у большинства проектов конкуренты уже
         # размечены тегами в самой выгрузке. Развёрнутым этот блок занимал
         # экран под задачу, которая возникает редко.
         with st.expander("Выгрузка по категории отдельным файлом", expanded=False):
             render_category_upload(
-                project_id, periods, selected_period_ids, role_can_edit
+                project_id,
+                periods,
+                selected_period_ids,
+                role_can_edit,
+                read_only=read_only,
             )

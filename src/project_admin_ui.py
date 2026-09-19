@@ -35,8 +35,11 @@ from services.dashboard_config import (
 from services.formatting import fmt_date
 from services.metrics_compute import format_int
 from services.project_settings import (
+    DEMO_AI_LIMIT,
     chart_label_settings_from_project_settings,
     dashboard_view_settings_from_project_settings,
+    demo_ai_runs_used,
+    is_demo_project,
     merged_dashboard_view_settings,
     project_settings_from_row,
     report_branding_from_project_settings,
@@ -422,6 +425,32 @@ def render_project_manager(projects: pd.DataFrame) -> None:
                     "Настройки сохраняют подготовленный клиентский вид проекта: стартовый раздел, набор графиков и уровень технических элементов."
                 )
 
+            with st.expander("Демонстрационный проект", expanded=False):
+                demo_mode = st.checkbox(
+                    "Тестовый доступ: витрина без правки",
+                    value=is_demo_project(current_settings),
+                    key=f"demo_mode_{project_id}",
+                    help=(
+                        "Проект показывают снаружи. Разделы и аналитика видны "
+                        "целиком, но менять нельзя ничего: правка описаний, "
+                        "саммари и настроек выключается, загрузка новых файлов "
+                        "закрыта. Генерация ИИ остаётся, но не больше "
+                        f"{DEMO_AI_LIMIT} запусков на проект."
+                    ),
+                )
+                used = demo_ai_runs_used(current_settings)
+                st.caption(
+                    f"Израсходовано запусков ИИ: {used} из {DEMO_AI_LIMIT}. "
+                    "Счётчик не сбрасывается — демо выдаётся многим, и "
+                    "обнуление сделало бы лимит бесконечным."
+                )
+                reset_demo_ai = st.checkbox(
+                    "Обнулить счётчик запусков ИИ",
+                    value=False,
+                    key=f"demo_ai_reset_{project_id}",
+                    help="Разовое действие владельца платформы, а не автоматика.",
+                )
+
             st.caption("Коды доступа заполняйте только если хотите заменить текущие.")
             new_viewer_code = st.text_input(
                 "Новый код просмотра",
@@ -502,6 +531,9 @@ def render_project_manager(projects: pd.DataFrame) -> None:
                 updated_settings["report_sections"] = list(report_sections) or list(
                     REPORT_SECTION_OPTIONS.keys()
                 )
+                updated_settings["demo_mode"] = bool(demo_mode)
+                if reset_demo_ai:
+                    updated_settings["demo_ai_runs"] = 0
                 updated_settings["dashboard_view_settings"] = (
                     merged_dashboard_view_settings(
                         current_settings,
