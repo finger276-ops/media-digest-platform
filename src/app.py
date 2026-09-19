@@ -457,8 +457,20 @@ def main() -> None:
         # Зрителю страницы загрузки не нужны: он туда всё равно не может.
         # В демо их нет и у редактора: работа идёт с тем, что уже загружено.
         if role_rank(role) >= role_rank("editor") and not demo_read_only:
+            # «Настройки проекта» — это карточка того же проекта, в который
+            # вошёл аналитик: название, профиль алгоритма, брендирование
+            # отчёта, коды доступа. Владелец платформы видит тот же раздел
+            # «Проекты» со всеми проектами и опасной зоной.
             groups.append(
-                ("Данные", ["Загрузка файла", "История периодов", "Автозагрузка"])
+                (
+                    "Данные",
+                    [
+                        "Загрузка файла",
+                        "История периодов",
+                        "Автозагрузка",
+                        "Настройки проекта",
+                    ],
+                )
             )
     if is_admin:
         groups.append(("Платформа", ["Проекты", "Сессии"]))
@@ -510,9 +522,15 @@ def main() -> None:
     show_error_details = is_admin or role_rank(role) >= role_rank("editor")
 
     # --- страницы, которым не нужны данные периодов ---
-    if page == "Проекты":
+    if page in ("Проекты", "Настройки проекта"):
         render_section_safely(
-            "Проекты", render_project_manager, projects, _details=show_error_details
+            page,
+            render_project_manager,
+            projects,
+            is_admin=is_admin,
+            role=role,
+            current_project_id=project_id,
+            _details=show_error_details,
         )
         return
     if page == "Сессии":

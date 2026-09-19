@@ -461,8 +461,98 @@ check(
 )
 set_demo(False)
 
+print("11. Аналитик настраивает свой проект, но не чужие и не удаляет")
+# Второй проект нужен, чтобы проверить главное: аналитик не должен видеть
+# чужие проекты и их коды доступа.
+OTHER_ID = "other_project"
+if not any(p["project_id"] == OTHER_ID for p in CLIENT.db["platform_projects"]):
+    CLIENT.db["platform_projects"].append(
+        {
+            "project_id": OTHER_ID,
+            "project_name": "Чужой проект",
+            "status": "active",
+            "viewer_code_hash": store.hash_code("other-viewer"),
+            "editor_code_hash": store.hash_code("other-editor"),
+            "settings": {},
+            "created_at": now,
+            "updated_at": now,
+        }
+    )
+st.cache_data.clear()
+
+analyst_settings = open_as("editor", section="Настройки проекта")
+check("«Настройки проекта» открылись аналитику", not analyst_settings.exception, str(analyst_settings.exception))
+check(
+    "пункт «Настройки проекта» есть в меню редактора",
+    "Настройки проекта" in sidebar_buttons(analyst_settings),
+    str(sidebar_buttons(analyst_settings)),
+)
+check(
+    "зрителю «Настройки проекта» не показывают",
+    "Настройки проекта" not in sidebar_buttons(open_as("viewer")),
+    str(sidebar_buttons(open_as("viewer"))),
+)
+check(
+    "аналитик может создать проект",
+    "Создать проект" in labels(analyst_settings),
+    str(labels(analyst_settings)),
+)
+
+
+def listed_projects(at):
+    """Названия проектов из таблицы «Существующие проекты»."""
+    names = []
+    for frame in at.dataframe:
+        data = frame.value
+        if data is not None and "Проект" in getattr(data, "columns", []):
+            names.extend(str(x) for x in data["Проект"].tolist())
+    return names
+
+
+analyst_list = listed_projects(analyst_settings)
+check(
+    "аналитик видит только свой проект",
+    analyst_list == ["Ромашка"],
+    str(analyst_list),
+)
+owner_list = listed_projects(open_as("owner", section="Проекты"))
+check(
+    "владелец платформы видит оба проекта",
+    set(owner_list) == {"Ромашка", "Чужой проект"},
+    str(owner_list),
+)
+
+print("12. Страница проектов проверяет роль сама, а не полагается на меню")
+# Раньше единственной защитой было отсутствие пункта в меню: правка навигации
+# сразу становилась дырой в правах на страницу с кодами доступа и удалением.
+from project_admin_ui import render_project_manager  # noqa: E402
+import inspect  # noqa: E402
+
+signature = inspect.signature(render_project_manager)
+check(
+    "у страницы есть параметры роли",
+    {"is_admin", "role", "current_project_id"} <= set(signature.parameters),
+    str(list(signature.parameters)),
+)
+source = inspect.getsource(render_project_manager)
+check(
+    "роль проверяется внутри страницы",
+    "role_rank(role)" in source,
+    source[:200],
+)
+# Карточка проекта рисуется только после выбора строки в таблице, а выбор в
+# AppTest не проставить — поведенчески опасную зону здесь не достать. Поэтому
+# проверяется само ограждение: удаление и список проектов гейтятся is_admin.
+# Проверка слабее поведенческой и заявлена именно такой, а не выдаётся за неё.
+danger = source[source.index("Опасная зона") - 600 : source.index("Опасная зона")]
+check(
+    "удаление проекта огорожено проверкой владельца платформы",
+    "if not is_admin:" in danger and "return" in danger,
+    danger[-200:],
+)
+
 print()
 if failures:
     print(f"ПРОВАЛЕНО: {len(failures)} → {failures}")
     raise SystemExit(1)
-print("Роли, клиентский вид и демо-режим работают.")
+print("Роли, клиентский вид, демо-режим и настройки проекта работают.")

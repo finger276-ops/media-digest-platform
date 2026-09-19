@@ -34,6 +34,7 @@ from services.dashboard_config import (
 )
 from services.formatting import fmt_date
 from services.metrics_compute import format_int
+from services.roles import role_rank
 from services.project_settings import (
     DEMO_AI_LIMIT,
     chart_label_settings_from_project_settings,
@@ -101,8 +102,41 @@ def render_project_access(is_admin: bool) -> tuple[str | None, str, pd.DataFrame
     return None, "none", projects
 
 
-def render_project_manager(projects: pd.DataFrame) -> None:
+def render_project_manager(
+    projects: pd.DataFrame,
+    *,
+    is_admin: bool = True,
+    role: str = "owner",
+    current_project_id: str | None = None,
+) -> None:
+    """Настройки проектов. Владельцу платформы — все, аналитику — только свой.
+
+    Проверка роли стоит здесь, а не только в сборке меню. Раньше страница
+    полагалась на то, что её пункт просто не попадёт в боковое меню: любая
+    будущая правка навигации сразу становилась дырой в правах, а на этой
+    странице лежат коды доступа и необратимое удаление проекта.
+
+    «Владелец проекта» в платформе — это тот, у кого код редактора: личности
+    у кодов нет, привязать проект к человеку нечем. Поэтому аналитик работает
+    ровно с тем проектом, в который вошёл, и заводит новые, сам задавая им
+    коды. Чужие проекты и их коды ему не показываются.
+    """
+    can_manage = is_admin or role_rank(role) >= role_rank("editor")
+    if not can_manage:
+        st.info("Управление проектами доступно аналитику и владельцу платформы.")
+        return
+
+    if not is_admin:
+        projects = projects[
+            projects["project_id"].astype(str) == str(current_project_id or "")
+        ]
+
     st.header("Управление проектами")
+    if not is_admin:
+        st.caption(
+            "Показан проект, в который вы вошли. Созданный проект открывается "
+            "кодом редактора, который вы ему зададите."
+        )
     with st.expander("Создать проект", expanded=projects.empty):
         name = st.text_input("Название проекта", key="new_project_name")
         description = st.text_area("Описание проекта", key="new_project_description")
@@ -131,7 +165,17 @@ def render_project_manager(projects: pd.DataFrame) -> None:
                     settings={"topic_profile": topic_profile},
                 )
                 st.success(f"Проект создан: {project_id}")
-                st.rerun()
+                if not is_admin:
+                    # Аналитик сидит в проекте, в который вошёл кодом. Новый
+                    # проект откроется только своим кодом — сказать об этом
+                    # надо сразу, иначе человек будет искать его в списке.
+                    st.info(
+                        "Чтобы перейти в новый проект, нажмите «Сменить проект "
+                        "/ выйти» и войдите кодом редактора, который вы только "
+                        "что задали."
+                    )
+                else:
+                    st.rerun()
 
     if projects.empty:
         return
@@ -556,6 +600,16 @@ def render_project_manager(projects: pd.DataFrame) -> None:
                 )
                 st.success("Проект обновлен.")
                 st.rerun()
+
+            # Удаление проекта со всеми периодами необратимо и остаётся за
+            # владельцем платформы. Аналитик настраивает проект и заводит
+            # новые, но снести чужую работу одним нажатием не может: код
+            # редактора живёт у подрядчиков и меняется чаще, чем хотелось бы.
+            if not is_admin:
+                st.caption(
+                    "Удаление проекта доступно только владельцу платформы."
+                )
+                return
 
             with st.expander("Опасная зона: удалить проект", expanded=False):
                 st.warning(
