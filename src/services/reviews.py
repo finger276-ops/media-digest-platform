@@ -42,6 +42,50 @@ _RATING_COLUMNS = ("rating", "Оценка")
 # заголовком карточки, но если выгрузка назвала колонку прямо, верить надо ей.
 _PRODUCT_COLUMNS = ("product", "Товар", "title", "Заголовок")
 
+# У Медиалогии нет отдельной колонки товара для отзывов с площадок вроде
+# Wildberries/RuStore/Otzovik — название приезжает склеенным в «Заголовок»
+# вместе с меткой отзыва и самой оценкой: «Отзыв о Фонбет – ставки на спорт
+# Оценка: 1 из 5 Не загружается видео с матча КХЛ!». Взять такую строку
+# целиком как товар значило бы показать в карточке кашу из названия, оценки
+# и куска текста отзыва. Проверено на реальной выгрузке (8318 строк,
+# 122 отзыва, 7 площадок) — три шаблона покрывают 85% строк:
+#   «Отзыв о X [Оценка: N из 5 ...]»       — RuStore, Wildberries, Озон, Legalbet
+#   «Ответ на отзыв о X [...]»              — App Store, Wildberries, RuStore
+#   «Отзыв: X - ...»                        — Otzovik
+# Там, где ни один шаблон не подошёл — например, у Irecommend, где в этот же
+# «Тип площадки» проваливаются рецензии на фильмы и книги, потому что монитор
+# ищет по ключевым словам, а не по товарным карточкам, — заголовок остаётся
+# как есть: это уже не наша каша, а естественный шум источника.
+_MEDIALOGIA_RATING_SUFFIX = re.compile(r"\s*Оценка:\s*\d\s*из\s*5.*$", re.IGNORECASE | re.DOTALL)
+_MEDIALOGIA_REVIEW_PREFIX = re.compile(r"^(?:Ответ на отзыв о|Отзыв о)\s+", re.IGNORECASE)
+_MEDIALOGIA_OTZOVIK_PREFIX = re.compile(r"^Отзыв:\s*", re.IGNORECASE)
+
+
+def _clean_medialogia_title(title: str) -> str:
+    """Достать товар из склеенного заголовка Медиалогии, если это возможно.
+
+    Заголовок без узнаваемой склейки возвращается без изменений — это может
+    быть уже чистое название (Brand Analytics, будущая колонка «Товар») или
+    шум источника, который мы всё равно не умеем разобрать надёжнее, чем есть.
+    """
+    text = str(title or "").strip()
+    if not text:
+        return ""
+    if _MEDIALOGIA_OTZOVIK_PREFIX.match(text):
+        rest = _MEDIALOGIA_OTZOVIK_PREFIX.sub("", text, count=1)
+        product, separator, _ = rest.partition(" - ")
+        return product.strip() if separator else rest.strip()
+    if _MEDIALOGIA_REVIEW_PREFIX.match(text):
+        rest = _MEDIALOGIA_REVIEW_PREFIX.sub("", text, count=1)
+        rest = _MEDIALOGIA_RATING_SUFFIX.sub("", rest)
+        return rest.strip()
+    return text
+
+
+def _product_series(messages: pd.DataFrame) -> pd.Series:
+    """Название товара для показа — с очисткой от склейки Медиалогии."""
+    return _column(messages, _PRODUCT_COLUMNS).map(_clean_medialogia_title)
+
 # Оценки приходят и дробные — это сводный рейтинг карточки товара, а не ошибка.
 RATING_MIN = 1.0
 RATING_MAX = 5.0
@@ -174,7 +218,7 @@ def review_overview(messages: pd.DataFrame) -> dict[str, object]:
     ratings = rating_values(reviews)
     rounded = ratings.dropna().round().astype(int)
     negative = _negative_mask(reviews)
-    products = _column(reviews, _PRODUCT_COLUMNS).str.strip()
+    products = _product_series(reviews).str.strip()
     return {
         "reviews": total,
         "rated": int(ratings.notna().sum()),
@@ -218,7 +262,7 @@ def reviews_by_product(messages: pd.DataFrame) -> pd.DataFrame:
             columns=["Товар", "Отзывов", "Средняя оценка", "Претензий"]
         )
     work = reviews.assign(
-        _product=_column(reviews, _PRODUCT_COLUMNS).str.strip(),
+        _product=_product_series(reviews).str.strip(),
         _rating=rating_values(reviews),
         _negative=_negative_mask(reviews).astype(int),
     )
@@ -261,7 +305,7 @@ def complaints(messages: pd.DataFrame) -> pd.DataFrame:
     complaint = complaint.where(complaint != "", parsed["pros"])
     out = pd.DataFrame(
         {
-            "Товар": _column(selected, _PRODUCT_COLUMNS).str.strip().replace("", "—"),
+            "Товар": _product_series(selected).str.strip().replace("", "—"),
             "Оценка": rating_values(selected),
             "Претензия": complaint,
             "Ссылка": _column(selected, ("message_link", "Ссылка")),
@@ -311,7 +355,7 @@ def review_rows(messages: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame(
         {
             "Оценка": rating_values(reviews),
-            "Товар": _column(reviews, _PRODUCT_COLUMNS).str.strip().replace("", "—"),
+            "Товар": _product_series(reviews).str.strip().replace("", "—"),
             "Отзыв": pd.Series(text, index=reviews.index),
             "Тональность": _column(reviews, ("sentiment", "Тональность")).str.strip(),
             "Дата": _column(reviews, ("date", "Дата")),

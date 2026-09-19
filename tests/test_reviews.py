@@ -20,6 +20,7 @@ for _p in (REPO / "src", REPO / "scripts", REPO / "tests"):
 import pandas as pd  # noqa: E402
 
 from services.reviews import (  # noqa: E402
+    _clean_medialogia_title,
     complaints,
     parse_review,
     parse_reviews,
@@ -284,6 +285,77 @@ plain = pd.DataFrame([{"text_clean": "Обычный пост", "message_type": 
 check("отзывов не найдено", select_reviews(plain).empty)
 check("сводка пустая, но корректная", review_overview(plain)["reviews"] == 0)
 check("претензий нет", complaints(plain).empty)
+
+print("10. Медиалогия: товар склеен с оценкой и текстом отзыва в заголовке")
+# У Медиалогии нет отдельной колонки товара для отзывов с Wildberries/RuStore/
+# Otzovik и т.п. — название приезжает в «Заголовке» склеенным с меткой отзыва
+# и самой оценкой: «Отзыв о Фонбет – ставки на спорт Оценка: 1 из 5 Не
+# загружается видео». Без очистки это целиком показывалось как «Товар».
+check(
+    "'Отзыв о X Оценка: N из 5 ...' — оставлен только товар",
+    _clean_medialogia_title(
+        "Отзыв о Фонбет – ставки на спорт Оценка: 1 из 5 Не загружается видео с матча"
+    )
+    == "Фонбет – ставки на спорт",
+)
+check(
+    "'Ответ на отзыв о X Оценка: N из 5 ...' — тоже только товар",
+    _clean_medialogia_title(
+        "Ответ на отзыв о Winline: ставки на спорт Оценка: 5 из 5 Спасибо за отзыв!"
+    )
+    == "Winline: ставки на спорт",
+)
+check(
+    "'Отзыв: X - текст' (Otzovik) — товар до первого ' - '",
+    _clean_medialogia_title(
+        'Отзыв: Крем EISENBERG для лица - вау эффекта не получила'
+    )
+    == "Крем EISENBERG для лица",
+)
+check(
+    "заголовок без узнаваемой склейки не трогаем",
+    _clean_medialogia_title("Кидалово") == "Кидалово",
+)
+check(
+    "уже чистое название (Brand Analytics) не трогаем",
+    _clean_medialogia_title("DOCKE / Гибкая черепица мягкая кровля для крыши дома Серый 3м2")
+    == "DOCKE / Гибкая черепица мягкая кровля для крыши дома Серый 3м2",
+)
+check("пустой заголовок не падает", _clean_medialogia_title("") == "")
+check("None не падает", _clean_medialogia_title(None) == "")
+
+medialogia_period = pd.DataFrame(
+    [
+        review(
+            "Не загружается видео с матча КХЛ!",
+            rating="1",
+            title="Отзыв о Фонбет – ставки на спорт Оценка: 1 из 5 Не загружается видео с матча КХЛ!",
+            sentiment="негативная",
+        ),
+        review(
+            "Спасибо за отзыв!",
+            rating="5",
+            title="Ответ на отзыв о Winline: ставки на спорт Оценка: 5 из 5 Спасибо за отзыв!",
+        ),
+    ]
+)
+check(
+    "'Товар' в разрезе по товарам очищен от оценки и текста",
+    set(reviews_by_product(medialogia_period)["Товар"])
+    == {"Фонбет – ставки на спорт", "Winline: ставки на спорт"},
+    str(reviews_by_product(medialogia_period).to_dict("records")),
+)
+check(
+    "'Товар' в претензиях очищен",
+    complaints(medialogia_period).iloc[0]["Товар"] == "Фонбет – ставки на спорт",
+    str(complaints(medialogia_period).to_dict("records")),
+)
+check(
+    "'Товар' в общем списке отзывов очищен",
+    set(review_rows(medialogia_period)["Товар"])
+    == {"Фонбет – ставки на спорт", "Winline: ставки на спорт"},
+    str(review_rows(medialogia_period)["Товар"].tolist()),
+)
 
 print()
 if failures:
