@@ -34,8 +34,14 @@ def split_labels_by_fixed_time_window(
     d["_label"] = labels.loc[d.index].astype(int)
     d["_start"] = pd.to_datetime(d["start_date"], errors="coerce")
     fallback = pd.Timestamp("1970-01-01")
-    d["_bucket"] = d["_start"].fillna(fallback).astype("int64") // int(
-        pd.Timedelta(hours=window_hours).value
+    # Timedelta // Timedelta, не .astype("int64") // наносекунды: pandas 3.x
+    # хранит datetime64 в микросекундах, а Timedelta.value всегда в
+    # наносекундах — прямое деление int64 давало окно примерно в 1000 раз
+    # шире заданного (16ч превращались в ~666 дней, дробление почти никогда
+    # не срабатывало). Вычитание/деление двух Timedelta корректно в любой
+    # версии pandas независимо от внутреннего unit.
+    d["_bucket"] = (d["_start"].fillna(fallback) - fallback) // pd.Timedelta(
+        hours=window_hours
     )
 
     mapping = {}
@@ -148,8 +154,12 @@ def cluster_discussions_tfidf(
     d["_start"] = pd.to_datetime(d["start_date"], errors="coerce")
     fallback = pd.Timestamp("1970-01-01")
     bucket_hours = max(1.0, float(max_event_span_hours))
-    d["_time_bucket"] = d["_start"].fillna(fallback).astype("int64") // int(
-        pd.Timedelta(hours=bucket_hours).value
+    # См. комментарий в split_labels_by_fixed_time_window: Timedelta //
+    # Timedelta вместо .astype("int64") // наносекунды — тот же баг единиц
+    # измерения здесь бы означал, что временной бакет почти никогда не
+    # режет кластер, и текстовое сходство решало бы вопрос за месяцы разницы.
+    d["_time_bucket"] = (d["_start"].fillna(fallback) - fallback) // pd.Timedelta(
+        hours=bucket_hours
     )
     d["_cluster_bucket"] = (
         d["topic_bucket"].astype(str) + "::t" + d["_time_bucket"].astype(str)
