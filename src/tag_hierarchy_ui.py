@@ -15,9 +15,13 @@ save_tag_hierarchy валидирует до записи, старая стру
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
+
 import pandas as pd
 import streamlit as st
 
+from import_adapters import _open_excel_file_resilient
 from services.tag_hierarchy import (
     TagHierarchyError,
     parse_tag_dataframe,
@@ -30,15 +34,25 @@ from services.tag_hierarchy_store import (
 
 
 def _read_structure_file(uploaded) -> pd.DataFrame:
-    """Прочитать Excel/CSV со структурой. Терпимо к битым стилям xlsx."""
+    """Прочитать Excel/CSV со структурой. Терпимо к битым стилям xlsx.
+
+    Битые xl/styles.xml — тот же класс проблем, что и у выгрузок
+    мониторинга: чинит их уже проверенный _open_excel_file_resilient из
+    import_adapters.py, а не отдельная зависимость (engine="calamine" не
+    объявлен в requirements.txt и падал ImportError'ом на любом файле).
+    """
     name = (uploaded.name or "").lower()
     if name.endswith(".csv"):
         return pd.read_csv(uploaded)
+    suffix = Path(name).suffix or ".xlsx"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(uploaded.getvalue())
+        tmp_path = Path(tmp.name)
     try:
-        return pd.read_excel(uploaded)
-    except Exception:
-        uploaded.seek(0)
-        return pd.read_excel(uploaded, engine="calamine")
+        with _open_excel_file_resilient(tmp_path) as xls:
+            return xls.parse(0)
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
