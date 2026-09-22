@@ -53,6 +53,9 @@ jobs:
       - name: Восстановление сюжетов (наследование и кластеризация)
         run: python tests/test_story_recovery.py
 
+      - name: Алгоритмическая кластеризация инфоповодов (не Brand Analytics)
+        run: python tests/test_clustering.py
+
       - name: Пороги сборки инфоповодов в настройках проекта
         run: python tests/test_project_settings.py
 
@@ -92,6 +95,9 @@ jobs:
       - name: Автотекст саммари без ИИ (метрики, динамика, без дублей)
         run: python tests/test_summary_ui.py
 
+      - name: Клиентский обзор (изменения к периоду, согласование рода)
+        run: python tests/test_client_insights.py
+
       - name: Живые сессии платформы
         run: python tests/test_session_presence.py
 
@@ -118,6 +124,9 @@ jobs:
 
       - name: Аналитика по уровням тегов (own/subtree, покрытие, UI без дублей)
         run: python tests/test_tag_tier_analytics.py
+
+      - name: Загрузка структуры тегов (CSV/xlsx, починка битых стилей)
+        run: python tests/test_tag_hierarchy_ui.py
 
       - name: Дымовой тест интерфейса
         run: python tests/test_ui_smoke.py

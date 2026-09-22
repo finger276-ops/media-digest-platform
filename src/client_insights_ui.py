@@ -46,9 +46,9 @@ def build_period_change_insights(
         delta = new - old
         if abs(delta) < 1:
             continue
-        direction = "выросла" if delta > 0 else "снизилась"
-        if label == "сообщений":
-            direction = "выросло" if delta > 0 else "снизилось"
+        # «Количество» — средний род, согласование не зависит от того, что
+        # идёт после («сообщений»/«аудитории»/«охвата»/«вовлеченности»).
+        direction = "выросло" if delta > 0 else "снизилось"
         percent = f" ({delta / old * 100:+.0f}%)" if old else ""
         insights.append(
             f"Количество {label} {direction}: {format_int(delta)}{percent} к предыдущему периоду."
