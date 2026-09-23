@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import unicodedata
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -28,6 +29,8 @@ try:
 except Exception:  # pragma: no cover
     Client = Any  # type: ignore
     create_client = None  # type: ignore
+
+from services.observability import report_failure
 
 TABLES = [
     "events",
@@ -256,6 +259,57 @@ def get_project(project_id: str) -> dict[str, Any]:
     return dict(rows[0]) if rows else {}
 
 
+class AccessCodeError(ValueError):
+    """Код доступа нельзя сохранить: он занят другим проектом или совпадает
+    со вторым кодом того же проекта."""
+
+
+def access_code_problem(
+    *, viewer_code: str = "", editor_code: str = "", project_id: str | None = None
+) -> str | None:
+    """Почему эти коды нельзя сохранить проекту project_id; None — если можно.
+
+    Вход по коду ищет совпадение среди всех проектов, поэтому одинаковый код
+    у двух проектов открыл бы один из них — возможно, чужой. Сверка идёт и со
+    скрытыми и архивными проектами: их могут вернуть в работу. Пустой код
+    означает «не менять» и не проверяется.
+    """
+    new_viewer = hash_code(viewer_code)
+    new_editor = hash_code(editor_code)
+    if not new_viewer and not new_editor:
+        return None
+
+    projects = list_projects(include_inactive=True)
+    own = projects.iloc[0:0]
+    others = projects
+    if not projects.empty and project_id:
+        is_own = projects["project_id"].astype(str) == str(project_id)
+        own, others = projects[is_own], projects[~is_own]
+
+    def current(column: str) -> str:
+        if own.empty or column not in own.columns:
+            return ""
+        return str(own.iloc[0].get(column) or "")
+
+    viewer_after = new_viewer or current("viewer_code_hash")
+    editor_after = new_editor or current("editor_code_hash")
+    if viewer_after and viewer_after == editor_after:
+        return (
+            "Код пользователя и код аналитика должны различаться: по одинаковому "
+            "коду нельзя понять, кто входит в проект."
+        )
+
+    taken: set[str] = set()
+    for column in ("viewer_code_hash", "editor_code_hash"):
+        if column in others.columns:
+            taken.update(str(v) for v in others[column].dropna() if str(v))
+    if new_viewer and new_viewer in taken:
+        return "Такой код пользователя уже занят другим проектом. Придумайте другой."
+    if new_editor and new_editor in taken:
+        return "Такой код аналитика уже занят другим проектом. Придумайте другой."
+    return None
+
+
 def create_project(
     *,
     project_name: str,
@@ -264,8 +318,17 @@ def create_project(
     editor_code: str = "",
     settings: dict[str, Any] | None = None,
 ) -> str:
+    problem = access_code_problem(viewer_code=viewer_code, editor_code=editor_code)
+    if problem:
+        raise AccessCodeError(problem)
     client = get_supabase_client()
     project_id = make_project_id(project_name)
+    # project_id выводится из названия, и раньше запись шла upsert'ом: проект
+    # с тем же названием молча перезаписывал коды доступа существующего.
+    # Аналитик сам заводит проекты и чужих не видит — так он мог перехватить
+    # чужой проект, не подозревая об этом. Теперь совпадение даёт новый id.
+    if get_project(project_id):
+        project_id = f"{project_id}_{secrets.token_hex(3)}"
     payload = {
         "project_id": project_id,
         "project_name": project_name.strip() or project_id,
@@ -276,13 +339,18 @@ def create_project(
         "settings": settings or {},
         "updated_at": now_iso(),
     }
-    client.table("platform_projects").upsert(
-        payload, on_conflict="project_id"
-    ).execute()
+    client.table("platform_projects").insert(payload).execute()
     return project_id
 
 
 def update_project(project_id: str, **fields: Any) -> None:
+    problem = access_code_problem(
+        viewer_code=fields.get("viewer_code") or "",
+        editor_code=fields.get("editor_code") or "",
+        project_id=project_id,
+    )
+    if problem:
+        raise AccessCodeError(problem)
     payload: dict[str, Any] = {"updated_at": now_iso()}
     for key in ["project_name", "description", "status"]:
         if key in fields and fields[key] is not None:
@@ -299,18 +367,31 @@ def update_project(project_id: str, **fields: Any) -> None:
 
 
 def resolve_project_access(access_code: str) -> tuple[str | None, str]:
-    """Return (project_id, role) for a project code. Role is viewer/editor."""
+    """Return (project_id, role) for a project code. Role is viewer/editor.
+
+    Если код подходит к нескольким проектам, вход запрещается. Раньше
+    открывался первый по алфавиту — возможно, чужой. Новых совпадений не даёт
+    завести access_code_problem, а уже лежащие в базе должны закрывать вход,
+    пока коды не разведут; владельцу уходит сигнал о сбое.
+    """
     if not access_code:
         return None, "none"
     projects = list_projects(include_inactive=False)
     if projects.empty:
         return None, "none"
+    matches: list[tuple[str, str]] = []
     for _, row in projects.iterrows():
         if check_code(access_code, str(row.get("editor_code_hash") or "")):
-            return str(row["project_id"]), "editor"
-        if check_code(access_code, str(row.get("viewer_code_hash") or "")):
-            return str(row["project_id"]), "viewer"
-    return None, "none"
+            matches.append((str(row["project_id"]), "editor"))
+        elif check_code(access_code, str(row.get("viewer_code_hash") or "")):
+            matches.append((str(row["project_id"]), "viewer"))
+    if len(matches) > 1:
+        report_failure(
+            "вход по коду: код подходит к нескольким проектам, вход запрещён",
+            project_ids=[pid for pid, _ in matches],
+        )
+        return None, "none"
+    return matches[0] if matches else (None, "none")
 
 
 def _normalize_date_for_db(value: Any) -> str | None:

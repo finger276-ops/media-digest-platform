@@ -13,6 +13,7 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+from platform_store import AccessCodeError, access_code_problem
 from services.cached_store import (
     create_project,
     delete_project,
@@ -163,25 +164,29 @@ def render_project_manager(
             if not name.strip():
                 st.error("Укажите название проекта.")
             else:
-                project_id = create_project(
-                    project_name=name,
-                    description=description,
-                    viewer_code=viewer_code,
-                    editor_code=editor_code,
-                    settings={"topic_profile": topic_profile},
-                )
-                st.success(f"Проект создан: {project_id}")
-                if not is_admin:
-                    # Аналитик сидит в проекте, в который вошёл кодом. Новый
-                    # проект откроется только своим кодом — сказать об этом
-                    # надо сразу, иначе человек будет искать его в списке.
-                    st.info(
-                        "Чтобы перейти в новый проект, нажмите «Сменить проект "
-                        "/ выйти» и войдите кодом аналитика, который вы только "
-                        "что задали."
+                try:
+                    project_id = create_project(
+                        project_name=name,
+                        description=description,
+                        viewer_code=viewer_code,
+                        editor_code=editor_code,
+                        settings={"topic_profile": topic_profile},
                     )
+                except AccessCodeError as exc:
+                    st.error(str(exc))
                 else:
-                    st.rerun()
+                    st.success(f"Проект создан: {project_id}")
+                    if not is_admin:
+                        # Аналитик сидит в проекте, в который вошёл кодом. Новый
+                        # проект откроется только своим кодом — сказать об этом
+                        # надо сразу, иначе человек будет искать его в списке.
+                        st.info(
+                            "Чтобы перейти в новый проект, нажмите «Сменить "
+                            "проект / выйти» и войдите кодом аналитика, который "
+                            "вы только что задали."
+                        )
+                    else:
+                        st.rerun()
 
     if projects.empty:
         return
@@ -513,6 +518,17 @@ def render_project_manager(
                 key=f"edit_editor_code_{project_id}",
             )
             if st.button("Сохранить проект", key=f"save_project_{project_id}"):
+                # Коды проверяются до всего остального: ниже сохранение удаляет
+                # старый логотип из хранилища и загружает новый, и отказ после
+                # этого оставил бы проект со ссылкой на удалённый файл.
+                code_problem = access_code_problem(
+                    viewer_code=new_viewer_code,
+                    editor_code=new_editor_code,
+                    project_id=project_id,
+                )
+                if code_problem:
+                    st.error(code_problem)
+                    st.stop()
                 updated_settings = dict(current_settings)
                 updated_settings["topic_profile"] = new_topic_profile
                 updated_settings["chart_label_settings"] = {
@@ -595,15 +611,21 @@ def render_project_manager(
                         },
                     )
                 )
-                update_project(
-                    project_id,
-                    project_name=new_name,
-                    description=new_description,
-                    status=new_status,
-                    viewer_code=new_viewer_code,
-                    editor_code=new_editor_code,
-                    settings=updated_settings,
-                )
+                try:
+                    update_project(
+                        project_id,
+                        project_name=new_name,
+                        description=new_description,
+                        status=new_status,
+                        viewer_code=new_viewer_code,
+                        editor_code=new_editor_code,
+                        settings=updated_settings,
+                    )
+                except AccessCodeError as exc:
+                    # Проверка выше уже прошла; сюда попадает только гонка —
+                    # кто-то занял код, пока грузился логотип.
+                    st.error(str(exc))
+                    st.stop()
                 st.success("Проект обновлен.")
                 st.rerun()
 

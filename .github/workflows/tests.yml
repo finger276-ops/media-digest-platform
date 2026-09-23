@@ -133,3 +133,6 @@ jobs:
 
       - name: Роли и клиентский предпросмотр
         run: python tests/test_roles.py
+
+      - name: Коды доступа (уникальность, дубли закрывают вход)
+        run: python tests/test_access_codes.py
