@@ -590,8 +590,8 @@ def render_brand_map_settings(
 
         if brand_map["own"] and not brand_map["competitors"]:
             st.caption(
-                "Отмечены только свои бренды: доля голоса выйдет 100%, пока не "
-                "отмечены конкуренты."
+                "Отмечены только свои бренды: SOV и ReachScore покажут прочерк, "
+                "пока не отмечены конкуренты."
             )
         elif brand_map["competitors"] and not brand_map["own"]:
             st.caption(

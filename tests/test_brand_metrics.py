@@ -470,6 +470,100 @@ check(
     str(_metric_delta(card, None)),
 )
 
+# Отсутствие данных и законный ноль — разные ответы. Раньше выгрузка без
+# колонки «Тональность» давала SES, NSS и ToneVolumeScore ровно 0, а выгрузка
+# без реакций — ER и ERR 0: аналитик видел «нейтральный бренд без
+# вовлечённости» там, где платформе просто нечего было считать.
+from brand_metrics_ui import format_metric  # noqa: E402
+from services.brand_metrics import metrics_by_period  # noqa: E402
+from services.metrics_compute import prepare_dashboard_messages  # noqa: E402
+
+
+def frame(sentiments, **extra):
+    rows = []
+    for i, sentiment in enumerate(sentiments):
+        row = {"message_id": f"m{i}", "sentiment": sentiment, "views": 1000, "audience": 5000,
+               "author": f"a{i}", "chat_profile": f"https://vk.com/{i}", "event_title": f"Тема {i % 2}"}
+        for key, value in extra.items():
+            row[key] = value[i] if isinstance(value, list) else value
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+print("Нет разметки тональности — прочерк, а не ноль")
+# Канонический кадр без «Тональности» приходит с пустой строкой в sentiment
+# (import_adapters._normalize_sentiment), а не без колонки.
+unmarked = frame(["", "", "", ""], engagement=10)
+for variant, data in (("сырой кадр", unmarked), ("кадр дашборда", prepare_dashboard_messages(unmarked)),
+                      ("нет колонки sentiment", unmarked.drop(columns=["sentiment"]))):
+    cards = compute_brand_metrics(data)
+    for key in ("SES", "NSS", "TVS"):
+        check(f"{variant}: {key} недоступна", not cards[key]["available"], str(cards[key]["value"]))
+        check(f"{variant}: {key} объясняет причину", "тональност" in cards[key]["reason"].lower(), cards[key]["reason"])
+        check(f"{variant}: {key} на карточке прочерк", format_metric(cards[key]) == "—", format_metric(cards[key]))
+    check(f"{variant}: BPI по умолчанию недоступен", not cards["BPI"]["available"], str(cards["BPI"]["value"]))
+    check(f"{variant}: ER при этом считается", cards["ER"]["available"], cards["ER"]["reason"])
+
+nss_messages_basis = compute_brand_metrics(unmarked, settings={"nss_basis": "messages"})
+check("NSS по сообщениям тоже недоступна", not nss_messages_basis["NSS"]["available"])
+
+print("Всё нейтральное — законный ноль, не прочерк")
+neutral = frame(["нейтральная"] * 4, engagement=10)
+cards = compute_brand_metrics(neutral)
+for key in ("SES", "NSS", "TVS", "BPI"):
+    check(f"{key} доступна", cards[key]["available"], cards[key]["reason"])
+    check(f"{key} = 0", close(cards[key]["value"], 0.0), str(cards[key]["value"]))
+balanced = compute_brand_metrics(frame(["позитивная", "негативная", "позитивная", "негативная"], engagement=10))
+check("позитив = негатив даёт TVS 0, а не прочерк",
+      balanced["TVS"]["available"] and close(balanced["TVS"]["value"], 0.0), str(balanced["TVS"]["value"]))
+partial = compute_brand_metrics(frame(["позитивная", "", "", ""], engagement=10))
+check("частичная разметка считается как раньше (TVS 25%)", close(partial["TVS"]["value"], 25.0),
+      str(partial["TVS"]["value"]))
+
+print("BPI пересчитывает веса, если тональности нет, но есть ER")
+mixed_weights = compute_brand_metrics(unmarked, settings={"bpi_weights": {"NSS": 0.4, "SES": 0.4, "ER": 0.2}})
+check("BPI доступен", mixed_weights["BPI"]["available"], mixed_weights["BPI"]["reason"])
+check("BPI равен ER (единственная доступная)", close(mixed_weights["BPI"]["value"], mixed_weights["ER"]["value"], 0.01),
+      f'{mixed_weights["BPI"]["value"]} vs {mixed_weights["ER"]["value"]}')
+missing = str(mixed_weights["BPI"]["inputs"].get("Не хватило данных", ""))
+check("в расшифровке названы выпавшие NSS и SES", "NSS" in missing and "SES" in missing,
+      str(mixed_weights["BPI"]["inputs"]))
+
+print("Нет реакций — прочерк у ER и ERR")
+for variant, data in (
+    ("нет колонок реакций", frame(["нейтральная"] * 4)),
+    ("колонки пустые (NaN)", frame(["нейтральная"] * 4, likes=None, comments=None, reposts=None, engagement=None)),
+    ("канонические нули после импорта", frame(["нейтральная"] * 4, likes=0, comments=0, reposts=0, engagement=0)),
+    ("кадр дашборда",
+     prepare_dashboard_messages(frame(["нейтральная"] * 4, likes=0, comments=0, reposts=0, engagement=0))),
+):
+    cards = compute_brand_metrics(data)
+    for key in ("ER", "ERR"):
+        check(f"{variant}: {key} недоступна", not cards[key]["available"], str(cards[key]["value"]))
+        check(f"{variant}: {key} объясняет причину", "реакц" in cards[key]["reason"].lower(), cards[key]["reason"])
+    check(f"{variant}: тональность при этом считается", cards["TVS"]["available"])
+
+some = compute_brand_metrics(frame(["нейтральная"] * 4, likes=[0, 0, 0, 50], comments=0, reposts=0, engagement=0))
+check("реакции хоть у одного сообщения — ER считается",
+      some["ER"]["available"] and close(some["ER"]["value"], 50 / 20000 * 100, 0.01), str(some["ER"]["value"]))
+fallback = compute_brand_metrics(frame(["нейтральная"] * 4, likes=0, comments=0, reposts=0, engagement=[5, 0, 0, 0]))
+check("нули в лайках, но есть «Вовлечённость» — ER по ней", fallback["ER"]["available"], fallback["ER"]["reason"])
+
+print("Таблица, CSV и динамика показывают пустое значение с причиной")
+table = metrics_to_frame(compute_brand_metrics(unmarked))
+tvs_row = table[table["Метрика"] == "ToneVolumeScore"].iloc[0]
+check("в таблице значение пустое", pd.isna(tvs_row["Значение"]), str(tvs_row["Значение"]))
+check("в статусе причина", "тональност" in str(tvs_row["Статус"]).lower(), str(tvs_row["Статус"]))
+csv_text = table.to_csv(index=False)
+check("в CSV нет «0.0» у ToneVolumeScore", "ToneVolumeScore,Тональность с учётом объёма,," in csv_text, csv_text)
+dynamics = metrics_by_period(
+    pd.concat([unmarked.assign(period_id="p1"), neutral.assign(period_id="p2")], ignore_index=True), ["p1", "p2"]
+)
+check("динамика: период без разметки пуст", pd.isna(dynamics.loc[0, "ToneVolumeScore"]),
+      str(dynamics.to_dict("records")))
+check("динамика: нейтральный период — ноль", close(dynamics.loc[1, "ToneVolumeScore"], 0.0),
+      str(dynamics.to_dict("records")))
+
 print()
 if failures:
     print(f"ПРОВАЛЕНО: {len(failures)} → {failures}")

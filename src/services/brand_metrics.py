@@ -58,6 +58,21 @@ TECHNICAL_EVENT_TITLES = {
 
 DEFAULT_BPI_WEIGHTS = {"NSS": 0.4, "SES": 0.4, "TVS": 0.2}
 
+# Метрика без данных показывает прочерк и причину, а не ноль. Для тональности
+# и реакций это нужно проверять явно: пустая «Тональность» даёт маски «всё
+# False», и (0 − 0) / N выглядело бы измеренным нулём.
+EMPTY_SENTIMENT_VALUES = {"", "nan", "none", "null"}
+NO_SENTIMENT_REASON = (
+    "В выгрузке нет разметки тональности: колонка «Тональность» пуста "
+    "у всех сообщений периода."
+)
+# «Пусты или нулевые»: импорт хранит пустую ячейку реакций как 0, поэтому
+# отсутствие колонки и честные нули после загрузки не различить.
+NO_REACTIONS_REASON = (
+    "В выгрузке нет реакций: лайки, комментарии, репосты и «Вовлечённость» "
+    "пусты или нулевые у всех сообщений периода."
+)
+
 DEFAULT_SETTINGS: dict[str, Any] = {
     "bpi_weights": dict(DEFAULT_BPI_WEIGHTS),
     "nss_basis": "events",      # events | messages
@@ -125,23 +140,26 @@ def merge_settings(settings: dict[str, Any] | None) -> dict[str, Any]:
     return merged
 
 
+def _sentiment_text(messages: pd.DataFrame) -> pd.Series:
+    """Тональность сообщений строкой в нижнем регистре, «ё» → «е»."""
+    if "_sentiment_lower" in messages.columns:
+        return messages["_sentiment_lower"].fillna("").astype(str)
+    return (
+        messages.get("sentiment", pd.Series([""] * len(messages), index=messages.index))
+        .fillna("")
+        .astype(str)
+        .str.lower()
+        .str.replace("ё", "е", regex=False)
+    )
+
+
 def sentiment_masks(messages: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
     """Маски позитивных и негативных сообщений."""
     empty = pd.Series([False] * len(messages), index=messages.index)
     if messages is None or messages.empty:
         return empty, empty
 
-    if "_sentiment_lower" in messages.columns:
-        sentiment = messages["_sentiment_lower"].fillna("").astype(str)
-    else:
-        sentiment = (
-            messages.get("sentiment", pd.Series([""] * len(messages), index=messages.index))
-            .fillna("")
-            .astype(str)
-            .str.lower()
-            .str.replace("ё", "е", regex=False)
-        )
-
+    sentiment = _sentiment_text(messages)
     positive = sentiment.str.contains(POSITIVE_PATTERN, regex=True, na=False)
     negative = sentiment.str.contains(NEGATIVE_PATTERN, regex=True, na=False)
 
@@ -155,6 +173,23 @@ def sentiment_masks(messages: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
     # при грязной разметке приоритет у негатива, он важнее для рисков.
     positive = positive & ~negative
     return positive, negative
+
+
+def has_sentiment_markup(messages: pd.DataFrame) -> bool:
+    """Есть ли в периоде хоть какая-то разметка тональности.
+
+    «нейтральная» у всех сообщений — это разметка и законный ноль. Пустая
+    колонка — отсутствие данных, и тогда метрики тональности показывают
+    прочерк, а не ноль.
+    """
+    if messages is None or messages.empty:
+        return False
+    text = _sentiment_text(messages).str.strip()
+    if bool((~text.isin(EMPTY_SENTIMENT_VALUES)).any()):
+        return True
+    # Флаг негатива без текста тональности — тоже разметка.
+    _, negative = sentiment_masks(messages)
+    return bool(negative.any())
 
 
 def reaction_series(messages: pd.DataFrame) -> tuple[pd.Series, str]:
@@ -246,6 +281,9 @@ def compute_ses(messages: pd.DataFrame) -> dict[str, Any]:
             reason="В выгрузке нет ни просмотров, ни аудитории — охват неизвестен.",
         )
 
+    if not has_sentiment_markup(messages):
+        return _card("SES", value=None, formula=formula, hint=hint, reason=NO_SENTIMENT_REASON)
+
     positive_mask, negative_mask = sentiment_masks(messages)
     positive_reach = float(reach[positive_mask].sum())
     negative_reach = float(reach[negative_mask].sum())
@@ -318,6 +356,9 @@ def compute_nss(messages: pd.DataFrame, basis: str = "events") -> dict[str, Any]
         unit_name = "сообщений"
         formula = "% позитивных сообщений − % негативных сообщений"
 
+    if not has_sentiment_markup(messages):
+        return _card("NSS", value=None, formula=formula, hint=hint, reason=NO_SENTIMENT_REASON)
+
     if total == 0:
         return _card("NSS", value=None, formula=formula, hint=hint, reason="Не из чего считать доли.")
 
@@ -342,6 +383,9 @@ def compute_tone_volume_score(messages: pd.DataFrame) -> dict[str, Any]:
 
     if messages is None or messages.empty:
         return _card("TVS", value=None, formula=formula, hint=hint, reason="Нет сообщений за период.")
+
+    if not has_sentiment_markup(messages):
+        return _card("TVS", value=None, formula=formula, hint=hint, reason=NO_SENTIMENT_REASON)
 
     positive_mask, negative_mask = sentiment_masks(messages)
     positive = int(positive_mask.sum())
@@ -389,6 +433,8 @@ def compute_er(messages: pd.DataFrame) -> dict[str, Any]:
             hint=hint,
             reason="В выгрузке нет колонки «Аудитория» — не от чего считать долю.",
         )
+    if total_reactions <= 0:
+        return _card("ER", value=None, formula=formula, hint=hint, reason=NO_REACTIONS_REASON)
 
     return _card(
         "ER",
@@ -423,6 +469,8 @@ def compute_err(messages: pd.DataFrame) -> dict[str, Any]:
             hint=hint,
             reason="В выгрузке нет просмотров — охват неизвестен.",
         )
+    if total_reactions <= 0:
+        return _card("ERR", value=None, formula=formula, hint=hint, reason=NO_REACTIONS_REASON)
 
     return _card(
         "ERR",
