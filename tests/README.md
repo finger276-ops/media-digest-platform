@@ -19,6 +19,7 @@ python tests/test_reviews.py                 # отзывы о товаре: о�
 python tests/test_audience_metrics.py        # аудитория считается по площадкам, а не по строкам
 python tests/test_brand_metrics.py           # индексы бренда против примеров из Metric Calculation Guide
 python tests/test_brand_metrics_periods.py   # индексы по периодам: динамика «все периоды», изменение к прошлому
+python tests/test_category_store.py          # выгрузка по категории: агрегаты брендов, хранение, блок загрузки
 python tests/test_sentiment_markup.py        # тональность без разметки: прочерк вместо ложного нуля во всём продукте
 python tests/test_event_titles.py            # склейка похожих заголовков инфоповодов
 python tests/test_event_enrichment.py        # связь сообщений с инфоповодами, агрегация

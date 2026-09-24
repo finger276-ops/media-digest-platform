@@ -71,6 +71,9 @@ jobs:
       - name: Индексы бренда по периодам (динамика, изменение к прошлому)
         run: python tests/test_brand_metrics_periods.py
 
+      - name: Выгрузка по категории (агрегаты брендов, хранение, блок загрузки)
+        run: python tests/test_category_store.py
+
       - name: Тональность без разметки (прочерк вместо ложного нуля)
         run: python tests/test_sentiment_markup.py
 

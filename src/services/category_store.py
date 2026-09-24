@@ -2,8 +2,8 @@
 """Хранение категорийных бенчмарков (данных по конкурентам).
 
 Таблица `platform_category_benchmarks` описана в
-`sql/platform_brand_metrics_schema.sql`: одна строка на период проекта,
-разбивка по брендам целиком в jsonb.
+`sql/migrations/0005_platform_brand_metrics_schema.sql`: одна строка на период
+проекта, разбивка по брендам целиком в jsonb.
 
 Сами сообщения конкурентов не сохраняются — только агрегаты, которые нужны
 для SOV и ReachScore. Так категорийная выгрузка на сотни тысяч строк
@@ -40,25 +40,63 @@ BRAND_MODE_VALUES = "values"    # бренд записан значением �
 # ---------------------------------------------------------------------------
 
 
+# Колонки площадки в каноне выгрузки (import_adapters.CANONICAL_COLUMNS) и
+# в таблице сообщений проекта (message_normalize) называются по-разному.
+_CANONICAL_PLACE_COLUMNS = {
+    "chat_profile": "Профиль блога",
+    "author_profile": "Профиль автора",
+    "chat_title": "Блог",
+    "author": "Автор",
+}
+
+
+def _audience_place(table: pd.DataFrame) -> pd.Series:
+    """Ключ площадки для аудитории — и для сообщений проекта, и для канона.
+
+    Категорийная выгрузка приходит сюда прямо из разбора файла: в базу она не
+    идёт и нормализацию сообщений не проходит, поэтому колонки площадки у неё
+    русские («Профиль блога», «Автор»). audience_place_key знает только имена
+    таблицы сообщений, и без перевода каждая строка считалась отдельной
+    площадкой: пост и два комментария под ним утраивали аудиторию бренда.
+    """
+    if "_audience_place" in table.columns:
+        return table["_audience_place"]
+    places = pd.DataFrame(index=table.index)
+    for name, canonical in _CANONICAL_PLACE_COLUMNS.items():
+        if name in table.columns:
+            places[name] = table[name]
+        elif canonical in table.columns:
+            places[name] = table[canonical]
+    return audience_place_key(places)
+
+
+def tag_brand_columns(table: pd.DataFrame) -> list[str]:
+    """Теговые колонки Brand Analytics (после «Обработано») в порядке файла.
+
+    В категорийном мониторинге каждый бренд обычно ведётся отдельной такой
+    колонкой; их список разбор выгрузки кладёт в source_tag_columns.
+    """
+    if table is None or table.empty or "source_tag_columns" not in table.columns:
+        return []
+    columns: list[str] = []
+    for name in str(table["source_tag_columns"].iloc[0]).split("|"):
+        name = name.strip()
+        if name and name in table.columns and name not in columns:
+            columns.append(name)
+    return columns
+
+
 def candidate_brand_columns(table: pd.DataFrame) -> list[str]:
     """Колонки, в которых может лежать бренд.
 
-    Для Brand Analytics это в первую очередь теговые колонки после «Обработано»
-    (в категорийном мониторинге каждый бренд обычно ведётся отдельной колонкой),
-    затем — тематические колонки выгрузки.
+    Сначала теговые колонки Brand Analytics (tag_brand_columns), затем
+    заполненные тематические колонки — они для режима «название бренда
+    записано значением колонки».
     """
     if table is None or table.empty:
         return []
 
-    columns: list[str] = []
-    declared = str(table.get("source_tag_columns", pd.Series(dtype=str)).iloc[0]) if (
-        "source_tag_columns" in table.columns and len(table) > 0
-    ) else ""
-    for name in declared.split("|"):
-        name = name.strip()
-        if name and name in table.columns and name not in columns:
-            columns.append(name)
-
+    columns = tag_brand_columns(table)
     for name in ["Сюжет", "Основная тема", "Категории", "Теги", "Все темы"]:
         if name in table.columns and name not in columns:
             values = table[name].fillna("").astype(str).str.strip()
@@ -84,11 +122,7 @@ def aggregate_by_brand_columns(
     engagement = numeric_series(table, ENGAGEMENT_COLUMNS)
     # Площадка должна попасть в бренд один раз, сколько бы сообщений о нём
     # ни опубликовала: у поста и комментариев под ним одна аудитория.
-    place = (
-        table["_audience_place"]
-        if "_audience_place" in table.columns
-        else audience_place_key(table)
-    )
+    place = _audience_place(table)
 
     rows = []
     for column in brand_columns:
@@ -132,6 +166,9 @@ def aggregate_by_brand_values(
     work["_audience"] = numeric_series(work, AUDIENCE_COLUMNS).values
     work["_reach"] = numeric_series(work, REACH_COLUMNS).values
     work["_engagement"] = numeric_series(work, ENGAGEMENT_COLUMNS).values
+    # audience_by_group берёт готовый ключ площадки, если он есть: сам он
+    # русские колонки площадки из канона выгрузки не узнаёт.
+    work["_audience_place"] = _audience_place(work)
 
     grouped = (
         work.groupby("_brand")
@@ -372,33 +409,51 @@ def load_benchmarks(project_id: str, period_ids: list[str]) -> dict[str, dict[st
 
 
 def merged_benchmark(benchmarks: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
-    """Сложить бенчмарки нескольких периодов в один — для суммарных метрик."""
+    """Сложить бенчмарки нескольких периодов в один — для суммарных метрик.
+
+    Свой бренд берётся из отметки каждого периода, а не только первого, и
+    бренды сопоставляются без учёта регистра и ё — так же, как теги проекта.
+    Файлы за разные месяцы выгружаются по-разному: колонка бренда бывает то
+    «Knauf Insulation», то «KNAUF INSULATION». Раньше своим считался только
+    бренд первого периода, остальные месяцы своих упоминаний уходили в
+    конкуренты: доля голоса занижалась, а лидером по охвату мог выйти
+    собственный бренд.
+    """
     if not benchmarks:
         return None
     frames = []
-    own_brand = ""
     for record in benchmarks.values():
-        own_brand = own_brand or str(record.get("own_brand") or "")
-        brands = record.get("brands") or []
-        if brands:
-            frames.append(pd.DataFrame(brands))
+        frame = benchmark_frame(record)
+        if frame.empty:
+            continue
+        # Старые строки могли прийти без флага у бренда — тогда свой бренд
+        # узнаётся по own_brand записи, как и раньше.
+        own_key = _brand_key(record.get("own_brand"))
+        if own_key:
+            frame["is_own"] = frame["is_own"] | frame["brand"].map(_brand_key).eq(own_key)
+        frames.append(frame)
     if not frames:
         return None
 
     combined = pd.concat(frames, ignore_index=True)
-    for col in ["messages", "audience", "reach", "engagement"]:
-        if col not in combined.columns:
-            combined[col] = 0
-        combined[col] = pd.to_numeric(combined[col], errors="coerce").fillna(0).astype(int)
+    combined["_key"] = combined["brand"].map(_brand_key)
     grouped = (
-        combined.groupby("brand", as_index=False)[
-            ["messages", "audience", "reach", "engagement"]
-        ]
-        .sum()
+        combined.groupby("_key", sort=False)
+        .agg(
+            brand=("brand", "first"),
+            messages=("messages", "sum"),
+            audience=("audience", "sum"),
+            reach=("reach", "sum"),
+            engagement=("engagement", "sum"),
+            is_own=("is_own", "max"),
+        )
+        .reset_index(drop=True)
     )
-    grouped["is_own"] = grouped["brand"].astype(str) == own_brand
+    grouped["is_own"] = grouped["is_own"].astype(bool)
+    own_names = [str(x) for x in grouped.loc[grouped["is_own"], "brand"]]
     return {
-        "own_brand": own_brand,
+        "own_brand": own_names[0] if own_names else "",
+        "own_brands": own_names,
         "brands": grouped.to_dict("records"),
         "periods": len(benchmarks),
     }

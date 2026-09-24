@@ -808,7 +808,7 @@ def render_category_upload(
     except Exception as exc:  # noqa: BLE001
         st.warning(
             "Таблица категорийных бенчмарков недоступна. Выполните в Supabase "
-            "скрипт sql/platform_brand_metrics_schema.sql."
+            "миграцию sql/migrations/0005_platform_brand_metrics_schema.sql."
         )
         st.caption(f"Техническая ошибка: {exc}")
         return
@@ -907,10 +907,18 @@ def render_category_upload(
         brand_columns = st.multiselect(
             "Колонки брендов",
             candidates or list(table.columns),
-            default=candidates[:12],
+            # Заранее отмечены только теговые колонки. «Сюжет» и «Основная
+            # тема» в списке ради режима «по значениям»: колонкой бренда они
+            # заполнены почти у каждого сообщения и, отмеченные сами, выходили
+            # «брендом» с наибольшим числом упоминаний — доля голоса своего
+            # бренда съёживалась.
+            default=category_store.tag_brand_columns(table)[:12],
             key="category_brand_columns",
             placeholder="Выберите колонки",
         )
+        if not brand_columns:
+            st.info("Отметьте колонки, в которых записаны бренды.")
+            return
         brands = category_store.aggregate_by_brand_columns(table, brand_columns)
         brand_source = ", ".join(brand_columns)
     else:
