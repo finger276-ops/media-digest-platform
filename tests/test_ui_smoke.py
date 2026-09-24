@@ -564,6 +564,23 @@ check(
     any("«Вывод» заполняется вручную" in c for c in captions),
     str(captions)[:220],
 )
+# Подпись обещала, что вывод «попадает в выгрузку», и аналитик искал его в
+# отчёте Word/PDF/PNG, куда индексы не входят вовсе. Выводы уходят только в
+# CSV таблицы индексов. Если индексы когда-нибудь добавят в конструктор отчёта,
+# последняя проверка потребует поправить и подпись.
+from services.dashboard_config import REPORT_SECTION_OPTIONS  # noqa: E402
+
+notes_caption = next((c for c in captions if "«Вывод» заполняется вручную" in c), "")
+check("подпись не обещает «попадает в выгрузку»", "попадает в выгрузку" not in notes_caption, notes_caption)
+check("подпись называет CSV", "CSV" in notes_caption, notes_caption)
+brand_in_report = any("индекс" in str(v).lower() for v in REPORT_SECTION_OPTIONS.values())
+check(
+    "подпись согласована с составом отчёта",
+    brand_in_report == ("не входят" not in notes_caption),
+    f"индексы в отчёте: {brand_in_report}; подпись: {notes_caption}",
+)
+downloads = [str(e.proto.label) for e in at.get("download_button")]
+check("кнопка CSV на месте", "Скачать метрики в CSV" in downloads, str(downloads))
 check(
     "раскрытие формул осталось владельцу, рядом с настройкой весов",
     any("Как считается каждая метрика" in str(e.label) for e in at.expander),
