@@ -838,6 +838,9 @@ not_excel = {
     "веб-страница": ("﻿<html><body><table><tr><td>Дата</td></tr></table></body></html>".encode("utf-8"),
                      "веб-страница"),
     "текст с табуляцией": ("Дата\tСообщение\n24.04.2026\tПривет\n".encode("cp1251"), "текст"),
+    # «Юникод-текст» Excel: ноль в каждом втором байте, но это всё равно текст.
+    "текст в UTF-16": ("﻿Дата\tСообщение\r\n24.04.2026\tПривет\r\n".encode("utf-16-le"), "текст"),
+    "веб-архив MHTML": (b"MIME-Version: 1.0\r\nX-Document-Type: Workbook\r\n\r\n<html></html>", "веб-архив"),
 }
 for label, (payload, expected) in not_excel.items():
     try:
@@ -850,6 +853,20 @@ for label, (payload, expected) in not_excel.items():
             expected in message and ".xlsx или .csv" in message,
             message[:300],
         )
+
+# Настоящая книга, перед которой сервер дописал HTML-предупреждение: zipfile
+# такой архив читает, и починка стилей его спасала. Диагноз «веб-страница» не
+# должен перехватывать этот путь.
+with TemporaryDirectory() as tmp:
+    prefixed = Path(tmp) / "выгрузка.xlsx"
+    # Предупреждение длиннее 2 КБ: в заголовке файла тогда нет ни одного
+    # байта архива, и распознать книгу можно только по самому zip.
+    warning = b"<br />\n<b>Warning</b>: session_start() failed in /var/www/export.php\n" * 40
+    prefixed.write_bytes(warning + disguised_buffer.getvalue())
+    try:
+        check("xlsx с HTML-строкой перед архивом читается", len(read_source_table(prefixed)) == 1)
+    except Exception as exc:  # noqa: BLE001
+        check("xlsx с HTML-строкой перед архивом читается", False, f"{type(exc).__name__}: {exc}"[:200])
 
 for requirements_file in ("requirements.txt", "requirements-worker.txt"):
     text = (REPO / requirements_file).read_text(encoding="utf-8")

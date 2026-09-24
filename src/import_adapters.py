@@ -43,24 +43,39 @@ _EXCEL_SIGNATURES = (b"PK\x03\x04", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1")
 def _non_excel_content(path: Path) -> str | None:
     """Что лежит в файле с расширением Excel, если это не книга Excel.
 
-    Некоторые системы отдают веб-страницу или текст с разделителями под именем
-    «выгрузка.xls». Excel такие файлы открывает молча, а pandas падает с
-    «Excel file format cannot be determined» — человеку из этого не понять, что
-    делать. None — если файл похож на книгу или его не удалось прочитать.
+    Некоторые системы отдают веб-страницу, веб-архив или текст с разделителями
+    под именем «выгрузка.xls». Excel такие файлы открывает молча, а pandas
+    падает с «Excel file format cannot be determined» — человеку из этого не
+    понять, что делать. None — если файл похож на книгу, двоичный или его не
+    удалось прочитать.
     """
     try:
         with path.open("rb") as handle:
             head = handle.read(2048)
+        # Архив с мусором впереди (сервер дописал предупреждение перед
+        # книгой) zipfile читает, и починка стилей такой xlsx спасает. Это
+        # книга, а не страница, — диагноз здесь не нужен.
+        if zipfile.is_zipfile(path):
+            return None
     except OSError:
         return None
     if not head or head.startswith(_EXCEL_SIGNATURES):
         return None
-    text = head.lstrip(b"\xef\xbb\xbf\xff\xfe\xfe\xff \t\r\n\x00")
-    if text.startswith(b"<"):
+    if head.startswith((b"\xff\xfe", b"\xfe\xff")):
+        # «Юникод-текст» Excel — UTF-16 с меткой порядка байтов. В нём ноль в
+        # каждом втором байте, поэтому проверка на двоичность ниже его бы
+        # отбросила.
+        text = head.decode("utf-16", errors="ignore")
+    elif b"\x00" in head:
+        return None
+    else:
+        text = head.decode("utf-8", errors="replace")
+    text = text.lstrip("﻿ \t\r\n").lower()
+    if text.startswith("<"):
         return "веб-страница (HTML или XML)"
-    if b"\x00" not in head:
-        return "обычный текст с разделителями"
-    return None
+    if text.startswith("mime-version"):
+        return "веб-архив (MHTML)"
+    return "обычный текст"
 
 
 def _excel_error_mentions_styles(exc: Exception) -> bool:
