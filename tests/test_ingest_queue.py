@@ -2,7 +2,17 @@
 
 Тест повторяет форму API supabase-py (цепочки table().select().eq()...execute())
 и проверяет: захват задачи, конкурентную гонку двух воркеров, ретраи,
-резолв проекта по источнику и возврат зависших задач.
+резолв проекта по источнику, возврат зависших задач и ошибки настройки
+источника (ключ не заведен, источник выключен, регистр и пробелы в ключе).
+То, что воркер не повторяет такие задачи, проверяет tests/test_worker_e2e.py.
+
+Мутационные проверки (каждая обязана покраснеть):
+- убрать в resolve_task_target ветку «источник не найден» → раздел 10
+  (текст скатывается в общий «непонятно, в какой проект», ключ не назван);
+- бросать там голый ValueError вместо SourceConfigError → раздел 10;
+- проверять is_active только когда в задаче нет project_id → раздел 11;
+- убрать .strip() ключа в resolve_task_target и get_source → раздел 12;
+- сравнивать ключ через .lower() → раздел 12 (регистр важен, как в PostgREST).
 """
 
 import sys
@@ -122,6 +132,202 @@ try:
     check("отключенный источник блокирует загрузку", False, "исключения не было")
 except ValueError as exc:
     check("отключенный источник блокирует загрузку", "отключен" in str(exc))
+
+
+def resolve(task):
+    """Итог резолва: кортеж (проект, параметры, формат) или пойманная ошибка.
+
+    Ошибку возвращаем, а не пробрасываем: иначе сломанный код ронял бы тест
+    трассировкой вместо понятного «✗ такая-то проверка».
+    """
+    try:
+        return queue.resolve_task_target(task)
+    except ValueError as exc:  # SourceConfigError — наследник ValueError
+        return exc
+
+
+CONFIG_ERROR = queue.SourceConfigError
+JARGON = ("platform_ingest_sources", "project_id", "source_key", "Traceback")
+
+print("10. Незаведенный ключ источника")
+got = resolve({"source_key": "ba-typo", "params": {}})
+msg = str(got)
+check(
+    "задача без проекта с незаведенным ключом — ошибка настройки",
+    isinstance(got, CONFIG_ERROR),
+    f"{type(got).__name__}: {msg}",
+)
+# Без ветки «ключ не найден» задача все равно упала бы — на общей проверке
+# «непонятно, в какой проект». Поэтому проверяем именно текст: он должен
+# назвать ключ и сказать, что его нет.
+check("в тексте назван ключ и сказано, что его нет", "«ba-typo»" in msg and "не найден" in msg, msg)
+check("текст подсказывает, где завести источник", "Автозагрузка" in msg, msg)
+check("в тексте нет имен таблиц и полей", not any(word in msg for word in JARGON), msg)
+# Явный project_id важнее ключа: проект известен, задача идет со своими
+# параметрами. Если это поведение поменяется — тест должен об этом сказать.
+got = resolve({"source_key": "ba-typo", "project_id": "tn_project", "params": {"replace": False}})
+check(
+    "с явным проектом незаведенный ключ не мешает",
+    got == ("tn_project", {"replace": False}, "auto"),
+    str(got),
+)
+
+print("11. Выключенный источник")
+got = resolve({"source_key": "ba-weekly", "params": {}})
+check("выключенный источник — ошибка настройки", isinstance(got, CONFIG_ERROR), type(got).__name__)
+check("текст подсказывает, где включить", "Автозагрузка" in str(got), str(got))
+got = resolve({"source_key": "ba-weekly", "project_id": "tn_project", "params": {}})
+check(
+    "выключенный источник блокирует даже задачу с явным проектом",
+    isinstance(got, CONFIG_ERROR) and "отключен" in str(got),
+    str(got),
+)
+
+print("12. Как сравнивается ключ")
+queue.upsert_source(source_key="  ba-daily \t", project_id="daily_project")
+stored = [row["source_key"] for row in CLIENT.db[queue.SOURCES_TABLE]]
+check("пробелы по краям срезаются при сохранении", "ba-daily" in stored, str(stored))
+got = resolve({"source_key": " ba-daily\n"})
+check(
+    "пробелы по краям в задаче не мешают",
+    isinstance(got, tuple) and got[0] == "daily_project",
+    str(got),
+)
+got = resolve({"source_key": "BA-Daily"})
+check(
+    "большие и маленькие буквы различаются",
+    isinstance(got, CONFIG_ERROR) and "«BA-Daily»" in str(got),
+    str(got),
+)
+check("текст предупреждает про регистр", "большие и маленькие" in str(got), str(got))
+got = resolve({"source_key": "   "})
+check(
+    "ключ из одних пробелов — как пустой: «не найден» не пишем",
+    isinstance(got, CONFIG_ERROR) and "не найден" not in str(got),
+    str(got),
+)
+
+print("13. Давность поступлений: молчание источника видно")
+# Если письмо не пришло или n8n молча упал, задача просто не появится — очередь
+# об этом не скажет. Единственный сигнал — от источника давно не было задач.
+# Мутационные проверки: «>» → «>=» в сравнении с порогом роняет «ровно 8 дней»;
+# order(desc=True) → без сортировки роняет «последняя, а не первая»; если не
+# смотреть на is_active или params.stale_after_days — роняются «отключённый»,
+# «0 — не следить» и «месячный»; если игнорировать created_at источника —
+# роняется «только что заведённый».
+import pandas as pd  # noqa: E402
+
+NOW = datetime(2026, 9, 24, 12, 0, tzinfo=timezone.utc)
+
+
+def _ago(**delta):
+    return (NOW - timedelta(**delta)).isoformat()
+
+
+def _arrived(source_key, created_at):
+    CLIENT.db[queue.QUEUE_TABLE].append(
+        {
+            "task_id": f"fresh_{len(CLIENT.db[queue.QUEUE_TABLE])}",
+            "project_id": "tn_project",
+            "source_key": source_key,
+            "status": "done",
+            "file_sha256": "",
+            "created_at": created_at,
+        }
+    )
+
+
+# Старый файл вставлен первым: если выборка возьмёт не последнюю задачу, а
+# первую попавшуюся, свежий источник ложно окажется «замолчавшим».
+_arrived("fresh-src", _ago(days=10))
+_arrived("fresh-src", _ago(days=2))
+_arrived("late-src", _ago(days=12))
+_arrived("edge-src", _ago(days=8))
+_arrived("edge-late-src", _ago(days=8, minutes=1))
+_arrived("off-src", _ago(days=40))
+_arrived("manual-src", _ago(days=40))
+_arrived("monthly-src", _ago(days=20))
+_arrived("typo-src", _ago(days=12))
+
+fresh_sources = pd.DataFrame(
+    [
+        {"source_key": "fresh-src", "title": "Свежий", "is_active": True, "params": {}},
+        {"source_key": "late-src", "title": "Замолчавший", "is_active": True, "params": {}},
+        {"source_key": "edge-src", "title": "Ровно 8 дней", "is_active": True, "params": {}},
+        {"source_key": "edge-late-src", "title": "8 дней и минута", "is_active": True, "params": {}},
+        {"source_key": "off-src", "is_active": False, "params": {}},
+        {"source_key": "manual-src", "title": "Без расписания", "is_active": True, "params": {"stale_after_days": 0}},
+        {"source_key": "monthly-src", "title": "Месячный", "is_active": True, "params": {"stale_after_days": 31}},
+        {"source_key": "typo-src", "title": "Опечатка в пороге", "is_active": True, "params": {"stale_after_days": "неделя"}},
+        {"source_key": "never-src", "title": "Так и не заработал", "is_active": True, "params": {}, "created_at": _ago(days=30)},
+        {"source_key": "new-src", "title": "Только что заведён", "is_active": True, "params": {}, "created_at": _ago(days=2)},
+    ]
+)
+arrivals = queue.last_arrivals(fresh_sources["source_key"].tolist())
+check(
+    "берётся последняя задача источника, а не первая попавшаяся",
+    arrivals.get("fresh-src") == _ago(days=2),
+    str(arrivals.get("fresh-src")),
+)
+check("у источника без задач даты нет", "never-src" not in arrivals, str(arrivals))
+
+rows = {
+    row["source_key"]: row
+    for row in queue.source_freshness(fresh_sources, arrivals, now=NOW)
+}
+fresh = rows["fresh-src"]
+check(
+    "свежий источник в порядке и без тревоги",
+    fresh["state"] == queue.FRESH_OK and not fresh["alert"] and fresh["days_ago"] == 2,
+    str(fresh),
+)
+late = rows["late-src"]
+check(
+    "12 дней тишины при пороге 8 — предупреждение",
+    late["state"] == queue.FRESH_LATE and late["alert"] and late["days_ago"] == 12,
+    str(late),
+)
+check(
+    "ровно 8 дней — ещё не повод тревожиться (порог «больше 8 дней»)",
+    not rows["edge-src"]["alert"],
+    str(rows["edge-src"]),
+)
+check("8 дней и минута — уже предупреждение", rows["edge-late-src"]["alert"], str(rows["edge-late-src"]))
+check(
+    "отключённый источник не тревожит",
+    rows["off-src"]["state"] == queue.FRESH_OFF and not rows["off-src"]["alert"],
+    str(rows["off-src"]),
+)
+check(
+    "без названия показывается ключ, а не «nan»",
+    rows["off-src"]["title"] == "off-src",
+    str(rows["off-src"]["title"]),
+)
+check(
+    "порог 0 — источник без расписания, не следим",
+    rows["manual-src"]["state"] == queue.FRESH_OFF and not rows["manual-src"]["alert"],
+    str(rows["manual-src"]),
+)
+check(
+    "свой порог источника (31 день) важнее общего",
+    rows["monthly-src"]["state"] == queue.FRESH_OK and rows["monthly-src"]["limit_days"] == 31,
+    str(rows["monthly-src"]),
+)
+check(
+    "опечатка в пороге не выключает слежку — берётся общий порог",
+    rows["typo-src"]["limit_days"] == queue.DEFAULT_STALE_AFTER_DAYS and rows["typo-src"]["alert"],
+    str(rows["typo-src"]),
+)
+check(
+    "источник настроен месяц назад, а файлов так и не было — предупреждение",
+    rows["never-src"]["state"] == queue.FRESH_NEVER and rows["never-src"]["alert"],
+    str(rows["never-src"]),
+)
+check(
+    "только что заведённый источник без файлов — ожидание, не тревога",
+    rows["new-src"]["state"] == queue.FRESH_NEVER and not rows["new-src"]["alert"],
+    str(rows["new-src"]),
+)
 
 print()
 if failures:

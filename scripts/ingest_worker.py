@@ -197,7 +197,10 @@ def run(args: argparse.Namespace) -> int:
         started = time.monotonic()
         try:
             result = process_task(task, args.work_dir)
-        except IngestError as exc:
+        except (IngestError, queue.SourceConfigError) as exc:
+            # Битый файл и ошибка настройки источника повтором не лечатся:
+            # без этого задача с незаведенным ключом крутилась бы все попытки
+            # подряд в одном запуске, а в тексте ошибки оседала трассировка.
             LOG.error("Задача %s: %s", task_id, exc)
             queue.mark_error(task_id, str(exc), retry=False)
             failed.append({"task_id": task_id, "error": str(exc)})

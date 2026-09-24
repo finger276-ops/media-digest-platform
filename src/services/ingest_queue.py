@@ -40,6 +40,30 @@ STATUS_LABELS = {
 DEFAULT_MAX_ATTEMPTS = 3
 STALE_PROCESSING_MINUTES = 45
 
+# Сколько дней источник может молчать, прежде чем раздел «Автозагрузка»
+# предупредит. Выгрузки в основном еженедельные: неделя плюс день запаса на
+# задержку письма, чтобы не пугать владельца в сам день выгрузки. Порог
+# переопределяется в источнике (params.stale_after_days); 0 — не следить.
+DEFAULT_STALE_AFTER_DAYS = 8
+
+FRESH_OK = "ok"  # последний файл пришёл в пределах порога
+FRESH_LATE = "late"  # файлов нет дольше порога
+FRESH_NEVER = "never"  # от источника ещё не было ни одного файла
+FRESH_OFF = "off"  # источник отключён или порог 0 — перерывы не отслеживаем
+
+
+class SourceConfigError(ValueError):
+    """Задачу нельзя обработать из-за настроек источника автозагрузки.
+
+    Ключ не заведен в платформе, источник выключен или проект не определен —
+    повтор без правки настроек упадет точно так же. Поэтому воркер и кнопка
+    «Обработать очередь сейчас» не ставят такую задачу на повтор, а сразу
+    показывают ошибку: иначе она за один запуск прокручивалась все три попытки
+    подряд и в тексте ошибки оседала трассировка Python.
+
+    Наследник ValueError — чтобы старые `except ValueError` продолжали работать.
+    """
+
 
 def make_task_id(seed: str = "") -> str:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
@@ -132,6 +156,14 @@ def resolve_task_target(task: dict[str, Any]) -> tuple[str, dict[str, Any], str]
 
     Возвращает (project_id, params, source_system). Если в задаче не указан
     project_id, проект берется из маппинга источников по source_key.
+
+    Ключ сравнивается как есть, только без пробелов по краям: большие и
+    маленькие буквы различаются (так же сравнивает PostgREST в `eq`).
+    Незаведенный ключ при явном project_id — не ошибка: проект уже известен,
+    задача идет со своими параметрами. Выключенный источник блокирует задачу
+    всегда, даже с project_id: выключение — явный запрет владельца.
+
+    Ошибки настройки — SourceConfigError: повтором они не лечатся.
     """
     project_id = str(task.get("project_id") or "").strip()
     params = _json_field(task.get("params"))
@@ -142,7 +174,10 @@ def resolve_task_target(task: dict[str, Any]) -> tuple[str, dict[str, Any], str]
         source = get_source(source_key)
         if source:
             if not source.get("is_active", True):
-                raise ValueError(f"Источник «{source_key}» отключен в настройках.")
+                raise SourceConfigError(
+                    f"Источник «{source_key}» отключен. Включите его в разделе "
+                    "«Автозагрузка» и нажмите «Повторить обработку»."
+                )
             if not project_id:
                 project_id = str(source.get("project_id") or "").strip()
             source_params = _json_field(source.get("params"))
@@ -153,13 +188,21 @@ def resolve_task_target(task: dict[str, Any]) -> tuple[str, dict[str, Any], str]
             if source_system == "auto":
                 source_system = str(source.get("source_system") or "auto") or "auto"
         elif not project_id:
-            raise ValueError(
-                f"Источник «{source_key}» не найден в platform_ingest_sources "
-                "и в задаче не указан project_id."
+            # Без этой ветки задача упала бы на общей проверке ниже с текстом
+            # «непонятно, в какой проект» — и было бы неясно, что чинить.
+            # Здесь называем ключ и подсказываем, где его завести.
+            raise SourceConfigError(
+                f"Источник «{source_key}» не найден. Заведите его в разделе "
+                "«Автозагрузка» или проверьте, что ключ в n8n совпадает с ключом "
+                "в платформе буква в букву (большие и маленькие буквы "
+                "различаются), затем нажмите «Повторить обработку»."
             )
 
     if not project_id:
-        raise ValueError("Для задачи не удалось определить проект платформы.")
+        raise SourceConfigError(
+            "Непонятно, в какой проект загружать файл: в задаче нет ни проекта, "
+            "ни ключа источника."
+        )
     return project_id, params, source_system
 
 
@@ -384,3 +427,118 @@ def queue_stats(project_id: str | None = None) -> dict[str, int]:
         return {key: 0 for key in STATUS_LABELS}
     counts = tasks["status"].value_counts().to_dict()
     return {key: int(counts.get(key, 0)) for key in STATUS_LABELS}
+
+
+# ---------------------------------------------------------------------------
+# Давность поступлений по источникам
+# ---------------------------------------------------------------------------
+#
+# Если письмо не пришло или n8n молча упал, задача просто не появляется в
+# очереди — платформе не о чем сообщать. Единственное, что она может заметить,
+# — что от источника давно не было новых задач.
+
+
+def last_arrivals(source_keys: Any) -> dict[str, str]:
+    """Когда от каждого источника пришла последняя задача (её created_at).
+
+    Статус задачи не важен: упавшая обработка — это тоже «файл дошёл», про нее
+    и так говорит очередь. Запрос отдельный на каждый ключ: источников у проекта
+    единицы, а индекс (source_key, created_at desc) отдает последнюю строку
+    сразу — даже если она старше сотни задач, которые показывает таблица очереди.
+    """
+    client = get_supabase_client()
+    arrivals: dict[str, str] = {}
+    for key in dict.fromkeys(str(k or "").strip() for k in source_keys):
+        if not key:
+            continue
+        resp = (
+            client.table(QUEUE_TABLE)
+            .select("created_at")
+            .eq("source_key", key)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(resp, "data", None) or []
+        if rows and rows[0].get("created_at"):
+            arrivals[key] = str(rows[0]["created_at"])
+    return arrivals
+
+
+def stale_after_days(source: dict[str, Any]) -> int:
+    """Порог тишины источника в днях; 0 — источник без расписания."""
+    raw = _json_field(source.get("params")).get("stale_after_days")
+    if raw is None or raw == "":
+        return DEFAULT_STALE_AFTER_DAYS
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        # Порог правят руками в базе — опечатка не должна выключать слежку.
+        return DEFAULT_STALE_AFTER_DAYS
+
+
+def _parse_utc(value: Any) -> datetime | None:
+    if value is None or value == "":
+        return None
+    parsed = pd.to_datetime(value, errors="coerce", utc=True)
+    if pd.isna(parsed):
+        return None
+    return parsed.to_pydatetime()
+
+
+def source_freshness(
+    sources: pd.DataFrame | list[dict[str, Any]],
+    arrivals: dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Давность последнего файла по каждому источнику.
+
+    Возвращает по строке на источник: source_key, title, last_at (UTC или None),
+    days_ago (полных суток с последнего файла), limit_days, state (FRESH_*) и
+    alert — нужно ли предупредить. Функция чистая: `now` передается снаружи,
+    поэтому ее можно проверить без часов и без базы.
+    """
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    if isinstance(sources, pd.DataFrame):
+        records = [] if sources.empty else sources.to_dict("records")
+    else:
+        records = list(sources or [])
+
+    result: list[dict[str, Any]] = []
+    for source in records:
+        key = str(source.get("source_key") or "").strip()
+        limit_days = stale_after_days(source)
+        last_at = _parse_utc(arrivals.get(key))
+        days_ago = None if last_at is None else max(0, (now - last_at).days)
+        if not bool(source.get("is_active", True)) or limit_days == 0:
+            state, alert = FRESH_OFF, False
+        elif last_at is None:
+            state = FRESH_NEVER
+            # Только что заведенный источник без файлов — это ожидание, а не
+            # сбой. Тревожимся, если после настройки прошел целый срок.
+            configured_at = _parse_utc(source.get("created_at"))
+            alert = configured_at is not None and now - configured_at > timedelta(
+                days=limit_days
+            )
+        elif now - last_at > timedelta(days=limit_days):
+            state, alert = FRESH_LATE, True
+        else:
+            state, alert = FRESH_OK, False
+        title = source.get("title")
+        result.append(
+            {
+                "source_key": key,
+                # В DataFrame пропуск — NaN, а str(NaN) дал бы «nan» в интерфейсе.
+                "title": (str(title).strip() if pd.notna(title) else "") or key,
+                "is_active": bool(source.get("is_active", True)),
+                "last_at": last_at,
+                "days_ago": days_ago,
+                "limit_days": limit_days,
+                "state": state,
+                "alert": bool(alert),
+            }
+        )
+    return result

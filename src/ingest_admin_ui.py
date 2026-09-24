@@ -118,7 +118,9 @@ def _run_queue_now(project_id: str, work_dir: str, limit: int = 5) -> None:
         started = time.monotonic()
         try:
             result = _process_task_in_ui(task, work_dir)
-        except IngestError as exc:
+        except (IngestError, queue.SourceConfigError) as exc:
+            # Ошибка настройки источника — не «техническая»: повтор не поможет,
+            # человеку нужен понятный текст, что поправить.
             queue.mark_error(task_id, str(exc), retry=False)
             st.error(f"{label}: {exc}")
             failed += 1
@@ -139,6 +141,90 @@ def _run_queue_now(project_id: str, work_dir: str, limit: int = 5) -> None:
     progress.empty()
     if not processed and not failed:
         st.info("Новых задач в очереди нет.")
+
+
+def _days_word(n: int) -> str:
+    # После «больше»: больше 1 дня, 21 дня, но 8 дней, 11 дней.
+    return "дня" if n % 10 == 1 and n % 100 != 11 else "дней"
+
+
+def _freshness_label(row: dict[str, Any]) -> str:
+    state = row["state"]
+    if state == queue.FRESH_OFF:
+        return "➖ Источник отключён" if not row["is_active"] else "➖ Без расписания"
+    if state == queue.FRESH_NEVER:
+        return "⚠️ Файлов так и не было" if row["alert"] else "🕐 Ждём первый файл"
+    if state == queue.FRESH_LATE:
+        return "⚠️ Давно нет файлов"
+    return "✅ Файлы приходят"
+
+
+def _freshness_warning(row: dict[str, Any]) -> str:
+    limit = int(row["limit_days"])
+    if row["state"] == queue.FRESH_NEVER:
+        return (
+            f"«{row['title']}»: источник настроен больше {limit} {_days_word(limit)} "
+            "назад, а ни одного файла так и не пришло. Проверьте, что n8n включён "
+            f"и отправляет файлы с ключом «{row['source_key']}»."
+        )
+    return (
+        f"«{row['title']}»: новых файлов нет больше {limit} {_days_word(limit)}, "
+        f"последний пришёл {_fmt_dt(row['last_at'])}. Проверьте, пришло ли письмо "
+        "на почту и сработал ли n8n."
+    )
+
+
+def render_ingest_freshness_block(project_id: str) -> None:
+    """Когда от каждого источника приходил последний файл.
+
+    Очередь показывает только то, что дошло. Если письмо не пришло или n8n
+    упал, задачи просто нет — и без этого блока молчание источника выглядит
+    так же, как спокойная неделя.
+    """
+    st.subheader("Поступление файлов")
+    st.caption(
+        "Платформа видит только те файлы, которые до неё дошли. Если письмо с "
+        "выгрузкой не пришло или n8n его не забрал, задача просто не появится — "
+        "и сообщения об ошибке не будет. Поэтому здесь видно, когда от каждого "
+        "источника приходил последний файл."
+    )
+    try:
+        sources = queue.list_sources(project_id=project_id)
+        arrivals = (
+            {} if sources.empty else queue.last_arrivals(sources["source_key"].tolist())
+        )
+    except Exception as exc:  # noqa: BLE001 — остальной раздел должен работать
+        st.warning("Не удалось проверить, когда приходили файлы.")
+        st.caption(f"Техническая ошибка: {exc}")
+        return
+
+    if sources.empty:
+        st.info(
+            "Источников пока нет. Добавьте источник ниже — и здесь будет видно, "
+            "когда от него пришёл последний файл."
+        )
+        return
+
+    rows = queue.source_freshness(sources, arrivals)
+    for row in rows:
+        if row["alert"]:
+            st.warning(_freshness_warning(row))
+
+    view = pd.DataFrame(
+        {
+            "Источник": [row["title"] for row in rows],
+            "Последний файл": [_fmt_dt(row["last_at"]) or "—" for row in rows],
+            "Дней назад": [
+                "—" if row["days_ago"] is None else str(row["days_ago"]) for row in rows
+            ],
+            "Ждём не дольше, дней": [
+                "—" if row["state"] == queue.FRESH_OFF else str(row["limit_days"])
+                for row in rows
+            ],
+            "Состояние": [_freshness_label(row) for row in rows],
+        }
+    )
+    st.dataframe(view, width="stretch", hide_index=True)
 
 
 def render_ingest_queue_block(project_id: str, work_dir: str) -> None:
@@ -277,6 +363,17 @@ def render_ingest_sources_block(project_id: str, project_name: str) -> None:
             gap_hours = st.slider("Разрыв между волнами, часов", 1.0, 24.0, 3.0, 1.0)
         with c3:
             window_hours = st.slider("Макс. окно инфоповода, часов", 4.0, 72.0, 16.0, 4.0)
+        stale_days = st.number_input(
+            "Предупредить, если файлов нет дольше, дней",
+            min_value=0,
+            max_value=90,
+            value=queue.DEFAULT_STALE_AFTER_DAYS,
+            step=1,
+            help=(
+                "Для еженедельной выгрузки подходит 8: неделя и день запаса. "
+                "0 — не следить, если у источника нет расписания."
+            ),
+        )
         is_active = st.checkbox("Источник активен", value=True)
         submitted = st.form_submit_button("Сохранить источник", type="primary")
 
@@ -294,6 +391,7 @@ def render_ingest_sources_block(project_id: str, project_name: str) -> None:
                         "similarity_threshold": float(threshold),
                         "event_gap_hours": float(gap_hours),
                         "event_window_hours": float(window_hours),
+                        "stale_after_days": int(stale_days),
                         "replace": True,
                     },
                     is_active=bool(is_active),
@@ -354,6 +452,10 @@ def render_ingest_admin_page(project_id: str, project_name: str, work_dir: str) 
         "из почты, кладет его в хранилище и ставит задачу, платформа обрабатывает "
         "ее тем же алгоритмом, что и ручную загрузку."
     )
+    # Первым — молчание источников: очередь его не покажет, а заметить сбой
+    # доставки важнее, чем разобрать уже пришедшие файлы.
+    render_ingest_freshness_block(project_id)
+    st.divider()
     render_ingest_queue_block(project_id, work_dir)
     st.divider()
     render_ingest_sources_block(project_id, project_name)

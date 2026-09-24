@@ -990,12 +990,86 @@ check(
 )
 
 print("5. Раздел «Автозагрузка» по-прежнему работает")
+# Второй источник, который замолчал 20 дней назад: письмо не пришло или n8n
+# упал — задачи нет, и очередь об этом не скажет. Задача «done», чтобы не
+# менять счётчик «В очереди» ниже.
+_silent_since = (datetime.now(timezone.utc) - timedelta(days=20)).isoformat()
+CLIENT.db["platform_ingest_sources"].append(
+    {
+        "source_key": "ba-silent",
+        "project_id": "tn_project",
+        "title": "Замолчавшая рассылка",
+        "source_system": "brand_analytics",
+        "params": {},
+        "is_active": True,
+        "created_at": _silent_since,
+    }
+)
+CLIENT.db["platform_ingest_queue"].append(
+    {
+        "task_id": "ing_demo_silent",
+        "project_id": "tn_project",
+        "source_key": "ba-silent",
+        "storage_path": "inbox/ba-silent/old.xlsx",
+        "original_filename": "old.xlsx",
+        "file_sha256": "ghi",
+        "status": "done",
+        "attempts": 1,
+        "max_attempts": 3,
+        "period_name": "",
+        "error_message": "",
+        "created_at": _silent_since,
+        "finished_at": _silent_since,
+    }
+)
 open_section("Автозагрузка")
 check("раздел открылся без исключений", not at.exception, str(at.exception))
 texts = [m.value for m in at.markdown] + [h.value for h in at.subheader] + [h.value for h in at.header]
 check("очередь автозагрузки на месте", any("Очередь автозагрузки" in str(t) for t in texts))
 metrics = {str(m.label): m.value for m in at.metric}
 check("метрика «В очереди» = 1", any("В очереди" in k and v == "1" for k, v in metrics.items()), str(metrics))
+
+print("5.1. Автозагрузка: молчание источника видно")
+check("блок «Поступление файлов» на месте", any("Поступление файлов" in str(t) for t in texts))
+captions = [str(c.value) for c in at.caption]
+check(
+    "честно сказано, что платформа видит только дошедшие файлы",
+    any("видит только те файлы" in c and "не появится" in c for c in captions),
+    str(captions)[:300],
+)
+warnings = [str(w.value) for w in at.warning]
+check(
+    "предупреждение о замолчавшем источнике",
+    any("Замолчавшая рассылка" in w and "больше 8 дней" in w for w in warnings),
+    str(warnings),
+)
+check(
+    "источник, от которого файл пришёл сегодня, не тревожит",
+    not any("Еженедельный отчет BA" in w for w in warnings),
+    str(warnings),
+)
+freshness_tables = [
+    d.value for d in at.dataframe if "Последний файл" in getattr(d.value, "columns", [])
+]
+check(
+    "таблица с датой последнего файла по каждому источнику",
+    bool(freshness_tables) and len(freshness_tables[0]) == 2,
+    str([list(getattr(d.value, "columns", [])) for d in at.dataframe]),
+)
+# Порог настраивается в форме источника: у месячной выгрузки 8 дней тишины —
+# норма. Без записи в params настройка была бы пустой ручкой.
+[t for t in at.text_input if str(t.label) == "Ключ источника"][0].set_value("ba-monthly")
+[n for n in at.number_input if "файлов нет дольше" in str(n.label)][0].set_value(31)
+[b for b in at.button if str(b.label) == "Сохранить источник"][0].click().run()
+check("сохранение источника не роняет раздел", not at.exception, str(at.exception))
+saved = next(
+    (s for s in CLIENT.db["platform_ingest_sources"] if s["source_key"] == "ba-monthly"), {}
+)
+check(
+    "порог из формы сохранён в источник",
+    (saved.get("params") or {}).get("stale_after_days") == 31,
+    str(saved),
+)
 
 print("6. Страница загрузки файла")
 open_section("Загрузка файла")

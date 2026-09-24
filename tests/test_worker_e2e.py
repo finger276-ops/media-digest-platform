@@ -185,6 +185,117 @@ check(
     str({item["period_name"] for item in SAVED_PERIODS}),
 )
 
+print("7. Незаведенный или выключенный источник: ошибка сразу, без повторов")
+# Раньше такая задача считалась «техническим сбоем»: воркер ставил ее на
+# повтор, тут же забирал снова и за один запуск сжигал все три попытки —
+# с трассировкой Python в тексте ошибки и тремя тревогами владельцу.
+REPORTED: list[tuple[str, str]] = []
+ingest_worker.report_failure = (
+    lambda where, exc=None, **_ctx: REPORTED.append((where, str(exc))) or False
+)
+queue.upsert_source(source_key="ba-paused", project_id="tn_project", is_active=False)
+# Файлы на месте: если задача и упадет, то именно на настройке источника.
+STORAGE["inbox/ba-weekly/typo.xlsx"] = make_ba_export(10, 1)
+STORAGE["inbox/ba-weekly/paused.xlsx"] = make_ba_export(10, 1)
+typo_task = queue.enqueue_task(
+    storage_path="inbox/ba-weekly/typo.xlsx",
+    source_key="ba-weelky",
+    original_filename="Опечатка в ключе.xlsx",
+    file_sha256="hash-typo",
+)
+paused_task = queue.enqueue_task(
+    storage_path="inbox/ba-weekly/paused.xlsx",
+    source_key="ba-paused",
+    original_filename="Источник на паузе.xlsx",
+    file_sha256="hash-paused",
+)
+before = len(SAVED_PERIODS)
+exit_code_3 = ingest_worker.run(ARGS)
+typo = queue.get_task(typo_task)
+paused = queue.get_task(paused_task)
+check("задача с опечаткой в ключе сразу в «Ошибке»", typo["status"] == "error", typo["status"])
+check("одна попытка, без повторов в том же запуске", typo["attempts"] == 1, str(typo["attempts"]))
+check(
+    "выключенный источник — тоже сразу «Ошибка» с одной попыткой",
+    paused["status"] == "error" and paused["attempts"] == 1,
+    f'{paused["status"]}, попыток {paused["attempts"]}',
+)
+check(
+    "в тексте ошибки нет трассировки Python",
+    "Traceback" not in str(typo["error_message"]) + str(paused["error_message"]),
+    str(typo["error_message"])[:120],
+)
+check("текст ошибки называет ключ", "«ba-weelky»" in str(typo["error_message"]), str(typo["error_message"])[:120])
+check("по одной тревоге владельцу на задачу", len(REPORTED) == 2, str(len(REPORTED)))
+check(
+    "тревога не называет это техническим сбоем",
+    not any("технический" in where for where, _ in REPORTED),
+    str([where for where, _ in REPORTED]),
+)
+check("период не создан", len(SAVED_PERIODS) == before, str(len(SAVED_PERIODS) - before))
+check("воркер сообщил о проблеме кодом 1", exit_code_3 == 1, str(exit_code_3))
+exit_code_4 = ingest_worker.run(ARGS)
+check(
+    "следующий запуск эти задачи не трогает",
+    queue.get_task(typo_task)["attempts"] == 1 and exit_code_4 == 0,
+    f'попыток {queue.get_task(typo_task)["attempts"]}, код {exit_code_4}',
+)
+
+print("8. Кнопка «Обработать очередь сейчас» — так же, как воркер")
+
+
+class _StubStreamlit:
+    """Заглушка вместо Streamlit: собирает сообщения об ошибках с экрана."""
+
+    def __init__(self):
+        self.errors: list[str] = []
+
+    def progress(self, *_a, **_k):
+        return self
+
+    def empty(self):
+        return None
+
+    def error(self, text, *_a, **_k):
+        self.errors.append(str(text))
+
+    def success(self, *_a, **_k):
+        return None
+
+    def info(self, *_a, **_k):
+        return None
+
+
+# Импорт здесь, а не наверху: модуль интерфейса тянет Streamlit, а первые
+# разделы теста проверяют воркер, которому Streamlit не нужен.
+import ingest_admin_ui  # noqa: E402
+
+SCREEN = _StubStreamlit()
+ingest_admin_ui.st = SCREEN
+ui_task = queue.enqueue_task(
+    storage_path="inbox/ba-weekly/typo.xlsx",
+    source_key="ba-weelky",
+    original_filename="Опечатка из интерфейса.xlsx",
+    file_sha256="hash-typo-ui",
+)
+ingest_admin_ui._run_queue_now("tn_project", ARGS.work_dir)
+ui_result = queue.get_task(ui_task)
+check(
+    "задача сразу в «Ошибке» с одной попыткой",
+    ui_result["status"] == "error" and ui_result["attempts"] == 1,
+    f'{ui_result["status"]}, попыток {ui_result["attempts"]}',
+)
+check(
+    "на экране одно сообщение и без слов «техническая ошибка»",
+    len(SCREEN.errors) == 1 and "техническая" not in SCREEN.errors[0],
+    str(SCREEN.errors)[:200],
+)
+check(
+    "в тексте ошибки нет трассировки Python",
+    "Traceback" not in str(ui_result["error_message"]),
+    str(ui_result["error_message"])[:120],
+)
+
 print()
 if failures:
     print(f"ПРОВАЛЕНО: {len(failures)} → {failures}")
