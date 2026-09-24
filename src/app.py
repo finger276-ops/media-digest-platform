@@ -23,7 +23,6 @@ from services.cached_store import (
     update_project,
     resolve_project_access,
     list_periods,
-    load_generated_tables,
     update_period_metadata,
     delete_period,
     delete_project,
@@ -45,7 +44,6 @@ from services.metrics_compute import (
 )
 from services.tag_compute import (
     split_pipe_values,
-    clean_brand_analytics_tags,
     build_tag_statistics,
 )
 from services.message_compute import message_text_column, message_link_column
@@ -71,11 +69,11 @@ from services.perf import perf_block, render_perf_sidebar, reset_perf_events
 from services.formatting import fmt_date, fmt_period
 from services.roles import role_rank
 from services.manual_moderation import (
-    apply_manual_overrides,
     blocked_title_merges,
     recompute_event_counts,
 )
-from services.event_enrichment import enrich_messages, aggregate_events
+from services.event_enrichment import aggregate_events
+from services.dashboard_data import prepare_period_data
 from summary_ui import render_period_summary
 from sidebar_ui import (
     NAV_STATE_KEY,
@@ -156,15 +154,7 @@ def _dashboard_data_uncached(
     project_id: str, period_ids: list[str]
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, Any]]:
     """Загрузить и подготовить данные проекта за выбранные периоды."""
-    events, _discussions, messages, discussion_messages, event_discussions = (
-        load_generated_tables(project_id, period_ids)
-    )
-    enriched = enrich_messages(messages, event_discussions, discussion_messages, events)
-    events, enriched, manual_state = apply_manual_overrides(project_id, events, enriched)
-    # Brand Analytics: в блоке тегов остаются только системные колонки после
-    # «Обработано», без legacy-меток старых алгоритмов.
-    enriched = clean_brand_analytics_tags(enriched)
-    enriched = prepare_dashboard_messages(enriched)
+    events, enriched, manual_state = prepare_period_data(project_id, period_ids)
     return events, enriched, aggregate_events(events), manual_state
 
 

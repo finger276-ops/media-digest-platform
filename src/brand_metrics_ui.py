@@ -37,10 +37,10 @@ from services.cached_store import (
     ManualEditConflict,
     cache_version,
     clear_platform_caches,
-    load_table,
     update_project,
 )
 from services.ingest import IngestError, read_canonical_bytes
+from services.dashboard_data import prepare_period_messages
 from services.metric_notes import (
     load_note_versions,
     load_notes,
@@ -107,7 +107,11 @@ def _save_metric_settings(
 
 @st.cache_data(show_spinner=False, max_entries=6, ttl=900)
 def _cached_previous_metrics(
-    project_id: str, period_id: str, fingerprint: str, data_version: int
+    project_id: str,
+    period_id: str,
+    fingerprint: str,
+    data_version: int,
+    manual_version: int,
 ) -> dict[str, float]:
     """Значения метрик прошлого периода — для динамики в карточках.
 
@@ -117,9 +121,10 @@ def _cached_previous_metrics(
 
     Отпечаток настроек в ключе не украшение: веса BPI и разметка брендов меняют
     значения, и без него аналитик, поправивший веса, сравнивал бы новое число
-    со старым.
+    со старым. Версия ручных правок в ключе по той же причине: прошлый период
+    готовится так же, как выбранный, вместе с поправленной тональностью.
     """
-    messages = load_table(project_id, [period_id], "messages")
+    messages = prepare_period_messages(project_id, [period_id])
     if messages is None or messages.empty:
         return {}
     settings, own, competitors = json.loads(fingerprint)
@@ -151,6 +156,7 @@ def previous_period_metrics(
             str(period_id),
             fingerprint,
             cache_version(project_id, "data"),
+            cache_version(project_id, "manual"),
         )
     except Exception:  # noqa: BLE001 — динамика не критична для раздела
         return {}
@@ -430,9 +436,14 @@ def render_metrics_dynamics(
             work_messages = messages
             missing = [pid for pid in all_period_ids if pid not in set(period_ids)]
             if missing:
+                # Догруженные периоды готовятся так же, как выбранные. Раньше они
+                # шли сырыми: после склейки служебные колонки у них были пустые,
+                # и одинаковые по данным периоды давали на графике разные
+                # значения — у выбранного SES 25 %, у догруженного прочерк и
+                # NSS −100 %.
                 with st.spinner(f"Загружаю сообщения ещё {len(missing)} периодов..."):
-                    extra = load_table(project_id, missing, "messages")
-                if not extra.empty:
+                    extra = prepare_period_messages(project_id, missing)
+                if extra is not None and not extra.empty:
                     work_messages = pd.concat(
                         [work_messages, extra], ignore_index=True, sort=False
                     )

@@ -68,6 +68,9 @@ jobs:
       - name: Индексы бренда (формулы против примеров из гайда)
         run: python tests/test_brand_metrics.py
 
+      - name: Индексы бренда по периодам (динамика, изменение к прошлому)
+        run: python tests/test_brand_metrics_periods.py
+
       - name: Склейка похожих заголовков инфоповодов
         run: python tests/test_event_titles.py
 
