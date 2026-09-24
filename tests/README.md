@@ -7,7 +7,7 @@
 
 ```bash
 pip install -r requirements.txt              # нужен полный набор: streamlit, matplotlib, python-docx, reportlab
-python tests/test_import_adapters.py         # разбор выгрузок: форматы, канонизация, починка битого xlsx
+python tests/test_import_adapters.py         # разбор выгрузок: форматы (xlsx, xls, csv), канонизация, починка битого xlsx
 python tests/test_import_report.py           # диагностика импорта: что прочитано, что не понято
 python tests/test_preprocess.py              # обработка: микротемы, заголовки инфоповодов, сборка таблиц
 python tests/test_preprocess_split.py        # контракт распила preprocess.py: ре-экспорт, отсутствие циклов

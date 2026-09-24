@@ -91,6 +91,16 @@ with TemporaryDirectory() as tmp:
         str(sorted(p.name for p in leftovers() - before)),
     )
 
+print("4. Excel 97-2003 (.xls) читается, а не падает без xlrd")
+# Загрузчик структуры принимает .xls, но читать его раньше было нечем. Берётся
+# первый лист синтетической книги из tests/fixtures — «Обложка».
+xls_bytes = (REPO / "tests" / "fixtures" / "ba_export_97.xls").read_bytes()
+try:
+    xls_df = _read_structure_file(FakeUploadedFile(xls_bytes, "structure.xls"))
+    check("xls прочитан", list(xls_df.columns) == ["Отчёт Brand Analytics"], str(list(xls_df.columns)))
+except Exception as exc:  # noqa: BLE001
+    check("xls прочитан", False, f"{type(exc).__name__}: {exc}"[:200])
+
 print()
 if failures:
     print(f"ПРОВАЛЕНО: {len(failures)} → {failures}")

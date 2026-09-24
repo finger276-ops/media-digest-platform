@@ -36,6 +36,33 @@ MINIMAL_XLSX_STYLES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 LOGGER = logging.getLogger("platform.import_adapters")
 
 
+# Сигнатуры настоящих книг Excel: xlsx/xlsm — zip-архив, xls — контейнер OLE2.
+_EXCEL_SIGNATURES = (b"PK\x03\x04", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1")
+
+
+def _non_excel_content(path: Path) -> str | None:
+    """Что лежит в файле с расширением Excel, если это не книга Excel.
+
+    Некоторые системы отдают веб-страницу или текст с разделителями под именем
+    «выгрузка.xls». Excel такие файлы открывает молча, а pandas падает с
+    «Excel file format cannot be determined» — человеку из этого не понять, что
+    делать. None — если файл похож на книгу или его не удалось прочитать.
+    """
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(2048)
+    except OSError:
+        return None
+    if not head or head.startswith(_EXCEL_SIGNATURES):
+        return None
+    text = head.lstrip(b"\xef\xbb\xbf\xff\xfe\xfe\xff \t\r\n\x00")
+    if text.startswith(b"<"):
+        return "веб-страница (HTML или XML)"
+    if b"\x00" not in head:
+        return "обычный текст с разделителями"
+    return None
+
+
 def _excel_error_mentions_styles(exc: Exception) -> bool:
     message = str(exc).lower()
     return (
@@ -110,6 +137,12 @@ def _open_excel_file_resilient(path: Path) -> Iterator[pd.ExcelFile]:
         try:
             xls = pd.ExcelFile(path)
         except Exception as exc:
+            content = _non_excel_content(path)
+            if content:
+                raise ValueError(
+                    f"Файл назван как Excel, но внутри {content}. Откройте его в "
+                    "Excel или LibreOffice и сохраните как .xlsx или .csv."
+                ) from exc
             # openpyxl may raise either a friendly "could not read stylesheet"
             # ValueError or a raw XMLSyntaxError while parsing xl/styles.xml. For
             # XLSX/XLSM files it is safe to try one repaired copy before failing.

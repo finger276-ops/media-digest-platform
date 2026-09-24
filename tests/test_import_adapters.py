@@ -3,9 +3,11 @@
 Через этот модуль проходит каждый загруженный клиентом файл, и ломается он
 как раз тогда, когда приходит выгрузка нового формата. Тесты фиксируют
 поведение на синтетических таблицах — без сети и (кроме проверки починки
-битого xlsx) без файлов на диске.
+битого xlsx и синтетической книги .xls в tests/fixtures) без файлов на диске.
 """
 
+import io
+import re
 import sys
 import tempfile
 import zipfile
@@ -770,6 +772,88 @@ check(
     str(product.loc[0, "Товар"]) == "Гвозди",
     str(product.get("Товар")),
 )
+
+print("18. Excel 97-2003 (.xls) читается так же, как xlsx")
+# Платформа принимала .xls на загрузке, но читать его было нечем: openpyxl
+# понимает только xlsx, а xlrd не стоял в зависимостях. Файл падал с
+# «Missing optional dependency 'xlrd'». Фикстура синтетическая: обложка,
+# пустой лист и лист «Сообщения» со строкой-заголовком над шапкой.
+from services.ingest import IngestError, read_canonical_bytes  # noqa: E402
+
+XLS_FIXTURE = REPO / "tests" / "fixtures" / "ba_export_97.xls"
+xls_names = get_excel_sheet_names(XLS_FIXTURE)
+check("листы .xls перечислены", xls_names == ["Обложка", "Пустой", "Сообщения"], str(xls_names))
+try:
+    xls_table = read_source_table(XLS_FIXTURE)
+    check("прочитаны ровно три сообщения", len(xls_table) == 3, str(len(xls_table)))
+    check(
+        "выбран лист «Сообщения», шапка найдена под строкой-заголовком",
+        str(xls_table.loc[0, "Сообщение"]) == "Первое сообщение про кровлю",
+        str(xls_table.loc[0, "Сообщение"])[:80],
+    )
+    check(
+        "распознан Brand Analytics",
+        xls_table.loc[0, "source_system"] == "brand_analytics",
+        str(xls_table.loc[0, "source_system"]),
+    )
+    check(
+        "ячейка-дата читается как в xlsx",
+        str(xls_table.loc[0, "Дата"]).startswith("2026-04-24"),
+        str(xls_table.loc[0, "Дата"]),
+    )
+    check("целое число без «.0»", str(xls_table.loc[0, "Аудитория"]) == "1500", str(xls_table.loc[0, "Аудитория"]))
+    check(
+        "кириллица и кавычки целы",
+        "«кавычки»" in str(xls_table.loc[1, "Сообщение"]),
+        str(xls_table.loc[1, "Сообщение"]),
+    )
+except Exception as exc:  # noqa: BLE001
+    check("прочитаны ровно три сообщения", False, f"{type(exc).__name__}: {exc}"[:200])
+
+try:
+    uploaded = read_canonical_bytes(XLS_FIXTURE.read_bytes(), "Выгрузка BA.xls")
+    check("загрузка через интерфейс принимает .xls", len(uploaded) == 3, str(len(uploaded)))
+except IngestError as exc:
+    check("загрузка через интерфейс принимает .xls", False, str(exc)[:200])
+
+# xlsx, сохранённый с расширением .xls: движок выбирается по содержимому,
+# а не по расширению.
+disguised_buffer = io.BytesIO()
+with pd.ExcelWriter(disguised_buffer, engine="openpyxl") as writer:
+    pd.DataFrame(
+        [{"Дата": "24.04.2026", "Сообщение": "xlsx под видом xls", "Ссылка": "https://e.ru/1",
+          "Автор": "u", "Площадка": "vk.com"}]
+    ).to_excel(writer, sheet_name="Сообщения", index=False)
+with TemporaryDirectory() as tmp:
+    disguised = Path(tmp) / "выгрузка.xls"
+    disguised.write_bytes(disguised_buffer.getvalue())
+    try:
+        check("xlsx с расширением .xls читается", len(read_source_table(disguised)) == 1)
+    except Exception as exc:  # noqa: BLE001
+        check("xlsx с расширением .xls читается", False, f"{type(exc).__name__}: {exc}"[:200])
+
+# Веб-страница или текст под именем .xls: Excel открывает такое молча, а
+# pandas падал с «Excel file format cannot be determined».
+not_excel = {
+    "веб-страница": ("﻿<html><body><table><tr><td>Дата</td></tr></table></body></html>".encode("utf-8"),
+                     "веб-страница"),
+    "текст с табуляцией": ("Дата\tСообщение\n24.04.2026\tПривет\n".encode("cp1251"), "текст"),
+}
+for label, (payload, expected) in not_excel.items():
+    try:
+        read_canonical_bytes(payload, "выгрузка.xls")
+        check(f"{label} под видом .xls: понятная ошибка", False, "файл прочитан без ошибки")
+    except IngestError as exc:
+        message = str(exc)
+        check(
+            f"{label} под видом .xls: понятная ошибка",
+            expected in message and ".xlsx или .csv" in message,
+            message[:300],
+        )
+
+for requirements_file in ("requirements.txt", "requirements-worker.txt"):
+    text = (REPO / requirements_file).read_text(encoding="utf-8")
+    check(f"xlrd объявлен в {requirements_file}", re.search(r"^xlrd\s*[<>=]", text, re.M) is not None)
 
 print()
 if failures:
