@@ -50,8 +50,25 @@ DEFAULT_MAX_TOKENS = 1800
 DEFAULT_TEMPERATURE = 0.3
 
 
+# Вид ошибки — чтобы интерфейс и тесты различали случаи, не разбирая текст
+# сообщения. Пустая строка — всё остальное.
+ERROR_CONTEXT = "context"  # запрос не поместился в модель — поможет сократить его
+ERROR_QUOTA = "quota"  # кончились оплаченные токены — повтор не поможет
+ERROR_RATE = "rate"  # слишком часто — пройдёт само через минуту
+
+
 class AIError(Exception):
-    """Ошибка генерации, которую можно показать пользователю как есть."""
+    """Ошибка генерации, которую можно показать пользователю как есть.
+
+    `detail` — исходный ответ сервиса, если его убрали из текста сообщения.
+    Гостю демо и редактору JSON провайдера ничего не скажет, а владельцу без
+    него не понять, что именно ответил сервис, — поэтому он лежит отдельно.
+    """
+
+    def __init__(self, message: str = "", *, kind: str = "", detail: str = "") -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.detail = detail
 
 
 def _secret_value(*names: str) -> str:
@@ -377,24 +394,119 @@ def tls_trust_hint(config: "AIConfig") -> str:
     )
 
 
-def _readable_http_error(status: int, body: str, provider: str) -> str:
-    text = (body or "").strip()[:400]
-    if status in (401, 403):
-        return (
-            f"{PROVIDER_TITLES.get(provider, provider)} отклонил ключ доступа "
-            f"(код {status}). Проверьте ключ и права сервисного аккаунта. {text}"
-        )
+# Провайдеры называют превышение лимита по-разному и меняют формулировки без
+# предупреждения, поэтому ищем по набору признаков, а не по одной фразе.
+# YandexGPT: «Number of input tokens must be no more than 8192», шлюзы в духе
+# OpenAI: «maximum context length», GigaChat: код 413 или русский текст.
+_CONTEXT_MARKERS = (
+    "context length",
+    "context_length",
+    "context window",
+    "maximum context",
+    "input tokens",
+    "too many tokens",
+    "token limit",
+    "tokens limit",
+    "too long",
+    "too large",
+    "слишком много токенов",
+    "лимит токенов",
+    "длина контекста",
+    "длину контекста",
+    "слишком длинн",
+)
+# Кончились деньги или пакет токенов: повтор не поможет, пока владелец не
+# пополнит баланс.
+_QUOTA_MARKERS = (
+    "quota",
+    "квот",
+    "payment required",
+    "insufficient",
+    "billing",
+    "balance",
+    "баланс",
+    "недостаточно средств",
+    "закончил",
+    "исчерпан",
+)
+# Лимит частоты Yandex Cloud тоже зовёт квотой («...requestCount.rate»), но он
+# снимается сам через минуту — такой ответ не должен звать пополнять баланс.
+_RATE_MARKERS = (
+    ".rate",
+    "rate limit",
+    "rate_limit",
+    "requests per",
+    "per second",
+    "per minute",
+    "в секунду",
+    "в минуту",
+)
+
+
+# Где пополнять: у YandexGPT это консоль облака, а не отдельный кабинет модели.
+_BILLING_PLACES = {
+    PROVIDER_YANDEX: "в консоли Yandex Cloud",
+    PROVIDER_GIGACHAT: "в личном кабинете GigaChat",
+}
+
+
+def _error_kind(status: int, body: str) -> str:
+    """Что случилось по сути: не влез запрос, кончилась квота или слишком часто."""
+    text = str(body or "").lower()
+    if 400 <= status < 500:
+        rate_like = any(marker in text for marker in _RATE_MARKERS)
+        if status == 402 or (
+            not rate_like and any(marker in text for marker in _QUOTA_MARKERS)
+        ):
+            return ERROR_QUOTA
+    if status == 413 or (
+        status in (400, 422) and any(marker in text for marker in _CONTEXT_MARKERS)
+    ):
+        return ERROR_CONTEXT
     if status == 429:
-        return (
-            f"{PROVIDER_TITLES.get(provider, provider)}: превышен лимит запросов "
-            f"(код 429). Попробуйте через минуту. {text}"
+        return ERROR_RATE
+    return ""
+
+
+def _http_error(status: int, body: str, provider: str) -> AIError:
+    """Ошибка HTTP от провайдера — в виде, понятном человеку без JSON."""
+    title = PROVIDER_TITLES.get(provider, provider)
+    text = (body or "").strip()[:400]
+    kind = _error_kind(status, body)
+    # Про лимиты сырой ответ не нужен: человеку надо знать, что делать, а не
+    # что написал сервис. Ответ уходит в detail — владелец увидит его отдельно.
+    if kind == ERROR_CONTEXT:
+        return AIError(
+            f"{title}: запрос не поместился в лимит модели. Снимите галочку "
+            "«Отправлять выдержки сообщений» или сократите дополнительные "
+            "указания и запустите ещё раз.",
+            kind=kind,
+            detail=text,
+        )
+    if kind == ERROR_QUOTA:
+        place = _BILLING_PLACES.get(provider, f"в кабинете {title}")
+        return AIError(
+            f"{title}: исчерпана квота — оплаченные запросы к модели "
+            "закончились. Повторный запуск не поможет: владельцу платформы "
+            f"нужно пополнить баланс или увеличить квоту {place}.",
+            kind=kind,
+            detail=text,
+        )
+    if kind == ERROR_RATE:
+        return AIError(
+            f"{title}: слишком много запросов подряд, сработал лимит частоты. "
+            "Подождите минуту и запустите ещё раз.",
+            kind=kind,
+            detail=text,
+        )
+    if status in (401, 403):
+        return AIError(
+            f"{title} отклонил ключ доступа (код {status}). Проверьте ключ и "
+            f"права сервисного аккаунта. {text}"
         )
     if status >= 500:
-        return (
-            f"{PROVIDER_TITLES.get(provider, provider)} временно недоступен "
-            f"(код {status}). {text}"
-        )
-    return f"{PROVIDER_TITLES.get(provider, provider)}: ошибка {status}. {text}"
+        return AIError(f"{title} временно недоступен (код {status}). {text}")
+    return AIError(f"{title}: ошибка {status}. {text}")
 
 
 @dataclass
@@ -426,11 +538,7 @@ def _gigachat_token(config: AIConfig, session: Any) -> str:
             verify=config.tls_verify,
         )
         if response.status_code >= 400:
-            raise AIError(
-                _readable_http_error(
-                    response.status_code, response.text, PROVIDER_GIGACHAT
-                )
-            )
+            raise _http_error(response.status_code, response.text, PROVIDER_GIGACHAT)
         payload = response.json()
         token = str(payload.get("access_token") or "")
         if not token:
@@ -475,9 +583,7 @@ def _complete_yandex(config: AIConfig, system: str, user: str, session: Any) -> 
         timeout=config.timeout,
     )
     if response.status_code >= 400:
-        raise AIError(
-            _readable_http_error(response.status_code, response.text, PROVIDER_YANDEX)
-        )
+        raise _http_error(response.status_code, response.text, PROVIDER_YANDEX)
     payload = response.json()
     alternatives = (payload.get("result") or {}).get("alternatives") or []
     if not alternatives:
@@ -530,9 +636,7 @@ def _complete_gigachat(config: AIConfig, system: str, user: str, session: Any) -
             verify=config.tls_verify,
         )
     if response.status_code >= 400:
-        raise AIError(
-            _readable_http_error(response.status_code, response.text, PROVIDER_GIGACHAT)
-        )
+        raise _http_error(response.status_code, response.text, PROVIDER_GIGACHAT)
     payload = response.json()
     choices = payload.get("choices") or []
     if not choices:

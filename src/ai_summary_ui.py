@@ -18,6 +18,7 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
+import platform_store as store
 from services import category_store
 from services.ai_provider import (
     PROVIDER_GIGACHAT,
@@ -58,6 +59,7 @@ from services.project_settings import (
     demo_ai_runs_left,
     demo_ai_runs_used,
     is_demo_project,
+    project_settings_from_row,
 )
 
 SETUP_HINT = """
@@ -306,6 +308,8 @@ def render_ai_summary_panel(
                         st.success(check_connection(config))
                     except AIError as exc:
                         st.error(str(exc))
+                        if exc.detail:
+                            st.caption(f"Ответ сервиса: {exc.detail}")
             st.divider()
 
         if config.provider == PROVIDER_OFF or not config.is_ready:
@@ -399,35 +403,87 @@ def render_ai_summary_panel(
                         else None
                     ),
                 ):
+                    # Счёт ведётся по нажатию, а не по успеху: неудачный запрос
+                    # к модели тоже оплачен. И списываем ДО запроса: пока модель
+                    # пишет, человек может нажать что-то ещё или закрыть
+                    # вкладку — Streamlit прерывает прогон на ближайшем
+                    # st-вызове, и списание «после» до базы бы не дошло, хотя
+                    # платный запрос уже ушёл.
+                    demo_spend = (
+                        _spend_demo_run(project_id) if demo_left is not None else ""
+                    )
+                    if demo_spend == DEMO_EXHAUSTED:
+                        # Лимит доиграл другой посетитель, пока эта страница
+                        # была открыта: к модели не идём, перерисовка покажет
+                        # предупреждение и выключит кнопки.
+                        st.rerun()
                     _run_generation(
                         project_id, kind, base_args, extra, config
                     )
-                    # Счёт ведётся по нажатию, а не по успеху: иначе неудачный
-                    # запрос к модели, который всё равно оплачен, лимит бы не
-                    # тратил и демо можно было бы крутить бесконечно.
-                    if demo_left is not None:
-                        _spend_demo_run(project_id, project_settings)
+                    if demo_spend == DEMO_SPENT:
+                        # Остаток в шапке и в панели нарисован до клика. Без
+                        # перерисовки человек видел бы «10 из 10» после первого
+                        # запуска и включённые кнопки после последнего. Итог
+                        # запуска переживает перерисовку в session_state.
+                        st.rerun()
 
+        _show_generation_notice(project_id)
         for kind in kinds:
             _render_generated_block(project_id, kind, period_ids)
 
 
-def _spend_demo_run(project_id: str, project_settings: dict[str, Any] | None) -> None:
-    """Списать один запуск ИИ в демо-проекте.
+def _notice_key(project_id: str) -> str:
+    return f"ai_notice_{project_id}"
+
+
+def _show_generation_notice(project_id: str) -> None:
+    """Итог последнего запуска: показать один раз и забыть."""
+    notice = st.session_state.pop(_notice_key(project_id), None)
+    if not isinstance(notice, dict):
+        return
+    if notice.get("ok"):
+        st.success(str(notice.get("text") or ""))
+        return
+    st.error(str(notice.get("text") or ""))
+    # Исходный ответ сервиса нужен тому, кто может поправить настройки; гостю
+    # демо и редактору JSON провайдера ничего не скажет.
+    if notice.get("detail") and is_platform_owner():
+        st.caption(f"Ответ сервиса: {notice['detail']}")
+
+
+DEMO_SPENT = "spent"
+DEMO_EXHAUSTED = "exhausted"
+DEMO_NOT_COUNTED = "not_counted"
+
+
+def _spend_demo_run(project_id: str) -> str:
+    """Списать один запуск ИИ в демо-проекте — до запроса к модели.
 
     Счётчик живёт в настройках проекта и не сбрасывается: демо-доступ выдаётся
     многим, и обнуление по времени сделало бы лимит бесконечным. Сбросить его
     может только владелец платформы вручную в карточке проекта.
+
+    Настройки перечитываются из базы мимо кеша. Кеш списка проектов общий для
+    всех сессий и живёт до двух минут, а сбрасывается версией, которая у каждой
+    сессии своя. По кешу второй посетитель прошёл бы уже исчерпанный лимит, а
+    его запись «старое + 1» откатила бы счётчик назад и затёрла бы свежие
+    настройки проекта.
     """
-    updated = dict(project_settings or {})
-    updated["demo_ai_runs"] = demo_ai_runs_used(project_settings) + 1
     try:
+        current = project_settings_from_row(store.get_project(project_id))
+        if demo_ai_runs_left(current) <= 0:
+            clear_platform_caches(project_id)
+            return DEMO_EXHAUSTED
+        updated = dict(current)
+        updated["demo_ai_runs"] = demo_ai_runs_used(current) + 1
         update_project(project_id, settings=updated)
         clear_platform_caches(project_id)
     except Exception as exc:  # noqa: BLE001
-        # Списание не должно ронять уже сделанную генерацию: текст у человека
-        # на экране, а несписанный запуск — меньшее зло, чем упавший раздел.
+        # Сбой базы не должен отнимать у человека генерацию: несписанный
+        # запуск — меньшее зло, чем упавший раздел.
         st.warning(f"Не удалось обновить счётчик запусков: {exc}")
+        return DEMO_NOT_COUNTED
+    return DEMO_SPENT
 
 
 def _run_generation(
@@ -448,10 +504,17 @@ def _run_generation(
                 kind, card, extra_instructions=extra, config=config
             )
         except AIError as exc:
-            st.error(str(exc))
+            st.session_state[_notice_key(project_id)] = {
+                "ok": False,
+                "text": str(exc),
+                "detail": exc.detail,
+            }
             return
     st.session_state[f"ai_draft_{kind}_{project_id}"] = result
-    st.success(f"{KIND_TITLES[kind]}: готово. Проверьте текст и сохраните.")
+    st.session_state[_notice_key(project_id)] = {
+        "ok": True,
+        "text": f"{KIND_TITLES[kind]}: готово. Проверьте текст и сохраните.",
+    }
 
 
 def _render_generated_block(project_id: str, kind: str, period_ids: list[str]) -> None:

@@ -719,6 +719,147 @@ check(
     str(uploaded_cards.get("SOV", {}).get("value")),
 )
 
+print("18. Лимиты модели и квоты объясняются по-человечески, без JSON провайдера")
+# Раньше любой отказ, кроме 401/403/429/5xx, показывался как «ошибка 400.
+# {"error": ...}», а исчерпанная квота на 429 — как «попробуйте через минуту»,
+# хотя через минуту ничего не изменится (а в демо каждый повтор съедает запуск).
+# Тексты ответов ниже — формы, которыми отвечают YandexGPT, GigaChat и шлюзы
+# в духе OpenAI; классификация идёт по признакам, а не по одной фразе.
+from services.ai_provider import ERROR_CONTEXT, ERROR_QUOTA, ERROR_RATE  # noqa: E402
+
+LIMIT_CASES = [
+    (
+        "YandexGPT 400: входных токенов больше лимита",
+        YANDEX_CONFIG,
+        FakeResponse(400, {"error": {"grpcCode": 3, "httpCode": 400, "message": "Number of input tokens must be no more than 8192, got 9136", "httpStatus": "Bad Request"}}),
+        ERROR_CONTEXT,
+    ),
+    (
+        "400: maximum context length",
+        YANDEX_CONFIG,
+        FakeResponse(400, text='{"error":{"message":"This model\'s maximum context length is 8192 tokens"}}'),
+        ERROR_CONTEXT,
+    ),
+    (
+        "GigaChat 413 без пояснений",
+        GIGACHAT_CONFIG,
+        FakeResponse(413, {"status": 413, "message": "Payload Too Large"}),
+        ERROR_CONTEXT,
+    ),
+    (
+        "GigaChat 400: «Слишком много токенов»",
+        GIGACHAT_CONFIG,
+        FakeResponse(400, {"status": 400, "message": "Слишком много токенов в запросе: 33000 при лимите 32768"}),
+        ERROR_CONTEXT,
+    ),
+    (
+        "GigaChat 422: token limit",
+        GIGACHAT_CONFIG,
+        FakeResponse(422, {"status": 422, "message": "Input exceeds token limit"}),
+        ERROR_CONTEXT,
+    ),
+    (
+        "GigaChat 402: закончился пакет токенов",
+        GIGACHAT_CONFIG,
+        FakeResponse(402, {"status": 402, "message": "Payment Required"}),
+        ERROR_QUOTA,
+    ),
+    (
+        "402 без пояснений: квоту видно по одному коду",
+        GIGACHAT_CONFIG,
+        FakeResponse(402, text="{}"),
+        ERROR_QUOTA,
+    ),
+    (
+        "429 с квотой: деньги кончились, а не частота",
+        YANDEX_CONFIG,
+        FakeResponse(429, {"error": {"httpCode": 429, "message": "Quota exceeded: monthly token quota is exhausted", "httpStatus": "Too Many Requests"}}),
+        ERROR_QUOTA,
+    ),
+    (
+        "YandexGPT 429: квота частоты (…rate) — это лимит частоты, не деньги",
+        YANDEX_CONFIG,
+        FakeResponse(429, {"error": {"grpcCode": 8, "httpCode": 429, "message": "Quota limit ai.languageModels.requestCount.rate exceeded", "httpStatus": "Too Many Requests"}}),
+        ERROR_RATE,
+    ),
+    (
+        "GigaChat 429 без пояснений",
+        GIGACHAT_CONFIG,
+        FakeResponse(429, {"status": 429, "message": "Too Many Requests"}),
+        ERROR_RATE,
+    ),
+]
+
+for label, limit_config, response, expected_kind in LIMIT_CASES:
+    reset_gigachat_token()
+    responses = [response]
+    if limit_config.provider == "gigachat":
+        responses.insert(0, gigachat_token_response())
+    try:
+        complete("система", "запрос", limit_config, session=FakeSession(responses))
+        check(f"{label}: поднимает AIError", False, "исключения не было")
+        continue
+    except AIError as exc:
+        error = exc
+    message = str(error)
+    check(f"{label}: вид ошибки — {expected_kind}", error.kind == expected_kind, f"{error.kind!r}: {message}")
+    check(
+        f"{label}: в тексте нет сырого ответа сервиса",
+        "{" not in message and response.text[:40] not in message,
+        message,
+    )
+    check(
+        f"{label}: сырой ответ сохранён для владельца",
+        response.text[:40] in error.detail,
+        error.detail[:80],
+    )
+    if expected_kind == ERROR_CONTEXT:
+        check(f"{label}: сказано, что запрос не поместился", "не поместился" in message, message)
+        check(f"{label}: сказано, что сократить — выдержки", "выдержки" in message.lower(), message)
+    if expected_kind == ERROR_QUOTA:
+        check(f"{label}: названа квота", "квота" in message.lower(), message)
+        check(f"{label}: повторять бесполезно", "не поможет" in message, message)
+        check(f"{label}: не зовёт «через минуту»", "минуту" not in message, message)
+        where = "Yandex Cloud" if limit_config.provider == "yandex" else "кабинете GigaChat"
+        check(f"{label}: сказано, где пополнить", where in message, message)
+    if expected_kind == ERROR_RATE:
+        check(f"{label}: предложено подождать минуту", "минуту" in message, message)
+        check(f"{label}: не зовёт пополнять баланс", "баланс" not in message, message)
+
+# Незнакомые отказы классифицировать нельзя — их текст остаётся в сообщении,
+# иначе владельцу нечем будет разобраться.
+reset_gigachat_token()
+try:
+    complete(
+        "система",
+        "запрос",
+        YANDEX_CONFIG,
+        session=FakeSession([FakeResponse(400, text="modelUri is invalid")]),
+    )
+    check("незнакомая 400 поднимает AIError", False, "исключения не было")
+except AIError as exc:
+    check("незнакомая 400 не выдаётся за лимит", exc.kind == "", repr(exc.kind))
+    check("её текст виден как раньше", "modelUri is invalid" in str(exc), str(exc))
+
+# Ошибка выдачи токена GigaChat идёт тем же путём, но про лимиты ничего не
+# говорит: «токен» в тексте не должен превращать её в «не поместился».
+reset_gigachat_token()
+try:
+    complete(
+        "система",
+        "запрос",
+        GIGACHAT_CONFIG,
+        session=FakeSession([FakeResponse(400, {"code": 7, "message": "invalid token request: scope from db not fully includes consumed scope"})]),
+    )
+    check("отказ OAuth поднимает AIError", False, "исключения не было")
+except AIError as exc:
+    check("отказ OAuth не выдаётся за лимит модели", exc.kind == "", f"{exc.kind!r}: {exc}")
+
+check(
+    "старое поведение: AIError по-прежнему создаётся одной строкой",
+    str(AIError("текст")) == "текст" and AIError("текст").kind == "" and AIError("текст").detail == "",
+)
+
 print()
 if failures:
     print(f"ПРОВАЛЕНО: {len(failures)} → {failures}")

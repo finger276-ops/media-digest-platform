@@ -24,6 +24,7 @@ python tests/test_sentiment_markup.py        # тональность без р�
 python tests/test_event_titles.py            # склейка похожих заголовков инфоповодов
 python tests/test_event_enrichment.py        # связь сообщений с инфоповодами, агрегация
 python tests/test_ai_summary.py              # тексты от ИИ (YandexGPT/GigaChat) — без сети
+python tests/test_ai_demo_limit.py           # демо-лимит ИИ: списание по нажатию, сверка с базой, кнопки
 python tests/test_report_highlights.py       # общий top_report_tags/top_report_events для отчёта
 python tests/test_period_comparison_daily.py # дневная/недельная/месячная динамика, подпись периода
 python tests/test_granularity_ui.py          # гранулярность день/неделя/месяц - сквозной тест от экрана до данных

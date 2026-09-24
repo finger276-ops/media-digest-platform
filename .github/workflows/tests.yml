@@ -86,6 +86,9 @@ jobs:
       - name: Тексты от ИИ (YandexGPT/GigaChat, без сети)
         run: python tests/test_ai_summary.py
 
+      - name: Демо-лимит ИИ (списание по клику, выключение кнопок)
+        run: python tests/test_ai_demo_limit.py
+
       - name: Общий top_report_tags/top_report_events для отчёта
         run: python tests/test_report_highlights.py
 
