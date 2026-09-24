@@ -377,10 +377,23 @@ check(
     len(filter_messages_by_buckets(mixed_messages, "day", [])) == len(mixed_messages),
 )
 both_weeks = filter_messages_by_buckets(mixed_messages, "week", ["2024-01-01", "2024-01-08"])
+# Обе недели — это все недели выборки, то есть не сужение. Раньше сообщение без
+# даты выпадало и здесь, а значит, и при гранулярности по умолчанию («День»,
+# отмечено всё) — со всего дашборда, включая индексы бренда.
 check(
-    "две выбранные недели -> обе датированные строки на месте (a и b), без даты - нет",
-    set(both_weeks["message_id"]) == {"a", "b"},
+    "выбраны все недели -> выборка целиком, сообщение без даты в итогах",
+    set(both_weeks["message_id"]) == {"a", "b", "c"},
     str(set(both_weeks["message_id"])),
+)
+all_days = filter_messages_by_buckets(mixed_messages, "day", ["2024-01-01", "2024-01-08"])
+check(
+    "выбраны все дни -> выборка целиком",
+    len(all_days) == len(mixed_messages),
+    str(list(all_days["message_id"])),
+)
+check(
+    "выбрана часть -> сообщение без даты не входит",
+    "c" not in set(filter_messages_by_buckets(mixed_messages, "week", ["2024-01-08"])["message_id"]),
 )
 
 print("11. unresolved_date_count: сколько сообщений не попадёт ни в один день/неделю/месяц")

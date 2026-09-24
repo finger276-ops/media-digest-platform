@@ -322,7 +322,8 @@ def filter_messages_by_buckets(
 
     granularity="period" (гранулярность "Файлы целиком") или пустой выбор
     бакетов - сообщения не сужаются: иначе "ничего не выбрано" молча дал бы
-    пустой дашборд вместо всей выборки."""
+    пустой дашборд вместо всей выборки. Выбор всех бакетов тоже не сужает:
+    сообщения без даты остаются в итогах."""
     if granularity not in GRANULARITY_FUNCS or not selected_bucket_ids:
         return messages
     bucket_start = _bucket_start(messages, granularity)
@@ -334,6 +335,12 @@ def filter_messages_by_buckets(
         _bucket_id(pd.Timestamp(ts), granularity) for ts in bucket_start[valid]
     ]
     selected = {str(x) for x in selected_bucket_ids}
+    # Отмечены все дни/недели/месяцы выборки — это не сужение, а вся выборка.
+    # Сообщения без распознанной даты в разбивку не попадают, но из итогов
+    # выпадать не должны: гранулярность по умолчанию («День», отмечено всё)
+    # иначе молча убирала их со всего дашборда, включая индексы бренда.
+    if set(ids[valid]) <= selected:
+        return messages
     return messages[ids.isin(selected)]
 
 

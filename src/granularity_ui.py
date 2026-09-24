@@ -82,9 +82,19 @@ def render_granularity_selector(
                 )
         unresolved = unresolved_date_count(messages)
         if unresolved:
+            # Когда отмечено всё, фильтр выборку не сужает, и сообщения без
+            # даты остаются в итогах — выпадают только из разбивки по точкам.
+            narrowed = bool(selected_bucket_ids) and not set(bucket_ids) <= set(
+                selected_bucket_ids
+            )
             st.warning(
                 f"{format_int(unresolved)} сообщений без распознанной даты "
-                "не участвуют в разбивке по дням/неделям/месяцам."
+                + (
+                    "не входят в выбранные дни/недели/месяцы и в итогах не учтены."
+                    if narrowed
+                    else "учтены в итогах, но не попадают в разбивку по "
+                    "дням/неделям/месяцам."
+                )
             )
 
     return granularity, selected_bucket_ids

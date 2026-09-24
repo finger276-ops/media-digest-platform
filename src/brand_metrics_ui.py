@@ -40,7 +40,7 @@ from services.cached_store import (
     update_project,
 )
 from services.ingest import IngestError, read_canonical_bytes
-from services.dashboard_data import prepare_period_messages
+from services.dashboard_data import cached_period_messages
 from services.metric_notes import (
     load_note_versions,
     load_notes,
@@ -124,7 +124,7 @@ def _cached_previous_metrics(
     бы новое число со старым. Версия ручных правок в ключе по той же причине:
     прошлый период готовится так же, как выбранный, без скрытых сообщений.
     """
-    messages = prepare_period_messages(project_id, [period_id])
+    messages = cached_period_messages(project_id, [period_id])
     if messages is None or messages.empty:
         return {}
     settings, own, competitors, uploaded = json.loads(fingerprint)
@@ -408,6 +408,8 @@ def render_metrics_dynamics(
     period_ids: list[str],
     brand_map: dict[str, list[str]],
     settings: dict[str, Any],
+    *,
+    partial_period: bool = False,
 ) -> None:
     all_period_ids = (
         [str(x) for x in periods["period_id"].tolist()]
@@ -454,12 +456,17 @@ def render_metrics_dynamics(
                 # значения — у выбранного SES 25 %, у догруженного прочерк и
                 # NSS −100 %.
                 with st.spinner(f"Загружаю сообщения ещё {len(missing)} периодов..."):
-                    extra = prepare_period_messages(project_id, missing)
+                    extra = cached_period_messages(project_id, missing)
                 if extra is not None and not extra.empty:
                     work_messages = pd.concat(
                         [work_messages, extra], ignore_index=True, sort=False
                     )
             active_period_ids = all_period_ids
+            if partial_period:
+                st.caption(
+                    "Периоды из боковой панели посчитаны по отмеченным в "
+                    "гранулярности дням, остальные — целиком."
+                )
         else:
             work_messages = messages
             active_period_ids = period_ids
@@ -634,8 +641,9 @@ def render_brand_map_settings(
 
         if brand_map["own"] and not brand_map["competitors"]:
             st.caption(
-                "Отмечены только свои бренды: SOV и ReachScore покажут прочерк, "
-                "пока не отмечены конкуренты."
+                "Отмечены только свои бренды: по тегам SOV и ReachScore без "
+                "конкурентов не считаются. Они посчитаются только по загруженной "
+                "выгрузке по категории, если она есть."
             )
         elif brand_map["competitors"] and not brand_map["own"]:
             st.caption(
@@ -756,11 +764,26 @@ def render_category_source_notice(
             f"конкурентов — {rivals}."
         )
         return
+    if str(benchmark.get("source") or "") == "mixed":
+        tag_periods = len(benchmark.get("tag_periods") or [])
+        st.caption(
+            "Категория собрана из двух источников: загруженной выгрузки "
+            f"(периодов — {int(benchmark.get('uploaded_periods') or 0)}) и тегов "
+            f"выгрузки проекта для остальных периодов ({tag_periods}). "
+            f"Брендов — {len(brands)}."
+        )
+        return
     note = f"Категория взята из загруженной выгрузки: брендов — {len(brands)}."
     if brand_map.get("own") or brand_map.get("competitors"):
         note += (
             " Разметка тегов при этом не используется: загруженная выгрузка "
             "полнее и потому главнее."
+        )
+    without = benchmark.get("periods_without_category") or []
+    if without:
+        note += (
+            f" Для периодов без неё ({len(without)}) в тегах не размечены свои "
+            "бренды и конкуренты — в SOV и ReachScore эти периоды не участвуют."
         )
     st.caption(note)
 
@@ -1038,7 +1061,9 @@ def render_brand_metrics_page(
     *,
     role_can_edit: bool = False,
     read_only: bool = False,
+    partial_period: bool = False,
 ) -> None:
+    """partial_period — сообщения уже сужены до части дней гранулярностью."""
     st.subheader("Индексы бренда")
     st.caption(
         "Метрики считаются автоматически по выбранным периодам. Что каждая из "
@@ -1069,10 +1094,11 @@ def render_brand_metrics_page(
 
     # «Предыдущий период» не определён для произвольного куска периода —
     # честнее спрятать дельту, чем сравнить сужение с чем-то, что ему не
-    # соответствует.
+    # соответствует. Кусок бывает двух видов: диапазон дат в этом разделе и
+    # отдельные дни/недели, отмеченные гранулярностью над всеми разделами.
     previous = (
         None
-        if range_active
+        if range_active or partial_period
         else previous_period_metrics(
             project_id,
             previous_period_id(periods, selected_period_ids),
@@ -1087,6 +1113,11 @@ def render_brand_metrics_page(
         st.caption(
             "Изменение к предыдущему периоду не показано: выбран произвольный "
             "диапазон дат внутри периода."
+        )
+    elif partial_period:
+        st.caption(
+            "Изменение к предыдущему периоду не показано: в гранулярности "
+            "отмечены не все дни периода."
         )
     render_category_source_notice(benchmark, brand_map)
     if range_active and benchmarks:
@@ -1103,10 +1134,17 @@ def render_brand_metrics_page(
         read_only=read_only,
     )
 
-    # Полные, не суженные сообщения: график динамики остаётся по периодам
-    # целиком (это отдельная, более крупная переделка — см. обсуждение).
+    # Сообщения без диапазона дат этого раздела: график динамики остаётся по
+    # периодам целиком (это отдельная, более крупная переделка — см.
+    # обсуждение). Сужение гранулярностью в них уже учтено.
     render_metrics_dynamics(
-        project_id, messages, periods, selected_period_ids, brand_map, settings
+        project_id,
+        messages,
+        periods,
+        selected_period_ids,
+        brand_map,
+        settings,
+        partial_period=partial_period,
     )
 
     if role_can_edit:

@@ -32,11 +32,9 @@ from services.cached_store import (
     delete_storage_file,
     clear_platform_caches,
     cache_version,
-    load_table,
 )
 from services.metrics_compute import (
     numeric_series,
-    prepare_dashboard_messages,
     format_int,
     sentiment_counts,
     percent_text,
@@ -73,7 +71,7 @@ from services.manual_moderation import (
     recompute_event_counts,
 )
 from services.event_enrichment import aggregate_events
-from services.dashboard_data import prepare_period_data
+from services.dashboard_data import cached_period_messages, prepare_period_data
 from summary_ui import render_period_summary
 from sidebar_ui import (
     NAV_STATE_KEY,
@@ -198,12 +196,18 @@ def load_dashboard_data(
 
 
 @st.cache_data(show_spinner=False, max_entries=6, ttl=900)
-def _cached_period_overview(project_id: str, period_id: str, data_version: int):
-    """Метрики одного периода без полной подготовки дашборда."""
-    messages = load_table(project_id, [period_id], "messages")
+def _cached_period_overview(
+    project_id: str, period_id: str, data_version: int, manual_version: int
+):
+    """Метрики прошлого периода для изменений в шапке «Обзора».
+
+    Период готовится так же, как выбранный: раньше он читался сырым, и
+    скрытое аналитиком сообщение продолжало считаться в сравнении.
+    """
+    messages = cached_period_messages(project_id, [period_id])
     if messages is None or messages.empty:
         return None
-    return overview_metrics(prepare_dashboard_messages(messages))
+    return overview_metrics(messages)
 
 
 def period_overview_metrics(project_id: str, period_id: str | None):
@@ -211,7 +215,10 @@ def period_overview_metrics(project_id: str, period_id: str | None):
         return None
     try:
         return _cached_period_overview(
-            str(project_id), str(period_id), cache_version(project_id, "data")
+            str(project_id),
+            str(period_id),
+            cache_version(project_id, "data"),
+            cache_version(project_id, "manual"),
         )
     except Exception:  # noqa: BLE001 - дельта не критична для страницы
         return None
@@ -371,6 +378,7 @@ def _section_brand_metrics(
     period_ids: list[str],
     role_can_edit: bool,
     read_only: bool = False,
+    partial_period: bool = False,
 ) -> None:
     render_brand_metrics_page(
         project_id,
@@ -380,6 +388,7 @@ def _section_brand_metrics(
         period_ids,
         role_can_edit=role_can_edit,
         read_only=read_only,
+        partial_period=partial_period,
     )
 
 
@@ -731,6 +740,7 @@ def main() -> None:
         enriched_messages, project_id, selected_period_ids
     )
     granularity_key = ""
+    granularity_narrowed = False
     if granularity != "period":
         narrowed_messages = filter_messages_by_buckets(
             enriched_messages, granularity, selected_bucket_ids
@@ -743,6 +753,7 @@ def main() -> None:
             # Членство сообщения в инфоповоде не меняется (оно определено
             # один раз при импорте), меняются только счётчики.
             enriched_messages = narrowed_messages
+            granularity_narrowed = True
             events = recompute_event_counts(events, enriched_messages)
             raw_events_agg = aggregate_events(events)
 
@@ -847,6 +858,7 @@ def main() -> None:
                 selected_period_ids,
                 role_rank(content_role) >= role_rank("editor"),
                 read_only,
+                granularity_narrowed,
             )
             render_saved_ai_text(
                 project_id,

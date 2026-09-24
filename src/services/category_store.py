@@ -26,6 +26,7 @@ from services.brand_metrics import (
     AUDIENCE_COLUMNS,
     ENGAGEMENT_COLUMNS,
     REACH_COLUMNS,
+    benchmark_frame,
 )
 
 TABLE = "platform_category_benchmarks"
@@ -418,14 +419,92 @@ def resolve_category_benchmark(
     теги, а карточки для ИИ — только загруженную категорию. ИИ писал «доля
     голоса не посчитана» там, где аналитик видел её на экране, а динамика и
     изменение к прошлому периоду считали SOV каждая по-своему.
+
+    Правило действует для каждого периода отдельно. Если выбрано несколько
+    периодов, а категория загружена не для всех, остальные берут бренды из
+    своих тегов, и всё складывается по брендам — так же, как в динамике, где
+    периоды считаются по одному. Раньше одна загрузка вытесняла теги всех
+    выбранных периодов, и периоды без неё в доле голоса не участвовали.
     """
-    merged = merged_benchmark(uploaded) if uploaded else None
-    if merged:
-        return merged
     brand_map = brand_map or {}
-    return benchmark_from_messages(
-        messages, list(brand_map.get("own") or []), list(brand_map.get("competitors") or [])
+    own = list(brand_map.get("own") or [])
+    competitors = list(brand_map.get("competitors") or [])
+    uploaded = {
+        str(pid): record
+        for pid, record in (uploaded or {}).items()
+        if record and record.get("brands")
+    }
+    merged = merged_benchmark(uploaded) if uploaded else None
+    if not merged:
+        return benchmark_from_messages(messages, own, competitors)
+
+    if (
+        messages is None
+        or messages.empty
+        or "period_id" not in messages.columns
+    ):
+        return merged
+    period_column = messages["period_id"].astype(str)
+    rest = messages[~period_column.isin(set(uploaded))]
+    if rest.empty:
+        return merged
+    rest_periods = sorted(set(period_column[rest.index]))
+    from_tags = benchmark_from_messages(rest, own, competitors)
+    has_rivals = bool(from_tags) and any(
+        not brand.get("is_own") for brand in from_tags.get("brands") or []
     )
+    if not has_rivals:
+        # Без разметки или без конкурентов в тегах периодам без загрузки
+        # нечего добавить: одни свои упоминания без конкурентов завысили бы
+        # долю голоса. Об исключении скажет подпись об источнике, чтобы не
+        # выдать долю голоса за всю выборку.
+        return {**merged, "periods_without_category": rest_periods}
+    return _combine_benchmarks(merged, from_tags, competitors, len(uploaded), rest_periods)
+
+
+def _combine_benchmarks(
+    uploaded: dict[str, Any],
+    from_tags: dict[str, Any],
+    competitors: list[str],
+    uploaded_periods: int,
+    tag_periods: list[str],
+) -> dict[str, Any]:
+    """Сложить загруженную категорию и теги других периодов по брендам.
+
+    Бренды сопоставляются без учёта регистра и ё — так же, как теги с
+    разметкой. Свой бренд остаётся своим, если он отмечен своим хотя бы в
+    одном источнике.
+    """
+    frames = [benchmark_frame(uploaded), benchmark_frame(from_tags)]
+    combined = pd.concat([f for f in frames if not f.empty], ignore_index=True)
+    combined["_key"] = combined["brand"].map(_brand_key)
+    grouped = (
+        combined.groupby("_key", sort=False)
+        .agg(
+            brand=("brand", "first"),
+            messages=("messages", "sum"),
+            audience=("audience", "sum"),
+            reach=("reach", "sum"),
+            engagement=("engagement", "sum"),
+            is_own=("is_own", "max"),
+        )
+        .reset_index(drop=True)
+    )
+    grouped["is_own"] = grouped["is_own"].astype(bool)
+    found = {_brand_key(x) for x in grouped["brand"]}
+    own_names = [str(x) for x in grouped.loc[grouped["is_own"], "brand"]]
+    return {
+        "own_brand": own_names[0] if own_names else "",
+        "own_brands": own_names,
+        "brands": grouped.to_dict("records"),
+        "source": "mixed",
+        "uploaded_periods": int(uploaded_periods),
+        "tag_periods": list(tag_periods),
+        "configured_competitors": len([x for x in competitors if str(x).strip()]),
+        "missing_competitors": [
+            str(x).strip() for x in competitors if str(x).strip() and _brand_key(x) not in found
+        ],
+    }
 
 
 def delete_benchmark(project_id: str, period_id: str) -> None:

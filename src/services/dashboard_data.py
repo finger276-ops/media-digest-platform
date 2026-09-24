@@ -14,8 +14,9 @@ from __future__ import annotations
 from typing import Any
 
 import pandas as pd
+import streamlit as st
 
-from services.cached_store import load_generated_tables
+from services.cached_store import cache_version, load_generated_tables
 from services.event_enrichment import enrich_messages
 from services.manual_moderation import apply_manual_overrides
 from services.metrics_compute import prepare_dashboard_messages
@@ -42,3 +43,30 @@ def prepare_period_messages(project_id: str, period_ids: list[str]) -> pd.DataFr
     """Только сообщения — для расчётов по периодам вне выбранных."""
     _events, messages, _manual_state = prepare_period_data(project_id, period_ids)
     return messages
+
+
+# Подготовка не бесплатна: пересчёт счётчиков инфоповодов после ручных правок
+# на десятках тысяч сообщений занимает секунды. Без кеша динамика «по всем
+# периодам» платила бы их на каждом действии в разделе. Записей мало: в кеше
+# лежат целые периоды.
+@st.cache_data(show_spinner=False, max_entries=3, ttl=900)
+def _cached_period_messages(
+    project_id: str,
+    period_ids_key: tuple[str, ...],
+    data_version: int,
+    manual_version: int,
+) -> pd.DataFrame:
+    return prepare_period_messages(project_id, list(period_ids_key))
+
+
+def cached_period_messages(project_id: str, period_ids: list[str]) -> pd.DataFrame:
+    """prepare_period_messages с кешем до смены данных или ручных правок."""
+    key = tuple(sorted({str(pid) for pid in (period_ids or []) if str(pid).strip()}))
+    if not key:
+        return pd.DataFrame()
+    return _cached_period_messages(
+        str(project_id),
+        key,
+        cache_version(project_id, "data"),
+        cache_version(project_id, "manual"),
+    )

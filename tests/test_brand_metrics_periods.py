@@ -127,6 +127,42 @@ check("SES прошлого периода без скрытого сообще�
 # загруженную категорию: SOV сравнивался с числом из другого источника.
 check("SOV прошлого периода из загруженной категории", close(previous.get("SOV"), 25.0), str(previous))
 
+print("Шапка «Обзора»: прошлый период тоже с учётом ручных правок")
+# Изменения в шапке «Обзора» считались от сырых сообщений прошлого периода:
+# скрытое аналитиком негативное сообщение оставалось в сравнении.
+from app import period_overview_metrics  # noqa: E402
+
+overview_previous = period_overview_metrics(PROJECT_ID, "p2") or {}
+check("скрытое сообщение не считается", overview_previous.get("messages") == 3, str(overview_previous))
+check("его негатив тоже", (overview_previous.get("sentiment") or {}).get("negative") == 0,
+      str(overview_previous.get("sentiment")))
+
+print("Подготовка периодов кешируется до смены данных или правок")
+# Без кеша динамика «по всем периодам» заново готовила все догруженные периоды
+# на каждом действии в разделе — на десятках тысяч сообщений это секунды.
+from services import dashboard_data  # noqa: E402
+from services.cached_store import clear_platform_caches  # noqa: E402
+
+prepare_calls = []
+_original_prepare = dashboard_data.prepare_period_messages
+
+
+def _counting_prepare(project_id, period_ids):
+    prepare_calls.append(tuple(period_ids))
+    return _original_prepare(project_id, period_ids)
+
+
+dashboard_data.prepare_period_messages = _counting_prepare
+try:
+    dashboard_data.cached_period_messages(PROJECT_ID, ["p1", "p2"])
+    dashboard_data.cached_period_messages(PROJECT_ID, ["p2", "p1"])
+    check("повторный запрос тех же периодов берётся из кеша", len(prepare_calls) == 1, str(prepare_calls))
+    clear_platform_caches(PROJECT_ID)
+    dashboard_data.cached_period_messages(PROJECT_ID, ["p1", "p2"])
+    check("после смены данных готовится заново", len(prepare_calls) == 2, str(prepare_calls))
+finally:
+    dashboard_data.prepare_period_messages = _original_prepare
+
 print("Динамика по всем периодам проекта")
 from streamlit.testing.v1 import AppTest  # noqa: E402
 

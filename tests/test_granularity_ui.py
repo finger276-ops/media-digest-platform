@@ -81,7 +81,11 @@ _DAY_COUNTS = [
     ("2024-01-08", 5),  # неделя B (08-14.01), январь
     ("2024-02-01", 6),  # неделя ?, февраль
 ]
-TOTAL_MESSAGES = sum(n for _, n in _DAY_COUNTS)  # 20
+# Плюс одно сообщение без распознанной даты: в разбивку оно не попадает, но
+# из итогов при выборе всех дней выпадать не должно. Раньше гранулярность по
+# умолчанию («День», отмечено всё) молча убирала его со всего дашборда.
+UNDATED_COUNT = 1
+TOTAL_MESSAGES = sum(n for _, n in _DAY_COUNTS) + UNDATED_COUNT  # 21
 DAY_A1_COUNT = 3  # 2024-01-01 в одиночку
 WEEK_A_COUNT = 3 + 2 + 4  # 9 - вся неделя 01-07.01
 JANUARY_COUNT = 3 + 2 + 4 + 5  # 14 - весь январь
@@ -121,6 +125,10 @@ CLIENT.db["platform_table_rows"] = [
     for day, count in _DAY_COUNTS
     for i in range(count)
 ]
+_undated = _message_row("без-даты", 0, "Тема")
+_undated["payload"]["date"] = ""
+_undated["payload"]["datetime"] = ""
+CLIENT.db["platform_table_rows"].append(_undated)
 
 from streamlit.testing.v1 import AppTest  # noqa: E402
 
@@ -148,9 +156,15 @@ def _metric_value(label):
 
 
 check(
-    "по умолчанию видны все 20 сообщений (гранулярность не теряет данные)",
-    _metric_value("Сообщений") == "20",
+    "по умолчанию видны все 21 сообщение, включая без даты (гранулярность не теряет данные)",
+    _metric_value("Сообщений") == str(TOTAL_MESSAGES),
     str(_metric_value("Сообщений")),
+)
+warnings = [str(w.value) for w in at.warning]
+check(
+    "предупреждение: сообщение без даты учтено в итогах, но не в разбивке",
+    any("учтены в итогах" in w for w in warnings),
+    str(warnings),
 )
 
 granularity_radios = [r for r in at.radio if str(r.label) == "Гранулярность"]
@@ -184,13 +198,19 @@ if granularity_radios:
             _metric_value("Сообщений") == str(DAY_A1_COUNT),
             str(_metric_value("Сообщений")),
         )
+        warnings = [str(w.value) for w in at.warning]
+        check(
+            "при выборе части дней предупреждение говорит, что сообщение без даты не учтено",
+            any("в итогах не учтены" in w for w in warnings),
+            str(warnings),
+        )
 
     print("3. Переключение на «Неделя» — дефолт (все недели) не теряет данные, сужение до одной недели работает")
     granularity_radios = [r for r in at.radio if str(r.label) == "Гранулярность"]
     granularity_radios[0].set_value("Неделя").run()
     check("переключение на «Неделя» не роняет страницу", not at.exception, str(at.exception))
     check(
-        "по умолчанию (все недели) всё ещё 20 сообщений",
+        "по умолчанию (все недели) всё ещё 21 сообщение",
         _metric_value("Сообщений") == str(TOTAL_MESSAGES),
         str(_metric_value("Сообщений")),
     )
@@ -227,7 +247,7 @@ if granularity_radios:
     granularity_radios[0].set_value("Файлы целиком").run()
     check("переключение на «Файлы целиком» не роняет страницу", not at.exception, str(at.exception))
     check(
-        "все 20 сообщений снова на месте (сужение выключено)",
+        "все 21 сообщение снова на месте (сужение выключено)",
         _metric_value("Сообщений") == str(TOTAL_MESSAGES),
         str(_metric_value("Сообщений")),
     )
@@ -235,6 +255,51 @@ if granularity_radios:
         "пикер дней/недель/месяцев скрыт при «Файлы целиком»",
         not [ms for ms in at.multiselect if "Дни/недели/месяцы" in str(ms.label)],
     )
+
+    print("6. Индексы бренда: часть дней — изменение к прошлому периоду не показывается")
+    # Карточки считаются по отмеченным дням, а прошлый период — целиком.
+    # Сравнивать кусок с целым значит показать движение, которого не было.
+    # В фикстуре один период, поэтому прошлый подставляется: без него
+    # изменения не было бы и так, и проверка ничего бы не доказывала.
+    import brand_metrics_ui  # noqa: E402
+
+    brand_metrics_ui.previous_period_metrics = lambda *args, **kwargs: {"NSS": 1.0, "SES": 1.0}
+    granularity_radios = [r for r in at.radio if str(r.label) == "Гранулярность"]
+    granularity_radios[0].set_value("День").run()
+    day_buckets = [ms for ms in at.multiselect if "Дни/недели/месяцы" in str(ms.label)]
+    if day_buckets:
+        day_buckets[0].set_value(["2024-01-01"]).run()
+    nav = {str(b.label): b for b in at.sidebar.button}
+    if "Индексы бренда" in nav:
+        nav["Индексы бренда"].click().run()
+        check("раздел индексов открылся без исключений", not at.exception, str(at.exception))
+        captions = [str(c.value) for c in at.caption]
+        check(
+            "подпись объясняет, почему изменения нет",
+            any("отмечены не все дни периода" in c for c in captions),
+            str([c for c in captions if "предыдущ" in c]),
+        )
+        check(
+            "изменение к прошлому периоду не показано",
+            not any(c == "Изменения — к предыдущему периоду." for c in captions),
+            str([c for c in captions if "предыдущ" in c]),
+        )
+        day_buckets = [ms for ms in at.multiselect if "Дни/недели/месяцы" in str(ms.label)]
+        if day_buckets:
+            day_buckets[0].set_value(list(day_buckets[0].options)).run()
+            captions = [str(c.value) for c in at.caption]
+            check(
+                "все дни отмечены — подписи о части периода нет",
+                not any("отмечены не все дни периода" in c for c in captions),
+                str([c for c in captions if "предыдущ" in c]),
+            )
+            check(
+                "все дни отмечены — изменение к прошлому периоду снова на месте",
+                any(c == "Изменения — к предыдущему периоду." for c in captions),
+                str([c for c in captions if "предыдущ" in c]),
+            )
+    else:
+        check("раздел «Индексы бренда» в меню", False, str(list(nav)))
 
 print()
 if failures:

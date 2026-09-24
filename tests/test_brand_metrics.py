@@ -590,6 +590,32 @@ check("пустая загрузка не заслоняет теги", bool(fal
 check("без разметки и загрузки бенчмарка нет",
       category_store.resolve_category_benchmark(tag_messages, None, None) is None)
 
+# Правило — для каждого периода. Раньше загрузка для p1 вытесняла теги p2, и
+# на карточке SOV был 25 % (только p1), а в динамике p1 25 % и p2 75 %.
+two_periods = frame(["нейтральная"] * 8,
+                    period_id=["p1"] * 4 + ["p2"] * 4,
+                    tags=["Прочее"] * 4 + ["Бренд А", "Бренд А", "Бренд А", "Бренд Б"])
+mixed = category_store.resolve_category_benchmark(two_periods, brand_map, uploaded_record)
+check("категория не для всех периодов — источники складываются", bool(mixed) and mixed.get("source") == "mixed",
+      str(mixed))
+# p1 из загрузки: А 10, В 30; p2 из тегов: А 3, Б 1 → А 13 из 44.
+check("SOV по двум источникам", close(compute_sov(mixed)["value"], 13 / 44 * 100, 0.01),
+      str(compute_sov(mixed)["value"]))
+own_only_tags = frame(["нейтральная"] * 8,
+                      period_id=["p1"] * 4 + ["p2"] * 4,
+                      tags=["Прочее"] * 4 + ["Бренд А"] * 4)
+partial_upload = category_store.resolve_category_benchmark(
+    own_only_tags, {"own": ["Бренд А"], "competitors": []}, uploaded_record
+)
+check("период без конкурентов в тегах не завышает долю голоса",
+      close(compute_sov(partial_upload)["value"], 25.0), str(compute_sov(partial_upload)["value"]))
+check("и назван как неучтённый", (partial_upload or {}).get("periods_without_category") == ["p2"],
+      str(partial_upload))
+covered = category_store.resolve_category_benchmark(two_periods[two_periods["period_id"] == "p1"], brand_map,
+                                                    uploaded_record)
+check("все периоды с загрузкой — только загрузка", covered.get("source") is None
+      and close(compute_sov(covered)["value"], 25.0), str(covered))
+
 print()
 if failures:
     print(f"ПРОВАЛЕНО: {len(failures)} → {failures}")
