@@ -564,6 +564,32 @@ check("динамика: период без разметки пуст", pd.isna
 check("динамика: нейтральный период — ноль", close(dynamics.loc[1, "ToneVolumeScore"], 0.0),
       str(dynamics.to_dict("records")))
 
+print("Источник SOV один для всех экранов")
+# Раздел «Индексы бренда» брал бренды из тегов, а карточки для ИИ — только из
+# загруженной категории: ИИ писал «доля голоса не посчитана» там, где на экране
+# она была.
+brand_map = {"own": ["Бренд А"], "competitors": ["Бренд Б"]}
+tag_messages = frame(["нейтральная"] * 4, tags=["Бренд А", "Бренд А", "Бренд Б", "Прочее"])
+from_tags = category_store.resolve_category_benchmark(tag_messages, brand_map, None)
+check("без загруженной категории — бренды из тегов", bool(from_tags) and from_tags.get("source") == "project_tags",
+      str(from_tags))
+check("из тегов SOV считается", close(compute_sov(from_tags)["value"], 66.67), str(compute_sov(from_tags)["value"]))
+uploaded_record = {
+    "p1": {"own_brand": "Бренд А", "brands": [
+        {"brand": "Бренд А", "messages": 10, "is_own": True},
+        {"brand": "Бренд В", "messages": 30, "is_own": False},
+    ]}
+}
+from_upload = category_store.resolve_category_benchmark(tag_messages, brand_map, uploaded_record)
+check("загруженная категория главнее тегов", close(compute_sov(from_upload)["value"], 25.0),
+      str(compute_sov(from_upload)["value"]))
+empty_upload = {"p1": {"own_brand": "Бренд А", "brands": []}}
+fallback_benchmark = category_store.resolve_category_benchmark(tag_messages, brand_map, empty_upload)
+check("пустая загрузка не заслоняет теги", bool(fallback_benchmark)
+      and fallback_benchmark.get("source") == "project_tags", str(fallback_benchmark))
+check("без разметки и загрузки бенчмарка нет",
+      category_store.resolve_category_benchmark(tag_messages, None, None) is None)
+
 print()
 if failures:
     print(f"ПРОВАЛЕНО: {len(failures)} → {failures}")

@@ -119,16 +119,18 @@ def _cached_previous_metrics(
     Ради одной строки изменения тянуть их каждый раз дорого, поэтому результат
     кешируется — так же, как дельты в шапке «Обзора».
 
-    Отпечаток настроек в ключе не украшение: веса BPI и разметка брендов меняют
-    значения, и без него аналитик, поправивший веса, сравнивал бы новое число
-    со старым. Версия ручных правок в ключе по той же причине: прошлый период
-    готовится так же, как выбранный, вместе с поправленной тональностью.
+    Отпечаток в ключе не украшение: веса BPI, разметка брендов и выгрузка по
+    категории меняют значения, и без него аналитик, поправивший веса, сравнивал
+    бы новое число со старым. Версия ручных правок в ключе по той же причине:
+    прошлый период готовится так же, как выбранный, без скрытых сообщений.
     """
     messages = prepare_period_messages(project_id, [period_id])
     if messages is None or messages.empty:
         return {}
-    settings, own, competitors = json.loads(fingerprint)
-    benchmark = category_store.benchmark_from_messages(messages, own, competitors)
+    settings, own, competitors, uploaded = json.loads(fingerprint)
+    benchmark = category_store.resolve_category_benchmark(
+        messages, {"own": own, "competitors": competitors}, uploaded
+    )
     cards = compute_brand_metrics(messages, benchmark=benchmark, settings=settings)
     return {
         str(card["code"]): float(card["value"])
@@ -145,10 +147,17 @@ def previous_period_metrics(
 ) -> dict[str, float]:
     if not project_id or not period_id:
         return {}
+    # Выгрузка по категории читается вне кеша: её загружают и удаляют без
+    # сброса версий данных, и закешированное сравнение отставало бы от экрана.
+    try:
+        uploaded = category_store.load_benchmarks(project_id, [period_id])
+    except Exception:  # noqa: BLE001 — сравнение считается и без категории
+        uploaded = {}
     fingerprint = json.dumps(
-        [settings, brand_map.get("own", []), brand_map.get("competitors", [])],
+        [settings, brand_map.get("own", []), brand_map.get("competitors", []), uploaded],
         ensure_ascii=False,
         sort_keys=True,
+        default=str,
     )
     try:
         return _cached_previous_metrics(
@@ -394,7 +403,7 @@ def render_metrics_dynamics(
     messages: pd.DataFrame,
     periods: pd.DataFrame,
     period_ids: list[str],
-    benchmarks: dict[str, dict[str, Any]],
+    brand_map: dict[str, list[str]],
     settings: dict[str, Any],
 ) -> None:
     all_period_ids = (
@@ -460,6 +469,27 @@ def render_metrics_dynamics(
         # динамики рисует линию между соседними точками, и при выборе «3 апреля,
         # 1 апреля, 2 апреля» эта линия показывает движение, которого не было.
         ordered = ordered_period_ids(periods, active_period_ids)
+        # SOV и ReachScore каждого периода — из того же источника, что и на
+        # карточках: своя выгрузка по категории, иначе теги самого периода.
+        # Раньше динамика знала только о категории выбранных периодов, и
+        # разметка брендов тегами на графике не отражалась вовсе.
+        try:
+            uploaded = category_store.load_benchmarks(project_id, ordered)
+        except Exception:  # noqa: BLE001 — динамика строится и без категории
+            uploaded = {}
+        period_column = (
+            work_messages["period_id"].astype(str)
+            if "period_id" in work_messages.columns
+            else pd.Series("", index=work_messages.index)
+        )
+        benchmarks = {
+            pid: category_store.resolve_category_benchmark(
+                work_messages[period_column == pid],
+                brand_map,
+                {pid: uploaded[pid]} if pid in uploaded else None,
+            )
+            for pid in ordered
+        }
         frame = metrics_by_period(
             work_messages, ordered, benchmarks=benchmarks, settings=settings
         )
@@ -1025,16 +1055,12 @@ def render_brand_metrics_page(
     # Бренды конкурентов чаще всего уже размечены тегами в самой выгрузке
     # проекта: у RUFLEX это Docke и Tegola, у Кнауфа свои. Тогда отдельная
     # загрузка по категории не нужна — она просила бы те же данные второй раз.
+    # Загруженная выгрузка по категории главнее, но не знает про сужение
+    # диапазона дат — выгружается на период целиком (см. caption ниже).
     brand_map = category_brands_from_project_settings(project_settings)
-    benchmark = category_store.benchmark_from_messages(
-        scoped_messages, brand_map["own"], brand_map["competitors"]
+    benchmark = category_store.resolve_category_benchmark(
+        scoped_messages, brand_map, benchmarks
     )
-    # Загруженная выгрузка по категории главнее: в ней есть бренды, которых нет
-    # в теговой разметке проекта, то есть картина рынка шире. Она же не знает
-    # про сужение диапазона дат — выгружается на период целиком (см. caption
-    # ниже, когда diапазон активен и используется именно этот источник).
-    if benchmarks:
-        benchmark = category_store.merged_benchmark(benchmarks) or benchmark
 
     cards = compute_brand_metrics(scoped_messages, benchmark=benchmark, settings=settings)
 
@@ -1077,7 +1103,7 @@ def render_brand_metrics_page(
     # Полные, не суженные сообщения: график динамики остаётся по периодам
     # целиком (это отдельная, более крупная переделка — см. обсуждение).
     render_metrics_dynamics(
-        project_id, messages, periods, selected_period_ids, benchmarks, settings
+        project_id, messages, periods, selected_period_ids, brand_map, settings
     )
 
     if role_can_edit:

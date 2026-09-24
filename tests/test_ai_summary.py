@@ -673,6 +673,52 @@ check(
     str(real),
 )
 
+print("17. Карточки для ИИ видят долю голоса по тегам, как раздел «Индексы бренда»")
+# Раньше карточки для ИИ брали SOV только из загруженной выгрузки по категории.
+# Если конкуренты размечены тегами самой выгрузки проекта, раздел показывал
+# долю голоса, а ИИ получал прочерк и писал «доля голоса не посчитана».
+from fake_supabase import FakeClient  # noqa: E402
+
+from ai_summary_ui import _brand_cards  # noqa: E402
+from services import category_store  # noqa: E402
+
+fake_db = FakeClient()
+category_store.get_supabase_client = lambda: fake_db
+brand_messages = pd.DataFrame(
+    [
+        {"message_id": f"b{i}", "period_id": "p1", "tags": tag, "sentiment": "нейтральная",
+         "views": 1000, "audience": 5000, "author": f"a{i}"}
+        for i, tag in enumerate(["Бренд А", "Бренд А", "Бренд Б", "Бренд Б|Бренд А"])
+    ]
+)
+brand_settings = {"category_brands": {"own": ["Бренд А"], "competitors": ["Бренд Б"]}}
+cards = _brand_cards("proj-ai", brand_settings, brand_messages, ["p1"])
+check("SOV по тегам доступен", bool(cards) and cards["SOV"]["available"], str(cards.get("SOV")))
+check(
+    "SOV по тегам посчитан (3 из 5 упоминаний брендов)",
+    bool(cards) and cards["SOV"]["value"] is not None and abs(cards["SOV"]["value"] - 60.0) < 0.05,
+    str(cards.get("SOV", {}).get("value")),
+)
+
+fake_db.db["platform_category_benchmarks"] = [
+    {
+        "project_id": "proj-ai",
+        "period_id": "p1",
+        "own_brand": "Бренд А",
+        "brands": [
+            {"brand": "Бренд А", "messages": 10, "audience": 0, "reach": 0, "engagement": 0, "is_own": True},
+            {"brand": "Бренд В", "messages": 30, "audience": 0, "reach": 0, "engagement": 0, "is_own": False},
+        ],
+    }
+]
+uploaded_cards = _brand_cards("proj-ai", brand_settings, brand_messages, ["p1"])
+check(
+    "загруженная выгрузка по категории главнее тегов",
+    bool(uploaded_cards) and uploaded_cards["SOV"]["value"] is not None
+    and abs(uploaded_cards["SOV"]["value"] - 25.0) < 0.05,
+    str(uploaded_cards.get("SOV", {}).get("value")),
+)
+
 print()
 if failures:
     print(f"ПРОВАЛЕНО: {len(failures)} → {failures}")

@@ -30,11 +30,13 @@ PERIODS = pd.DataFrame(
     ]
 )
 
+BRAND_MAP = {"own": ["Бренд А"], "competitors": ["Бренд Б"]}
+
 render_metrics_dynamics(
     PROJECT_ID,
     prepare_period_messages(PROJECT_ID, ["p1"]),
     PERIODS,
     ["p1"],
-    {},
+    BRAND_MAP,
     merge_settings(None),
 )

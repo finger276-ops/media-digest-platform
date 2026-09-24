@@ -50,8 +50,13 @@ def close(actual, expected, tolerance=0.05):
         return False
 
 
+TAGS = ["Бренд А", "Бренд А", "Бренд Б", "Бренд Б"]
+BRAND_MAP = {"own": ["Бренд А"], "competitors": ["Бренд Б"]}
+
+
 def message_row(period_id, index, sentiment):
     payload = {
+        "tags": TAGS[index],
         "message_id": f"{period_id}_m{index}",
         "period_id": period_id,
         "datetime": "2026-04-01T10:00:00",
@@ -92,6 +97,19 @@ CLIENT.db["platform_manual_rows"] = [
         "updated_at": "2026-04-10T10:00:00+00:00",
     }
 ]
+# Для второго периода загружена выгрузка по категории: в ней «Бренд А» — 10
+# упоминаний из 40, то есть SOV 25 %. По тегам вышло бы 66,67 %.
+CLIENT.db["platform_category_benchmarks"] = [
+    {
+        "project_id": PROJECT_ID,
+        "period_id": "p2",
+        "own_brand": "Бренд А",
+        "brands": [
+            {"brand": "Бренд А", "messages": 10, "audience": 0, "reach": 0, "engagement": 0, "is_own": True},
+            {"brand": "Бренд В", "messages": 30, "audience": 0, "reach": 0, "engagement": 0, "is_own": False},
+        ],
+    }
+]
 
 print("Периоды вне выбранных готовятся так же, как выбранные")
 prepared = prepare_period_messages(PROJECT_ID, ["p2"])
@@ -100,11 +118,14 @@ check("скрытое аналитиком сообщение не считае�
       str(prepared["message_id"].tolist()))
 
 print("Изменение к прошлому периоду учитывает ручные правки")
-previous = previous_period_metrics(PROJECT_ID, "p2", merge_settings(None), {"own": [], "competitors": []})
+previous = previous_period_metrics(PROJECT_ID, "p2", merge_settings(None), BRAND_MAP)
 # Без скрытого негатива: (2 − 0) / 3 = 66,67 %. Сырые данные дали бы 25 %.
 check("ToneVolumeScore прошлого периода без скрытого сообщения", close(previous.get("ToneVolumeScore"), 66.67),
       str(previous))
 check("SES прошлого периода без скрытого сообщения", close(previous.get("SES"), 66.67), str(previous))
+# Раньше прошлый период знал только теги, а карточки текущего — ещё и
+# загруженную категорию: SOV сравнивался с числом из другого источника.
+check("SOV прошлого периода из загруженной категории", close(previous.get("SOV"), 25.0), str(previous))
 
 print("Динамика по всем периодам проекта")
 from streamlit.testing.v1 import AppTest  # noqa: E402
@@ -117,6 +138,11 @@ check("есть переключатель «Учесть все периоды�
 if toggle:
     toggle[0].check().run()
     check("после переключения без исключений", not at.exception, str(at.exception))
+    chart_metrics = [box for box in at.multiselect if box.key == "brand_metrics_chart"]
+    check("SOV можно вывести на график", bool(chart_metrics) and "SOV" in chart_metrics[0].options,
+          str(chart_metrics[0].options if chart_metrics else None))
+    if chart_metrics and "SOV" in chart_metrics[0].options:
+        chart_metrics[0].set_value(["SES", "NSS", "SOV"]).run()
     table = at.dataframe[0].value if at.dataframe else None
     check("таблица динамики построена", table is not None and len(table) == 2, str(table))
     if table is not None and len(table) == 2:
@@ -132,6 +158,15 @@ if toggle:
         check("выбранный период: NSS 25 %", close(rows["Неделя 1"]["NSS"], 25.0), str(table.to_dict("records")))
         check("догруженный период: NSS посчитан с учётом правок", close(rows["Неделя 2"]["NSS"], 66.67),
               str(table.to_dict("records")))
+        # SOV — из того же источника, что на карточках: у первого периода теги
+        # (2 из 4), у второго загруженная категория (10 из 40). Раньше динамика
+        # не видела ни тегов, ни категории догруженных периодов.
+        check("SOV в таблице динамики", "SOV" in table.columns, str(list(table.columns)))
+        if "SOV" in table.columns:
+            check("выбранный период: SOV по тегам", close(rows["Неделя 1"]["SOV"], 50.0),
+                  str(table.to_dict("records")))
+            check("догруженный период: SOV из загруженной категории", close(rows["Неделя 2"]["SOV"], 25.0),
+                  str(table.to_dict("records")))
 
 print()
 if failures:

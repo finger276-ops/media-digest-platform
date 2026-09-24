@@ -53,6 +53,7 @@ from services.cached_store import (
 )
 from services.project_settings import (
     DEMO_AI_LIMIT,
+    category_brands_from_project_settings,
     demo_ai_runs_left,
     demo_ai_runs_used,
     is_demo_project,
@@ -235,9 +236,14 @@ def _brand_cards(
     except Exception:  # noqa: BLE001 - индексы считаются и без категорийных данных
         benchmarks = {}
     try:
+        # Тот же источник SOV, что в разделе «Индексы бренда»: загруженная
+        # категория, а без неё — бренды, размеченные тегами самой выгрузки.
+        benchmark = category_store.resolve_category_benchmark(
+            messages, category_brands_from_project_settings(project_settings), benchmarks
+        )
         return compute_brand_metrics(
             messages,
-            benchmark=category_store.merged_benchmark(benchmarks),
+            benchmark=benchmark,
             settings=merge_settings((project_settings or {}).get("brand_metrics")),
         )
     except Exception:  # noqa: BLE001

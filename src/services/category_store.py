@@ -403,6 +403,31 @@ def merged_benchmark(benchmarks: dict[str, dict[str, Any]]) -> dict[str, Any] | 
     }
 
 
+def resolve_category_benchmark(
+    messages: pd.DataFrame,
+    brand_map: dict[str, list[str]] | None,
+    uploaded: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    """Бенчмарк для SOV и ReachScore — один источник для всех экранов.
+
+    Загруженная выгрузка по категории главнее: в ней есть бренды, которых нет
+    в теговой разметке проекта, то есть картина рынка шире. Без неё бренды
+    берутся из тегов самой выгрузки проекта по разметке из настроек.
+
+    Раньше источник выбирал каждый экран сам: раздел «Индексы бренда» брал
+    теги, а карточки для ИИ — только загруженную категорию. ИИ писал «доля
+    голоса не посчитана» там, где аналитик видел её на экране, а динамика и
+    изменение к прошлому периоду считали SOV каждая по-своему.
+    """
+    merged = merged_benchmark(uploaded) if uploaded else None
+    if merged:
+        return merged
+    brand_map = brand_map or {}
+    return benchmark_from_messages(
+        messages, list(brand_map.get("own") or []), list(brand_map.get("competitors") or [])
+    )
+
+
 def delete_benchmark(project_id: str, period_id: str) -> None:
     client = get_supabase_client()
     client.table(TABLE).delete().eq("project_id", str(project_id)).eq(
