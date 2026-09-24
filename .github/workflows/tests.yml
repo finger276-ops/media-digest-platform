@@ -71,6 +71,9 @@ jobs:
       - name: Индексы бренда по периодам (динамика, изменение к прошлому)
         run: python tests/test_brand_metrics_periods.py
 
+      - name: Тональность без разметки (прочерк вместо ложного нуля)
+        run: python tests/test_sentiment_markup.py
+
       - name: Склейка похожих заголовков инфоповодов
         run: python tests/test_event_titles.py
 

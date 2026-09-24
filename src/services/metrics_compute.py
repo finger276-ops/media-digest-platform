@@ -1,8 +1,144 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Mapping
 
 import pandas as pd
+
+# Тональность платформа не определяет сама — берёт разметку из выгрузки. Если
+# разметки нет совсем, «0 % негатива» и «100 % нейтрала» были бы ложным нулём:
+# данных нет, а экран говорит «всё спокойно». Признак разметки живёт здесь, в
+# нижнем слое, чтобы им одинаково пользовались экраны, отчёты, карточка для
+# ИИ и индексы бренда (brand_metrics импортирует его отсюда).
+POSITIVE_PATTERN = "позит|positive|полож"
+NEGATIVE_PATTERN = "нег|negative|отриц"
+NEGATIVE_FLAG_VALUES = ["true", "1", "yes", "да", "негатив", "negative"]
+EMPTY_SENTIMENT_VALUES = {"", "nan", "none", "null"}
+NO_SENTIMENT_REASON = (
+    "В выгрузке нет разметки тональности: колонка «Тональность» пуста "
+    "у всех сообщений периода."
+)
+NO_SENTIMENT_LABEL = "тональность не размечена"
+PERIOD_MARKUP_COLUMN = "_period_sentiment_marked"
+
+
+def sentiment_text(messages: pd.DataFrame) -> pd.Series:
+    """Текст тональности в нижнем регистре, «ё» → «е».
+
+    У строк, приклеенных к подготовленному кадру без подготовки, служебная
+    колонка пуста (NaN) — для них текст берётся из исходной разметки.
+    """
+    def _raw(frame: pd.DataFrame) -> pd.Series:
+        return (
+            frame.get("sentiment", pd.Series([""] * len(frame), index=frame.index))
+            .fillna("")
+            .astype(str)
+            .str.lower()
+            .str.replace("ё", "е", regex=False)
+        )
+
+    if "_sentiment_lower" not in messages.columns:
+        return _raw(messages)
+    prepared = messages["_sentiment_lower"]
+    missing = prepared.isna()
+    if not bool(missing.any()):
+        # Обычный подготовленный кадр: исходную разметку не разбираем заново.
+        return prepared.astype(str)
+    text = prepared.copy()
+    text[missing] = _raw(messages[missing])
+    return text.fillna("").astype(str)
+
+
+def sentiment_masks(messages: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+    """Маски позитивных и негативных сообщений.
+
+    Негатив — по тексту разметки («нег», «negative», «отриц») или по флагу
+    is_negative: некоторые выгрузки отмечают только негатив.
+    """
+    if messages is None or messages.empty:
+        empty = pd.Series(dtype=bool)
+        return empty, empty
+    sentiment = sentiment_text(messages)
+    positive = sentiment.str.contains(POSITIVE_PATTERN, regex=True, na=False)
+    negative = sentiment.str.contains(NEGATIVE_PATTERN, regex=True, na=False)
+    def _raw_flag(frame: pd.DataFrame) -> pd.Series:
+        if "is_negative" not in frame.columns:
+            return pd.Series(False, index=frame.index)
+        return frame["is_negative"].astype(str).str.lower().isin(NEGATIVE_FLAG_VALUES)
+
+    if "_is_negative_bool" in messages.columns:
+        flag = messages["_is_negative_bool"]
+        missing = flag.isna()
+        if bool(missing.any()):
+            # NaN — строка без подготовки; astype(bool) дал бы ей «негатив».
+            flag = flag.where(~missing, _raw_flag(messages))
+        negative = negative | flag.astype(bool)
+    else:
+        negative = negative | _raw_flag(messages)
+    # Сообщение не может быть одновременно позитивным и негативным:
+    # при грязной разметке приоритет у негатива, он важнее для рисков.
+    positive = positive & ~negative
+    return positive, negative
+
+
+def _row_markup(messages: pd.DataFrame) -> pd.Series:
+    """Размечено ли каждое сообщение: непустая тональность или флаг негатива."""
+    text = sentiment_text(messages).str.strip()
+    _, negative = sentiment_masks(messages)
+    return (~text.isin(EMPTY_SENTIMENT_VALUES)) | negative
+
+
+def has_sentiment_markup(messages: pd.DataFrame) -> bool:
+    """Есть ли в выгрузке хоть какая-то разметка тональности.
+
+    «нейтральная» у всех сообщений — это разметка и законный ноль. Пустая
+    колонка — отсутствие данных, и тогда тональность показывается прочерком.
+
+    Признак определяется по выгрузке-периоду, а не по срезу: день, тег или
+    инфоповод из одних пустых строк внутри размеченной выгрузки — это те же
+    неразмеченные-значит-нейтральные сообщения, что и раньше, и у них законный
+    ноль. Подготовленный кадр несёт признак периода в PERIOD_MARKUP_COLUMN,
+    и любой его срез наследует его. Если к подготовленному кадру приклеены
+    сырые строки (NaN в колонке), их досканировать построчно.
+    """
+    if not isinstance(messages, pd.DataFrame) or messages.empty:
+        return False
+    if PERIOD_MARKUP_COLUMN in messages.columns:
+        flags = messages[PERIOD_MARKUP_COLUMN]
+        if flags.notna().all():
+            return bool(flags.astype(bool).any())
+        if bool(flags.fillna(False).astype(bool).any()):
+            return True
+    return bool(_row_markup(messages).any())
+
+
+def sentiment_unmarked(
+    sentiment: Mapping[str, Any] | None, messages: pd.DataFrame | None = None
+) -> bool:
+    """Показать прочерк вместо тональности: сообщения есть, а разметки нет.
+
+    Решает ключ has_markup в словаре sentiment_counts. У словарей без него
+    (старые записи кеша, словари, собранные вручную) — признак по messages, а
+    без них считается, что разметка есть: лучше прежнее поведение, чем прочерк
+    там, где данные на самом деле есть. Пустой период — не «нет разметки», а
+    «нет данных», и его показывают как раньше.
+    """
+    sent = sentiment or {}
+    if sent:
+        total = int(sent.get("total") or 0)
+    else:
+        total = len(messages) if isinstance(messages, pd.DataFrame) else 0
+    if total <= 0:
+        return False
+    if "has_markup" in sent:
+        return not bool(sent["has_markup"])
+    if isinstance(messages, pd.DataFrame) and not messages.empty:
+        return not has_sentiment_markup(messages)
+    return False
+
+
+def no_sentiment_line(subject: str, verdict: str = "нет данных") -> str:
+    """Строка для текстов саммари и карточки ИИ: «Тональность: нет данных. …»."""
+    return f"{subject}: {verdict}. {NO_SENTIMENT_REASON}"
 
 
 def numeric_series(df: pd.DataFrame, columns: list[str]) -> pd.Series:
@@ -96,6 +232,16 @@ def prepare_dashboard_messages(messages: pd.DataFrame) -> pd.DataFrame:
             )
     if "_period_id_str" not in work.columns and "period_id" in work.columns:
         work["_period_id_str"] = work["period_id"].astype(str)
+    # Признак разметки — на всю выгрузку-период: его наследует любой срез
+    # (день, неделя, тег, инфоповод), см. has_sentiment_markup.
+    if PERIOD_MARKUP_COLUMN not in work.columns:
+        marked_row = _row_markup(work)
+        if "_period_id_str" in work.columns:
+            work[PERIOD_MARKUP_COLUMN] = (
+                marked_row.groupby(work["_period_id_str"]).transform("any").astype(bool)
+            )
+        else:
+            work[PERIOD_MARKUP_COLUMN] = bool(marked_row.any())
     return work
 
 
@@ -180,11 +326,16 @@ def format_int(value: Any) -> str:
         return "0"
 
 
-def sentiment_counts(messages: pd.DataFrame) -> dict[str, int]:
-    """Return positive/neutral/negative counts for any project profile."""
+def sentiment_counts(messages: pd.DataFrame) -> dict[str, Any]:
+    """Return positive/neutral/negative counts for any project profile.
+
+    has_markup — есть ли в выгрузке разметка тональности. Без неё все
+    сообщения попадают в «нейтрал», и показывать эти числа нельзя: читать
+    признак через sentiment_unmarked, а не по нулю негатива.
+    """
     total = int(len(messages)) if isinstance(messages, pd.DataFrame) else 0
     if total == 0:
-        return {"positive": 0, "neutral": 0, "negative": 0, "total": 0}
+        return {"positive": 0, "neutral": 0, "negative": 0, "total": 0, "has_markup": False}
 
     if "_sentiment_lower" in messages.columns:
         sentiment = messages["_sentiment_lower"].fillna("").astype(str)
@@ -222,6 +373,7 @@ def sentiment_counts(messages: pd.DataFrame) -> dict[str, int]:
         "neutral": neutral,
         "negative": negative,
         "total": total,
+        "has_markup": has_sentiment_markup(messages),
     }
 
 

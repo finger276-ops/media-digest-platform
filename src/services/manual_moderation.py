@@ -18,6 +18,7 @@ import pandas as pd
 
 from .cached_store import list_manual, save_manual
 from .event_titles import normalize_event_title
+from .metrics_compute import sentiment_masks
 
 
 def manual_payloads(manual_df: pd.DataFrame, table_name: str) -> list[dict[str, Any]]:
@@ -200,6 +201,13 @@ def recompute_event_counts(
     msg = msg[msg["event_id"].str.strip() != ""]
     if msg.empty:
         return out
+    # Маска негатива — один раз на весь кадр, а не заново в каждом инфоповоде:
+    # пересчёт идёт на каждом перезапуске страницы при сужении гранулярности.
+    count_negative = any(
+        c in msg.columns for c in ("sentiment", "is_negative", "_is_negative_bool")
+    )
+    if count_negative:
+        msg["_negative_mask"] = sentiment_masks(msg)[1].astype(bool).to_numpy()
     grouped = msg.groupby("event_id", dropna=False)
     for event_id, group in grouped:
         mask = out["event_id"].astype(str) == str(event_id)
@@ -224,15 +232,8 @@ def recompute_event_counts(
                 .dropna()
                 .nunique()
             )
-        if "sentiment" in group.columns:
-            out.loc[mask, "negative_count"] = int(
-                group["sentiment"]
-                .fillna("")
-                .astype(str)
-                .str.lower()
-                .str.contains("нег")
-                .sum()
-            )
+        if count_negative:
+            out.loc[mask, "negative_count"] = int(group["_negative_mask"].sum())
         if "datetime" in group.columns:
             dt = pd.to_datetime(group["datetime"], errors="coerce").dropna()
             if not dt.empty:

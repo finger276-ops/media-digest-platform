@@ -359,7 +359,7 @@ platform_*
 - `platform_table_rows` загружается пакетно по нескольким периодам, а не период за периодом;
 - из Supabase для обработанных таблиц запрашиваются только нужные поля `period_id,payload`;
 - префиксация ID для нескольких периодов переведена с `DataFrame.apply()` на более быстрые операции;
-- сообщения получают предрасчитанные технические колонки `_audience`, `_reach`, `_engagement`, `_sentiment_lower`, `_is_negative_bool`;
+- сообщения получают предрасчитанные технические колонки `_audience`, `_reach`, `_engagement`, `_sentiment_lower`, `_is_negative_bool`, `_period_sentiment_marked` (есть ли в выгрузке-периоде разметка тональности, см. docs/METRICS.md);
 - тяжелые функции `enrich_messages`, `apply_manual_overrides`, `aggregate_events`, `build_tag_statistics` кешируются;
 - добавлены дополнительные индексы в `sql/platform_schema.sql` для ускорения выборок по проекту, периоду и таблице.
 

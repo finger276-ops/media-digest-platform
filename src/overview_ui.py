@@ -17,7 +17,15 @@ import streamlit as st
 
 from metric_cards_ui import metric_card, render_metric_row
 from services.dashboard_config import COMPARISON_CHART_BLOCKS, DEFAULT_DASHBOARD_VIEW_SETTINGS
-from services.metrics_compute import format_int, overview_metrics, percent_text
+from services.metrics_compute import (
+    NO_SENTIMENT_LABEL,
+    NO_SENTIMENT_REASON,
+    PERIOD_MARKUP_COLUMN,
+    format_int,
+    overview_metrics,
+    percent_text,
+    sentiment_unmarked,
+)
 from services.period_comparison import (
     COMPARISON_TABLE_VIEWS,
     build_comparison_metrics,
@@ -47,6 +55,84 @@ MAIN_METRICS_COLOR_SCALE = fixed_color_scale(
     ["Сообщения", "Аудитория", "Охват", "Вовлеченность"]
 )
 
+TONE_CARDS = [("Позитив", "positive"), ("Нейтрал", "neutral"), ("Негатив", "negative")]
+
+
+def _tone_cards(
+    sent: dict[str, Any] | None,
+    prev_sent: dict[str, Any] | None = None,
+    *,
+    count_hint: str = "сообщений",
+    require_prev_messages: bool = True,
+) -> list[dict[str, Any]]:
+    """Три карточки тональности с изменением к прошлому периоду.
+
+    Без разметки тональности в выгрузке все сообщения попадают в «нейтрал»,
+    и «Нейтрал 100 %, Негатив 0 %» было бы ложным «всё спокойно»: вместо чисел
+    прочерк с причиной. Изменение долей показывается, только если размечены
+    оба периода: иначе рост негатива «с нуля» — это разметка, появившаяся в
+    выгрузке, а не событие.
+    """
+    sent = sent or {}
+    if sentiment_unmarked(sent):
+        return [
+            metric_card(label, "—", help_text=NO_SENTIMENT_REASON)
+            for label, _key in TONE_CARDS
+        ]
+    total = int(sent.get("total", 0) or 0)
+    has_previous = prev_sent is not None
+    prev_sent = prev_sent or {}
+    prev_total = int(prev_sent.get("total", 0) or 0)
+    # Шапка «Обзора» не сравнивает с пустым прошлым периодом, а «Сравнение
+    # периодов» сравнивает (у пустой точки доли нулевые) — так было и раньше.
+    comparable = (
+        has_previous
+        and bool(total)
+        and (bool(prev_total) or not require_prev_messages)
+        and not sentiment_unmarked(prev_sent)
+    )
+
+    def _share_delta(key: str) -> str | None:
+        if not comparable:
+            return None
+        prev_share = prev_sent.get(key, 0) / prev_total if prev_total else 0.0
+        return pp_delta(sent.get(key, 0) / total, prev_share)
+
+    return [
+        metric_card(
+            label,
+            percent_text(sent.get(key, 0), total),
+            delta=_share_delta(key),
+            help_text=f"{format_int(sent.get(key, 0))} {count_hint}",
+        )
+        for label, key in TONE_CARDS
+    ]
+
+
+def _mixed_markup_note(messages: pd.DataFrame, sent: dict[str, Any] | None) -> None:
+    """Выбраны размеченные и неразмеченные периоды вместе.
+
+    Итог считается как раньше — неразмеченные сообщения идут в «нейтрал», — но
+    доля негатива при этом разбавлена, и об этом нужно сказать.
+    """
+    if sentiment_unmarked(sent) or not isinstance(messages, pd.DataFrame):
+        return
+    if PERIOD_MARKUP_COLUMN not in messages.columns:
+        return
+    flags = messages[PERIOD_MARKUP_COLUMN].dropna().astype(bool)
+    if bool(flags.any()) and not bool(flags.all()):
+        st.caption(
+            "В части выбранных периодов нет разметки тональности — их сообщения "
+            "учтены как нейтральные."
+        )
+
+
+def _previous_unmarked_note(sent: dict[str, Any] | None, prev_sent: dict[str, Any] | None) -> None:
+    if prev_sent and not sentiment_unmarked(sent) and sentiment_unmarked(prev_sent):
+        st.caption(
+            "В прошлом периоде нет разметки тональности — изменение долей не показано."
+        )
+
 
 def _render_sentiment_donut(
     period_label: str,
@@ -58,6 +144,9 @@ def _render_sentiment_donut(
     total = int((sentiment or {}).get("total", 0) or 0)
     if total <= 0:
         st.caption(f"{period_label}: нет данных для круговой диаграммы")
+        return
+    if sentiment_unmarked(sentiment):
+        st.caption(f"{period_label}: {NO_SENTIMENT_LABEL}")
         return
     pie = pd.DataFrame(
         [
@@ -385,9 +474,28 @@ def render_period_comparison_charts(
             )
             st.altair_chart(metrics_line, width="stretch")
 
-    if "Динамика тональности" in selected_blocks:
+    # Точки без разметки тональности — ровная линия нейтрала на 100 % и ноль
+    # негатива, то есть ложное «всё спокойно». Они убираются с графика и
+    # называются в подписи.
+    if "Тональность размечена" in chart_df.columns:
+        tone_ok = chart_df["Тональность размечена"].astype(bool).to_numpy()
+    else:
+        tone_ok = [True] * len(chart_df)
+    tone_df = chart_df[tone_ok]
+    tone_items = [item for item, ok in zip(comparison, tone_ok) if ok]
+
+    if "Динамика тональности" in selected_blocks and tone_df.empty:
         st.markdown("**Динамика долей тональности, %**")
-        sentiment_long = chart_df[
+        st.caption(NO_SENTIMENT_REASON)
+    elif "Динамика тональности" in selected_blocks:
+        st.markdown("**Динамика долей тональности, %**")
+        if len(tone_df) < len(chart_df):
+            skipped = chart_df.loc[[not ok for ok in tone_ok], "Период"].astype(str)
+            st.caption(
+                "Без разметки тональности, на графике не показаны: "
+                + ", ".join(skipped)
+            )
+        sentiment_long = tone_df[
             ["Период", "Позитив, %", "Нейтрал, %", "Негатив, %"]
         ].melt(
             id_vars="Период",
@@ -465,7 +573,7 @@ def render_period_comparison_charts(
                 sentiment_bars.properties(height=320), width="stretch"
             )
         elif sentiment_chart_type == "Круговая диаграмма":
-            period_options = [str(x) for x in chart_df["Период"].tolist()]
+            period_options = [str(x) for x in tone_df["Период"].tolist()]
             selected_period_for_sentiment = st.selectbox(
                 "Период для круговой диаграммы тональности",
                 period_options,
@@ -474,7 +582,7 @@ def render_period_comparison_charts(
             )
             sentiment_by_label = {
                 str(row["Период"]): item.get("sentiment", {})
-                for (_, row), item in zip(chart_df.iterrows(), comparison)
+                for (_, row), item in zip(tone_df.iterrows(), tone_items)
             }
             _render_sentiment_donut(
                 selected_period_for_sentiment,
@@ -698,19 +806,16 @@ def render_period_comparison_metrics(
         columns=4,
     )
 
-    tone = [("Позитив", "positive"), ("Нейтрал", "neutral"), ("Негатив", "negative")]
     render_metric_row(
-        [
-            metric_card(
-                label,
-                f"{current[f'{key}_share'] * 100:.0f}%",
-                delta=pp_delta(current[f"{key}_share"], previous[f"{key}_share"]),
-                help_text=f"{format_int(current['sentiment'].get(key, 0))} сообщений в последнем периоде",
-            )
-            for label, key in tone
-        ],
+        _tone_cards(
+            current.get("sentiment"),
+            previous.get("sentiment"),
+            count_hint="сообщений в последнем периоде",
+            require_prev_messages=False,
+        ),
         columns=3,
     )
+    _previous_unmarked_note(current.get("sentiment"), previous.get("sentiment"))
 
     render_period_comparison_charts(
         comparison,
@@ -771,7 +876,9 @@ def render_period_metrics_line(messages: pd.DataFrame) -> dict[str, Any]:
         f"охват {format_int(metrics.get('reach', 0))}",
         f"вовлечённость {format_int(metrics.get('engagement', 0))}",
     ]
-    if total:
+    if total and sentiment_unmarked(sentiment):
+        parts.append(NO_SENTIMENT_LABEL)
+    elif total:
         parts.append(f"негатив {percent_text(int(sentiment.get('negative', 0)), total)}")
     st.caption(" · ".join(parts))
     return metrics
@@ -820,19 +927,11 @@ def render_project_intro(
 
     previous = previous_metrics or {}
     prev_sent = (previous.get("sentiment") or {}) if previous else {}
-    prev_total = int(prev_sent.get("total", 0) or 0)
 
     def _delta(key: str) -> str | None:
         if not previous:
             return None
         return metric_delta(metrics.get(key, 0), previous.get(key, 0))
-
-    def _share_delta(key: str) -> str | None:
-        if not previous or not prev_total or not total:
-            return None
-        return pp_delta(
-            sent.get(key, 0) / total, prev_sent.get(key, 0) / prev_total
-        )
 
     volume_cards = [
         ("Сообщений", "messages"),
@@ -848,19 +947,9 @@ def render_project_intro(
         columns=4,
     )
 
-    tone_cards = [("Позитив", "positive"), ("Нейтрал", "neutral"), ("Негатив", "negative")]
-    render_metric_row(
-        [
-            metric_card(
-                label,
-                percent_text(sent.get(key, 0), total),
-                delta=_share_delta(key),
-                help_text=f"{format_int(sent.get(key, 0))} сообщений",
-            )
-            for label, key in tone_cards
-        ],
-        columns=3,
-    )
+    render_metric_row(_tone_cards(sent, prev_sent if previous else None), columns=3)
+    _previous_unmarked_note(sent, prev_sent if previous else None)
+    _mixed_markup_note(messages, sent)
 
     if previous_label:
         st.caption(f"Изменения — к предыдущему периоду: {previous_label}")

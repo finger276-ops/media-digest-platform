@@ -19,6 +19,7 @@ import streamlit as st
 from services.dashboard_config import REPORT_SECTION_OPTIONS
 from services.project_settings import report_sections_from_project_settings
 from services.report_export import (
+    _export_sentiment,
     generate_summary_docx,
     generate_summary_infographic_png,
     generate_summary_pdf,
@@ -86,6 +87,18 @@ def render_summary_export_buttons(
     st.caption(
         f"Брендирование: {payload.get('client_name') or project_name}; акцентный цвет {payload.get('accent_color')}."
     )
+    if "sentiment" in (payload.get("sections") or []):
+        if not payload.get("sentiment_markup", True):
+            st.caption(
+                "В выгрузке нет разметки тональности — в блоке «Тональность» будет "
+                "пометка вместо диаграммы."
+            )
+        elif _export_sentiment(payload, payload.get("comparison_sequence") or [])[4]:
+            # PNG и PDF при нескольких периодах рисуют последний.
+            st.caption(
+                "В последнем периоде нет разметки тональности — в PNG и PDF в блоке "
+                "«Тональность» будет пометка вместо диаграммы."
+            )
     c1, c2, c3 = st.columns(3)
     with c1:
         try:

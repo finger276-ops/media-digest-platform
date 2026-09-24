@@ -29,10 +29,19 @@ from typing import Any, Iterable
 
 import pandas as pd
 
-from services.metrics_compute import audience_total, numeric_series
-
-POSITIVE_PATTERN = "позит|positive|полож"
-NEGATIVE_PATTERN = "нег|negative|отриц"
+# Признак разметки тональности и маски — общие для всей платформы и живут в
+# metrics_compute; здесь реэкспорт под прежними именами.
+from services.metrics_compute import (  # noqa: F401  реэкспорт
+    EMPTY_SENTIMENT_VALUES,
+    NEGATIVE_PATTERN,
+    NO_SENTIMENT_REASON,
+    POSITIVE_PATTERN,
+    audience_total,
+    has_sentiment_markup,
+    numeric_series,
+    sentiment_masks,
+    sentiment_text as _sentiment_text,
+)
 
 REACH_COLUMNS = ["views", "Просмотры", "Просмотров", "reach", "Охват"]
 AUDIENCE_COLUMNS = ["audience", "Аудитория"]
@@ -61,11 +70,6 @@ DEFAULT_BPI_WEIGHTS = {"NSS": 0.4, "SES": 0.4, "TVS": 0.2}
 # Метрика без данных показывает прочерк и причину, а не ноль. Для тональности
 # и реакций это нужно проверять явно: пустая «Тональность» даёт маски «всё
 # False», и (0 − 0) / N выглядело бы измеренным нулём.
-EMPTY_SENTIMENT_VALUES = {"", "nan", "none", "null"}
-NO_SENTIMENT_REASON = (
-    "В выгрузке нет разметки тональности: колонка «Тональность» пуста "
-    "у всех сообщений периода."
-)
 # «Пусты или нулевые»: импорт хранит пустую ячейку реакций как 0, поэтому
 # отсутствие колонки и честные нули после загрузки не различить.
 NO_REACTIONS_REASON = (
@@ -138,58 +142,6 @@ def merge_settings(settings: dict[str, Any] | None) -> dict[str, Any]:
     if str(source.get("sov_basis")) in {"messages", "reach"}:
         merged["sov_basis"] = str(source["sov_basis"])
     return merged
-
-
-def _sentiment_text(messages: pd.DataFrame) -> pd.Series:
-    """Тональность сообщений строкой в нижнем регистре, «ё» → «е»."""
-    if "_sentiment_lower" in messages.columns:
-        return messages["_sentiment_lower"].fillna("").astype(str)
-    return (
-        messages.get("sentiment", pd.Series([""] * len(messages), index=messages.index))
-        .fillna("")
-        .astype(str)
-        .str.lower()
-        .str.replace("ё", "е", regex=False)
-    )
-
-
-def sentiment_masks(messages: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
-    """Маски позитивных и негативных сообщений."""
-    empty = pd.Series([False] * len(messages), index=messages.index)
-    if messages is None or messages.empty:
-        return empty, empty
-
-    sentiment = _sentiment_text(messages)
-    positive = sentiment.str.contains(POSITIVE_PATTERN, regex=True, na=False)
-    negative = sentiment.str.contains(NEGATIVE_PATTERN, regex=True, na=False)
-
-    if "_is_negative_bool" in messages.columns:
-        negative = negative | messages["_is_negative_bool"].astype(bool)
-    elif "is_negative" in messages.columns:
-        negative = negative | messages["is_negative"].astype(str).str.lower().isin(
-            ["true", "1", "yes", "да", "негатив", "negative"]
-        )
-    # Сообщение не может быть одновременно позитивным и негативным:
-    # при грязной разметке приоритет у негатива, он важнее для рисков.
-    positive = positive & ~negative
-    return positive, negative
-
-
-def has_sentiment_markup(messages: pd.DataFrame) -> bool:
-    """Есть ли в периоде хоть какая-то разметка тональности.
-
-    «нейтральная» у всех сообщений — это разметка и законный ноль. Пустая
-    колонка — отсутствие данных, и тогда метрики тональности показывают
-    прочерк, а не ноль.
-    """
-    if messages is None or messages.empty:
-        return False
-    text = _sentiment_text(messages).str.strip()
-    if bool((~text.isin(EMPTY_SENTIMENT_VALUES)).any()):
-        return True
-    # Флаг негатива без текста тональности — тоже разметка.
-    _, negative = sentiment_masks(messages)
-    return bool(negative.any())
 
 
 def reaction_series(messages: pd.DataFrame) -> tuple[pd.Series, str]:

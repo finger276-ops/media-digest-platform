@@ -14,7 +14,7 @@ import streamlit as st
 
 from metric_cards_ui import metric_card, render_metric_row
 
-from services.metrics_compute import format_int
+from services.metrics_compute import format_int, sentiment_unmarked
 from services.reviews import (
     LOW_RATING,
     complaints,
@@ -65,6 +65,17 @@ def render_reviews(messages: pd.DataFrame) -> None:
     overview = review_overview(messages)
     total = int(overview["reviews"])
     rating_avg = overview["rating_avg"]
+    # Претензии отбираются по оценке или по негативной тональности. Если нет
+    # ни того, ни другого, «0 претензий» — не измерение: отбирать не по чему.
+    tone_unmarked = sentiment_unmarked(None, reviews)
+    no_basis = not int(overview["rated"]) and tone_unmarked
+    complaints_help = (
+        f"Отзывы с оценкой не выше {LOW_RATING:.0f} или размеченные "
+        "негативными. Одного признака мало: разметка тональности и "
+        "оценка расходятся в обе стороны."
+    )
+    if tone_unmarked and not no_basis:
+        complaints_help += " Разметки тональности нет — претензии отобраны только по оценке."
 
     render_metric_row(
         [
@@ -79,11 +90,12 @@ def render_reviews(messages: pd.DataFrame) -> None:
             ),
             metric_card(
                 "Претензий",
-                format_int(int(overview["negative"])),
+                "—" if no_basis else format_int(int(overview["negative"])),
                 help_text=(
-                    f"Отзывы с оценкой не выше {LOW_RATING:.0f} или размеченные "
-                    "негативными. Одного признака мало: разметка тональности и "
-                    "оценка расходятся в обе стороны."
+                    "В отзывах нет ни оценки, ни разметки тональности — отобрать "
+                    "претензии не по чему."
+                    if no_basis
+                    else complaints_help
                 ),
             ),
             metric_card("Товаров", format_int(int(overview["products"]))),
@@ -130,7 +142,12 @@ def render_reviews(messages: pd.DataFrame) -> None:
 
     st.markdown("**Претензии покупателей**")
     complaint_rows = complaints(messages)
-    if complaint_rows.empty:
+    if complaint_rows.empty and no_basis:
+        st.info(
+            "Претензии не отобрать: у отзывов периода нет ни оценки, ни разметки "
+            "тональности."
+        )
+    elif complaint_rows.empty:
         st.success("За период не пришло ни одной претензии к товару.")
     else:
         st.caption(
@@ -188,6 +205,8 @@ def render_reviews(messages: pd.DataFrame) -> None:
     if products.empty:
         st.caption("Товар в отзывах не указан.")
         return
+    if no_basis and "Претензий" in products.columns:
+        products = products.assign(Претензий="—")
     st.dataframe(
         products.head(MAX_PRODUCTS_SHOWN),
         hide_index=True,

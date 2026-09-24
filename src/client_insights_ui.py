@@ -15,7 +15,14 @@ import pandas as pd
 import streamlit as st
 
 from metric_cards_ui import metric_card, render_metric_row
-from services.metrics_compute import format_int, overview_metrics
+from services.metrics_compute import (
+    NO_SENTIMENT_REASON,
+    format_int,
+    has_sentiment_markup,
+    no_sentiment_line,
+    overview_metrics,
+    sentiment_unmarked,
+)
 from services.period_comparison import ordered_period_ids, period_metrics_for_comparison
 from services.report_highlights import is_technical_event_title
 from services.report_highlights import event_title_column as event_title_col
@@ -54,6 +61,10 @@ def build_period_change_insights(
             f"Количество {label} {direction}: {format_int(delta)}{percent} к предыдущему периоду."
         )
 
+    # Если один из периодов не размечен по тональности, «рост негатива с нуля»
+    # — это появившаяся разметка, а не событие.
+    if sentiment_unmarked(prev.get("sentiment")) or sentiment_unmarked(cur.get("sentiment")):
+        return insights
     neg_delta = float(cur.get("negative_share", 0) or 0) - float(
         prev.get("negative_share", 0) or 0
     )
@@ -79,12 +90,17 @@ def build_tag_change_table(
     ):
         return pd.DataFrame()
     prev_id, cur_id = str(ordered_ids[-2]), str(ordered_ids[-1])
-    prev_stats = build_tag_statistics(
-        messages[messages["period_id"].astype(str) == prev_id].copy()
-    )
-    cur_stats = build_tag_statistics(
-        messages[messages["period_id"].astype(str) == cur_id].copy()
-    )
+    prev_msgs = messages[messages["period_id"].astype(str) == prev_id].copy()
+    cur_msgs = messages[messages["period_id"].astype(str) == cur_id].copy()
+    # Негатив по тегам без разметки тональности — ложный ноль, а его разница
+    # между размеченным и неразмеченным периодом ещё и поднимала бы тег в
+    # сортировке «заметных изменений».
+    # Пустой период — «нет данных», а не «нет разметки»: сравнение с ним
+    # показывается как раньше.
+    prev_marked = prev_msgs.empty or has_sentiment_markup(prev_msgs)
+    cur_marked = cur_msgs.empty or has_sentiment_markup(cur_msgs)
+    prev_stats = build_tag_statistics(prev_msgs)
+    cur_stats = build_tag_statistics(cur_msgs)
     if prev_stats.empty and cur_stats.empty:
         return pd.DataFrame()
     prev = (
@@ -112,11 +128,11 @@ def build_tag_change_table(
         ).fillna(
             0
         )
-    merged["abs_delta"] = (
-        merged[["Δ сообщений", "Δ охват", "Δ вовлеченность", "Δ негатив"]]
-        .abs()
-        .sum(axis=1)
-    )
+    tone_comparable = prev_marked and cur_marked
+    delta_columns = ["Δ сообщений", "Δ охват", "Δ вовлеченность"]
+    if tone_comparable:
+        delta_columns.append("Δ негатив")
+    merged["abs_delta"] = merged[delta_columns].abs().sum(axis=1)
     merged = merged.sort_values("abs_delta", ascending=False).head(limit)
     out = pd.DataFrame(
         {
@@ -127,8 +143,10 @@ def build_tag_change_table(
             "Δ охвата": merged["Δ охват"].astype(int),
             "Вовлеченность сейчас": merged["Вовлеченность_cur"].astype(int),
             "Δ вовлеченности": merged["Δ вовлеченность"].astype(int),
-            "Негатив сейчас": merged["Негатив_cur"].astype(int),
-            "Δ негатива": merged["Δ негатив"].astype(int),
+            "Негатив сейчас": (
+                merged["Негатив_cur"].astype(int) if cur_marked else "—"
+            ),
+            "Δ негатива": merged["Δ негатив"].astype(int) if tone_comparable else "—",
         }
     )
     return out
@@ -168,9 +186,12 @@ def build_client_insights_summary(
 
     lines: list[str] = []
     lines.append("## Клиентский обзор")
-    lines.append(
-        f"Риск негатива: {risk_level}; негативных сообщений — {format_int(negative)} ({negative_share * 100:.1f}%)."
-    )
+    if sentiment_unmarked(sent, messages):
+        lines.append(no_sentiment_line("Риск негатива", "не оценён"))
+    else:
+        lines.append(
+            f"Риск негатива: {risk_level}; негативных сообщений — {format_int(negative)} ({negative_share * 100:.1f}%)."
+        )
     lines.append(f"Суммарная вовлеченность: {format_int(engagement)}.")
 
     if len(selected_period_ids or []) >= 2:
@@ -232,9 +253,21 @@ def render_client_insights(
         if negative_share < 0.01
         else "средний" if negative_share < 0.05 else "высокий"
     )
+    # Без разметки тональности «Риск негатива: низкий» — самое заметное ложное
+    # «всё спокойно» на экране заказчика.
+    unmarked = sentiment_unmarked(sent, messages)
+    if unmarked:
+        tone_cards = [
+            ("Риск негатива", "—", NO_SENTIMENT_REASON),
+            ("Доля негатива", "—", NO_SENTIMENT_REASON),
+        ]
+    else:
+        tone_cards = [
+            ("Риск негатива", risk_level, f"Негативных сообщений: {format_int(negative)}"),
+            ("Доля негатива", f"{negative_share * 100:.1f}%", ""),
+        ]
     top_cards = [
-        ("Риск негатива", risk_level, f"Негативных сообщений: {format_int(negative)}"),
-        ("Доля негатива", f"{negative_share * 100:.1f}%", ""),
+        *tone_cards,
         ("Вовлеченность", format_int(engagement), ""),
         (
             "Инфоповодов",
@@ -248,7 +281,16 @@ def render_client_insights(
     )
 
     signals: list[dict[str, Any]] = []
-    if negative > 0:
+    if unmarked:
+        signals.append(
+            {
+                "Сигнал": "Тональность не размечена",
+                "Что смотреть": NO_SENTIMENT_REASON + " Риск негатива не оценивался.",
+                "Данные": "нет данных",
+                "Приоритет": "Нет данных",
+            }
+        )
+    elif negative > 0:
         signals.append(
             {
                 "Сигнал": "Есть негативные сообщения",
@@ -356,8 +398,11 @@ def render_client_insights(
         )
         if not tag_changes.empty:
             display = tag_changes.copy()
+            # Прочерк — не число: format_int превратил бы его обратно в «0».
             for col in [c for c in display.columns if c != "Тег"]:
-                display[col] = display[col].apply(format_int)
+                display[col] = display[col].apply(
+                    lambda value: value if isinstance(value, str) else format_int(value)
+                )
             with st.expander("Теги с наибольшими изменениями", expanded=True):
                 st.dataframe(display, hide_index=True, width="stretch")
 

@@ -13,7 +13,7 @@ from typing import Any
 import pandas as pd
 
 from .formatting import fmt_date_short, period_picker_label
-from .metrics_compute import format_int, overview_metrics, percent_text
+from .metrics_compute import format_int, overview_metrics, percent_text, sentiment_unmarked
 
 
 def previous_period_id(
@@ -467,6 +467,23 @@ def comparison_row(
     metric: dict[str, Any], previous: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     sent = metric.get("sentiment", {}) or {}
+    # Без разметки тональности доли — не измерение, а «всё в нейтрале»: прочерк.
+    # Изменение долей — только если размечены оба соседних периода.
+    unmarked = sentiment_unmarked(sent)
+    no_tone_delta = (
+        previous is None
+        or unmarked
+        or sentiment_unmarked(previous.get("sentiment"))
+    )
+
+    def _share(key: str) -> str:
+        return "—" if unmarked else percent_text(sent.get(key, 0), sent.get("total", 0))
+
+    def _share_delta(key: str) -> str:
+        if no_tone_delta:
+            return "—"
+        return pp_delta(metric.get(f"{key}_share", 0), previous.get(f"{key}_share", 0))
+
     row = {
         "Период": metric.get("label", metric.get("period_id", "")),
         "Сообщений": format_int(metric.get("messages", 0)),
@@ -495,30 +512,12 @@ def comparison_row(
                 metric.get("engagement", 0), previous.get("engagement", 0)
             )
         ),
-        "Позитив": percent_text(sent.get("positive", 0), sent.get("total", 0)),
-        "Δ позитива": (
-            "—"
-            if previous is None
-            else pp_delta(
-                metric.get("positive_share", 0), previous.get("positive_share", 0)
-            )
-        ),
-        "Нейтрал": percent_text(sent.get("neutral", 0), sent.get("total", 0)),
-        "Δ нейтрала": (
-            "—"
-            if previous is None
-            else pp_delta(
-                metric.get("neutral_share", 0), previous.get("neutral_share", 0)
-            )
-        ),
-        "Негатив": percent_text(sent.get("negative", 0), sent.get("total", 0)),
-        "Δ негатива": (
-            "—"
-            if previous is None
-            else pp_delta(
-                metric.get("negative_share", 0), previous.get("negative_share", 0)
-            )
-        ),
+        "Позитив": _share("positive"),
+        "Δ позитива": _share_delta("positive"),
+        "Нейтрал": _share("neutral"),
+        "Δ нейтрала": _share_delta("neutral"),
+        "Негатив": _share("negative"),
+        "Δ негатива": _share_delta("negative"),
     }
     return row
 
@@ -589,6 +588,9 @@ def comparison_visual_rows(comparison: list[dict[str, Any]]) -> pd.DataFrame:
                 "Позитив": int(sent.get("positive", 0) or 0),
                 "Нейтрал": int(sent.get("neutral", 0) or 0),
                 "Негатив": int(sent.get("negative", 0) or 0),
+                # Числа не трогаем (NaN дал бы «nan%» в подписях): точки без
+                # разметки убирает с графиков тональности сам экран.
+                "Тональность размечена": not sentiment_unmarked(sent),
             }
         )
     return pd.DataFrame(rows)

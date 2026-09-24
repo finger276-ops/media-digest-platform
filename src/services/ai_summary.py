@@ -24,7 +24,15 @@ import pandas as pd
 
 from .ai_provider import AIConfig, AIError, complete, estimate_tokens, load_ai_config
 from .brand_metrics import METRIC_TITLES
-from .metrics_compute import numeric_series, overview_metrics, sentiment_counts
+from .metrics_compute import (
+    has_sentiment_markup,
+    no_sentiment_line,
+    numeric_series,
+    overview_metrics,
+    sentiment_counts,
+    sentiment_masks,
+    sentiment_unmarked,
+)
 from .period_comparison import daily_metrics_for_comparison
 from .report_highlights import event_title_column, top_report_events, top_report_tags
 
@@ -102,13 +110,18 @@ def _tags_block(messages: pd.DataFrame) -> str:
     stats = top_report_tags(messages, limit=TOP_TAGS)
     if stats is None or stats.empty:
         return "Теги: в выгрузке нет теговых колонок."
+    # «негатив 0» у каждого тега без разметки тональности модель прочитала бы
+    # как «по тегам негатива нет».
+    marked = has_sentiment_markup(messages)
     lines = []
     for _, row in stats.iterrows():
-        negative = row.get("Негатив", 0)
-        lines.append(
+        piece = (
             f"- {row.get('Тег')}: {_fmt_int(row.get('Сообщений'))} сообщ., "
-            f"охват {_fmt_int(row.get('Охват'))}, негатив {_fmt_int(negative)}"
+            f"охват {_fmt_int(row.get('Охват'))}"
         )
+        if marked:
+            piece += f", негатив {_fmt_int(row.get('Негатив', 0))}"
+        lines.append(piece)
     return "Топ тегов:\n" + "\n".join(lines)
 
 
@@ -140,17 +153,23 @@ def metrics_block(messages: pd.DataFrame, metrics: dict[str, Any] | None) -> str
     base = dict(metrics or overview_metrics(messages))
     sentiment = base.get("sentiment") or sentiment_counts(messages)
     total = int(base.get("messages") or 0)
+    # Без разметки «нейтрал 100 %» — не измерение: модели и читателю отчёта
+    # говорится прямо, что тональности нет.
+    if sentiment_unmarked(sentiment, messages):
+        tone = no_sentiment_line("Тональность")
+    else:
+        tone = (
+            "Тональность: "
+            f"позитив {_fmt_int(sentiment.get('positive'))} ({_share(sentiment.get('positive'), total)}), "
+            f"нейтрал {_fmt_int(sentiment.get('neutral'))} ({_share(sentiment.get('neutral'), total)}), "
+            f"негатив {_fmt_int(sentiment.get('negative'))} ({_share(sentiment.get('negative'), total)})"
+        )
     lines = [
         f"Сообщений: {_fmt_int(total)}",
         f"Суммарная аудитория площадок: {_fmt_int(base.get('audience'))}",
         f"Суммарный охват: {_fmt_int(base.get('reach'))}",
         f"Суммарная вовлечённость: {_fmt_int(base.get('engagement'))}",
-        (
-            "Тональность: "
-            f"позитив {_fmt_int(sentiment.get('positive'))} ({_share(sentiment.get('positive'), total)}), "
-            f"нейтрал {_fmt_int(sentiment.get('neutral'))} ({_share(sentiment.get('neutral'), total)}), "
-            f"негатив {_fmt_int(sentiment.get('negative'))} ({_share(sentiment.get('negative'), total)})"
-        ),
+        tone,
     ]
     return "Метрики периода:\n" + "\n".join(lines)
 
@@ -179,6 +198,25 @@ def comparison_block(metrics: dict[str, Any] | None) -> str:
         tail = f" ({percent:+.1f}%)".replace(".", ",") if percent is not None else ""
         return f"- {label}: было {_fmt_int(was)}, стало {_fmt_int(now)}{tail}"
 
+    previous_label = str(previous.get("label") or "предыдущий период")
+    current_label = str(current.get("label") or "текущий период")
+    # «было 0, стало 5» между неразмеченным и размеченным периодом — это
+    # появившаяся разметка, а не рост негатива. Если не размечены оба,
+    # об этом уже сказал блок метрик.
+    unmarked_labels = [
+        label
+        for source, label in ((previous, previous_label), (current, current_label))
+        if sentiment_unmarked(source.get("sentiment"))
+    ]
+    if not unmarked_labels:
+        negative_line = _delta("negative", "негативные сообщения")
+    elif len(unmarked_labels) == 1:
+        negative_line = (
+            "- негативные сообщения: нет данных для сравнения — в периоде "
+            f"«{unmarked_labels[0]}» нет разметки тональности"
+        )
+    else:
+        negative_line = None
     lines = [
         line
         for line in (
@@ -186,12 +224,10 @@ def comparison_block(metrics: dict[str, Any] | None) -> str:
             _delta("audience", "аудитория"),
             _delta("reach", "охват"),
             _delta("engagement", "вовлечённость"),
-            _delta("negative", "негативные сообщения"),
+            negative_line,
         )
         if line
     ]
-    previous_label = str(previous.get("label") or "предыдущий период")
-    current_label = str(current.get("label") or "текущий период")
     if not lines:
         return "Динамика: изменений в основных метриках нет."
     return (
@@ -254,12 +290,11 @@ def _excerpts_block(
         return ""
     work = messages.copy()
     if negative_only:
-        if "_is_negative_bool" in work.columns:
-            work = work[work["_is_negative_bool"].fillna(False).astype(bool)]
-        elif "sentiment" in work.columns:
-            work = work[
-                work["sentiment"].fillna("").astype(str).str.lower().str.contains("нег")
-            ]
+        # Без разметки «Негативных сообщений в периоде нет» подтолкнуло бы
+        # модель написать клиенту, что рисков нет.
+        if not has_sentiment_markup(work):
+            return no_sentiment_line("Выдержки негативных сообщений", "выделить нельзя")
+        work = work[sentiment_masks(work)[1].to_numpy()]
         if work.empty:
             return "Негативных сообщений в периоде нет."
 
@@ -331,7 +366,8 @@ TASK_PROMPTS = {
 - что происходило в информационном поле бренда за период;
 - какие темы дали основной объём и почему они появились;
 - как изменилась картина к предыдущему периоду, если динамика есть в карточке;
-- где сосредоточен негатив;
+- где сосредоточен негатив (если в карточке сказано, что разметки \
+тональности нет, — одной фразой скажи, что тональность не оценивалась);
 - если в карточке есть блок «По дням внутри периода» — укажи конкретный \
 день пика (сообщений или негатива), это конкретнее, чем «негатив вырос»;
 - одно-два наблюдения, которые не видны из голых цифр.""",
@@ -353,7 +389,11 @@ TASK_PROMPTS = {
 Формулировки конкретные, без «усилить коммуникацию» и «мониторить ситуацию».
 
 Если серьёзного негатива в периоде нет — так и напиши одним абзацем и не \
-выдумывай риски.""",
+выдумывай риски.
+
+Если в карточке сказано, что разметки тональности нет, не делай вывода об \
+отсутствии негатива: прямо напиши, что тональность в выгрузке не размечена, и \
+оцени риски по объёму, темам и динамике.""",
 }
 
 

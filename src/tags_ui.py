@@ -16,7 +16,14 @@ from metric_cards_ui import metric_card, render_metric_row
 
 from messages_ui import render_message_list
 from services.message_compute import message_link_column, message_text_column
-from services.metrics_compute import format_int, numeric_series, overview_metrics, percent_text
+from services.metrics_compute import (
+    NO_SENTIMENT_REASON,
+    format_int,
+    numeric_series,
+    overview_metrics,
+    percent_text,
+    sentiment_unmarked,
+)
 from services.tag_compute import build_tag_statistics, split_pipe_values
 
 
@@ -75,9 +82,14 @@ def _tag_auto_summary(tag: str, tag_messages: pd.DataFrame) -> str:
                 + "; ".join(map(str, top_events))
                 + "."
             )
+    tone_part = (
+        "Тональность: нет данных — в выгрузке нет разметки. "
+        if sentiment_unmarked(sent)
+        else f"Негативных сообщений: {format_int(negative)} ({percent_text(negative, total)}). "
+    )
     return (
         f"По тегу «{tag}» найдено {format_int(total)} сообщений. "
-        f"Негативных сообщений: {format_int(negative)} ({percent_text(negative, total)}). "
+        f"{tone_part}"
         f"Суммарный охват — {format_int(metrics.get('reach', 0))}, "
         f"вовлеченность — {format_int(metrics.get('engagement', 0))}."
         f"{event_part}"
@@ -130,8 +142,12 @@ def render_selected_tag_detail(
             metric_card("Сообщений", format_int(metrics.get("messages", 0))),
             metric_card("Источников/чатов", format_int(source_count)),
             metric_card("Авторов", format_int(author_count)),
-            metric_card(
-                "Негатив", percent_text(int(sent.get("negative", 0) or 0), total)
+            (
+                metric_card("Негатив", "—", help_text=NO_SENTIMENT_REASON)
+                if sentiment_unmarked(sent)
+                else metric_card(
+                    "Негатив", percent_text(int(sent.get("negative", 0) or 0), total)
+                )
             ),
             metric_card("Аудитория", format_int(metrics.get("audience", 0))),
             metric_card("Охват", format_int(metrics.get("reach", 0))),
@@ -229,10 +245,18 @@ def render_tag_statistics(
     for col in ["Сообщений", "Аудитория", "Охват", "Вовлеченность", "Негатив"]:
         if col in display.columns:
             display[col] = display[col].apply(format_int)
-    display["Доля негатива"] = display["Доля негатива"].astype(str) + "%"
+    # Без разметки тональности «Негатив 0 · 0.0%» у каждого тега — ложный ноль.
+    unmarked = sentiment_unmarked(None, messages)
+    if unmarked:
+        display["Негатив"] = "—"
+        display["Доля негатива"] = "—"
+    else:
+        display["Доля негатива"] = display["Доля негатива"].astype(str) + "%"
     st.caption(
         "Теги берутся из системных колонок Brand Analytics после «Обработано». Аудитория, охват и вовлеченность суммируются по сообщениям с выбранным тегом."
     )
+    if unmarked:
+        st.caption(NO_SENTIMENT_REASON)
     tag_selection = st.dataframe(
         display,
         hide_index=True,

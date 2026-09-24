@@ -23,6 +23,7 @@ import re
 import pandas as pd
 
 from services.message_kinds import KIND_REVIEW, classify_kinds
+from services.metrics_compute import sentiment_masks
 
 # Разделы шаблона отзыва. Порядок важен только для читаемости: разбор идёт по
 # всем маркерам сразу, а текст до первого маркера считается свободным.
@@ -241,16 +242,9 @@ def _negative_mask(reviews: pd.DataFrame) -> pd.Series:
     """
     ratings = rating_values(reviews)
     low = ratings <= LOW_RATING
-    if "is_negative" in reviews.columns:
-        by_tone = reviews["is_negative"].fillna(False).astype(bool)
-    else:
-        by_tone = (
-            reviews.get("sentiment", pd.Series([""] * len(reviews), index=reviews.index))
-            .fillna("")
-            .astype(str)
-            .str.lower()
-            .str.contains("нег|negative|отриц", regex=True, na=False)
-        )
+    # Общая маска: и текст разметки, и флаг is_negative. Раньше при наличии
+    # флага текстовые «negative»/«Отрицательная» не учитывались вовсе.
+    _, by_tone = sentiment_masks(reviews)
     return (low.fillna(False) | by_tone).astype(bool)
 
 

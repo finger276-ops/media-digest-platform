@@ -5,7 +5,7 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
-from .metrics_compute import audience_by_group, numeric_series
+from .metrics_compute import audience_by_group, numeric_series, sentiment_masks
 
 AUTO_GENERATED_TAGS_TO_HIDE = {
     "коэффициент",
@@ -128,6 +128,9 @@ def build_tag_statistics_compute(messages: pd.DataFrame) -> pd.DataFrame:
         )
 
     work = messages.copy()
+    # Общая маска: учитывает флаг is_negative и «negative»/«отриц», а не только
+    # «нег». to_numpy — чтобы присваивание не зависело от повторов в индексе.
+    work["_negative"] = sentiment_masks(work)[1].astype(int).to_numpy()
     work["_tag"] = work["tags"].fillna("").astype(str).apply(split_pipe_values)
     work = work.explode("_tag")
     work["_tag"] = work["_tag"].fillna("").astype(str).str.strip()
@@ -151,18 +154,6 @@ def build_tag_statistics_compute(messages: pd.DataFrame) -> pd.DataFrame:
     work["_engagement"] = numeric_series(
         work, ["engagement", "Вовлечённость", "Вовлеченность", "engagement_count"]
     )
-    if "sentiment" in work.columns:
-        work["_negative"] = (
-            work["sentiment"]
-            .fillna("")
-            .astype(str)
-            .str.lower()
-            .str.contains("нег", regex=True)
-            .astype(int)
-        )
-    else:
-        work["_negative"] = 0
-
     stats = (
         work.groupby("_tag", as_index=False)
         .agg(

@@ -25,7 +25,13 @@ from .dashboard_config import (
     REPORT_SECTION_OPTIONS,
 )
 from .cached_store import download_storage_file
-from .metrics_compute import format_int, percent_text
+from .metrics_compute import (
+    NO_SENTIMENT_REASON,
+    format_int,
+    no_sentiment_line,
+    percent_text,
+    sentiment_unmarked,
+)
 from .observability import report_failure
 from .project_settings import report_branding_from_project_settings, valid_hex_color
 from .report_highlights import event_title_column, top_report_events, top_report_tags
@@ -246,6 +252,9 @@ def summary_export_payload(
         "neutral": int(sent.get("neutral", 0) or 0),
         "negative": int(sent.get("negative", 0) or 0),
         "total": int(sent.get("total", 0) or 0),
+        # Без разметки тональности числа выше — «всё в нейтрале»; рендереры
+        # по этому признаку рисуют пометку вместо диаграммы.
+        "sentiment_markup": not sentiment_unmarked(sent, messages),
         "comparison_sequence": metrics.get("comparison_sequence") or [],
         # limit=5: столько же всегда и рисуют PNG/DOCX/PDF (items[:5]) -
         # раньше "полный" шаблон запрашивал 8, но лишние 3 нигде не
@@ -424,19 +433,39 @@ def _draw_metrics_section(ax, payload, comparison, accent, top: float) -> float:
     return top - 0.277
 
 
+def _export_sentiment(
+    payload: dict[str, Any], comparison: list[dict[str, Any]]
+) -> tuple[int, int, int, int, bool]:
+    """Тональность для блока отчёта: (позитив, нейтрал, негатив, всего, не размечено).
+
+    При нескольких периодах диаграмма рисует последний, поэтому и признак
+    разметки проверяется на нём, а не на итоге: итог может быть размечен
+    благодаря прошлому периоду, а последний — нет.
+    """
+    if len(comparison) >= 2:
+        sent = comparison[-1].get("sentiment", {}) or {}
+        return (
+            int(sent.get("positive", 0) or 0),
+            int(sent.get("neutral", 0) or 0),
+            int(sent.get("negative", 0) or 0),
+            int(sent.get("total", 0) or 0),
+            sentiment_unmarked(sent),
+        )
+    total = int(payload.get("total", 0) or 0)
+    return (
+        int(payload.get("positive", 0) or 0),
+        int(payload.get("neutral", 0) or 0),
+        int(payload.get("negative", 0) or 0),
+        total,
+        bool(total) and not payload.get("sentiment_markup", True),
+    )
+
+
 def _draw_sentiment_section(ax, fig, payload, comparison, top: float) -> float:
     from matplotlib.patches import Rectangle
 
-    total = max(1, int(payload.get("total", 0) or 0))
-    pos = int(payload.get("positive", 0) or 0)
-    neu = int(payload.get("neutral", 0) or 0)
-    neg = int(payload.get("negative", 0) or 0)
-    if len(comparison) >= 2:
-        sent = comparison[-1].get("sentiment", {}) or {}
-        total = max(1, int(sent.get("total", 0) or 0))
-        pos = int(sent.get("positive", 0) or 0)
-        neu = int(sent.get("neutral", 0) or 0)
-        neg = int(sent.get("negative", 0) or 0)
+    pos, neu, neg, total, unmarked = _export_sentiment(payload, comparison)
+    total = max(1, total)
 
     ax.text(
         0.060,
@@ -448,6 +477,18 @@ def _draw_sentiment_section(ax, fig, payload, comparison, top: float) -> float:
         va="top",
         ha="left",
     )
+    if unmarked:
+        # Сплошное кольцо «Нейтрал 100 %» выглядело бы как «негатива нет».
+        ax.text(
+            0.060,
+            top - 0.032,
+            textwrap.fill(NO_SENTIMENT_REASON, 70),
+            fontsize=9,
+            color="#6b7280",
+            va="top",
+            ha="left",
+        )
+        return top - 0.085
     pie_bottom = top - 0.158
     pie_ax = fig.add_axes([0.070, pie_bottom, 0.220, 0.145])
     pie_ax.axis("equal")
@@ -936,7 +977,9 @@ def generate_summary_docx(payload: dict[str, Any]) -> bytes:
                 f"охват — {format_int(payload.get('reach', 0))}; "
                 f"вовлеченность — {format_int(payload.get('engagement', 0))}."
             )
-        if "sentiment" in sections:
+        if "sentiment" in sections and not payload.get("sentiment_markup", True):
+            doc.add_paragraph(no_sentiment_line("Тональность"))
+        elif "sentiment" in sections:
             doc.add_paragraph(
                 f"Тональность: позитив — {percent_text(int(payload.get('positive', 0) or 0), total)}; "
                 f"нейтрал — {percent_text(int(payload.get('neutral', 0) or 0), total)}; "
@@ -1517,30 +1560,29 @@ def generate_summary_pdf(payload: dict[str, Any]) -> bytes:
         story.append(Spacer(1, 10))
 
     if "sentiment" in sections:
-        pos = int(payload.get("positive", 0) or 0)
-        neu = int(payload.get("neutral", 0) or 0)
-        neg = int(payload.get("negative", 0) or 0)
-        sent_total = total
-        if len(comparison) >= 2:
-            sent = comparison[-1].get("sentiment", {}) or {}
-            sent_total = max(1, int(sent.get("total", 0) or 0))
-            pos = int(sent.get("positive", 0) or 0)
-            neu = int(sent.get("neutral", 0) or 0)
-            neg = int(sent.get("negative", 0) or 0)
+        pos, neu, neg, sent_total, unmarked = _export_sentiment(payload, comparison)
+        sent_total = max(1, sent_total)
         story.append(Paragraph("Тональность", heading))
-        story.append(
-            _BlockFlowable(
-                _PdfSentimentBlock(
-                    [pos, neu, neg],
-                    list(SENTIMENT_COLOR_RANGE),
-                    ["Позитив", "Нейтрал", "Негатив"],
-                    sent_total,
-                    background_color,
-                    font_name,
-                    bold_font_name,
+        if unmarked:
+            # Донат «Нейтрал 100 %» выглядел бы как «негатива нет».
+            muted_style = ParagraphStyle(
+                "PlatformMuted", parent=normal, fontSize=9, textColor=muted_color
+            )
+            story.append(Paragraph(xml_escape(NO_SENTIMENT_REASON), muted_style))
+        else:
+            story.append(
+                _BlockFlowable(
+                    _PdfSentimentBlock(
+                        [pos, neu, neg],
+                        list(SENTIMENT_COLOR_RANGE),
+                        ["Позитив", "Нейтрал", "Негатив"],
+                        sent_total,
+                        background_color,
+                        font_name,
+                        bold_font_name,
+                    )
                 )
             )
-        )
         story.append(Spacer(1, 10))
 
     show_tags = "top_tags" in sections

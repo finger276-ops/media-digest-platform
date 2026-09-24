@@ -42,6 +42,7 @@ from services.ai_summary import (
     generate_text,
 )
 from services.brand_metrics import compute_brand_metrics, merge_settings
+from services.metrics_compute import sentiment_unmarked
 from services.cached_store import (
     ManualEditConflict,
     clear_platform_caches,
@@ -378,6 +379,11 @@ def render_ai_summary_panel(
             )
             st.code(preview_card, language="text")
 
+        if sentiment_unmarked(None, messages):
+            st.caption(
+                "В выгрузке нет разметки тональности: модель получит «Тональность: "
+                "нет данных» и не будет оценивать негатив."
+            )
         columns = st.columns(3)
         kinds = [KIND_SUMMARY, KIND_BRAND, KIND_RISKS]
         for column, kind in zip(columns, kinds):

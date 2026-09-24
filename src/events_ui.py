@@ -34,12 +34,16 @@ from services.manual_moderation import (
     manual_versions,
 )
 from services.message_compute import message_link_column, message_text_column
+from services.chart_style import CATEGORICAL_PALETTE
 from services.metrics_compute import (
+    NO_SENTIMENT_REASON,
     format_int,
+    has_sentiment_markup,
     numeric_series,
     overview_metrics,
     percent_text,
     sentiment_counts,
+    sentiment_unmarked,
 )
 from services.project_settings import DEMO_MESSAGE
 from services.roles import role_rank
@@ -552,6 +556,8 @@ def _event_auto_summary(selected: pd.Series, event_messages: pd.DataFrame) -> st
     negative_count = 0
     if isinstance(event_messages, pd.DataFrame) and not event_messages.empty:
         sent = sentiment_counts(event_messages)
+        if sentiment_unmarked(sent):
+            return f"В теме «{title}» собрано {format_int(count)} сообщений."
         negative_count = int(sent.get("negative", 0) or 0)
     return f"В теме «{title}» собрано {format_int(count)} сообщений. Негативных сообщений: {format_int(negative_count)}."
 
@@ -616,8 +622,12 @@ def render_selected_event_detail(
             metric_card("Сообщений", format_int(metrics.get("messages", 0))),
             metric_card("Источников/чатов", format_int(chat_count)),
             metric_card("Авторов", format_int(author_count)),
-            metric_card(
-                "Негатив", percent_text(int(sent.get("negative", 0) or 0), total)
+            (
+                metric_card("Негатив", "—", help_text=NO_SENTIMENT_REASON)
+                if sentiment_unmarked(sent)
+                else metric_card(
+                    "Негатив", percent_text(int(sent.get("negative", 0) or 0), total)
+                )
             ),
             metric_card(
                 "Важность",
@@ -861,13 +871,16 @@ TOP_EVENTS_CHART_MIN_ROWS = 3
 TOP_EVENTS_CHART_MAX_ROWS = 10
 
 
-def _render_top_events_chart(events: pd.DataFrame) -> None:
+def _render_top_events_chart(events: pd.DataFrame, *, tone_ok: bool = True) -> None:
     """Топ инфоповодов по важности — горизонтальный бар, цвет — доля негатива.
 
     Таблица ниже даёт точные числа по каждому инфоповоду, а этот график —
     ответ на вопрос с одного взгляда: что было главным в периоде и где из
     этого главного был негатив. Обе величины уже посчитаны в aggregate_events,
     здесь только отрисовка.
+
+    tone_ok=False — в выгрузке нет разметки тональности: все столбцы были бы
+    окрашены в «0 % негатива», поэтому цвет один и без шкалы негатива.
     """
     top = events.head(TOP_EVENTS_CHART_MAX_ROWS).copy()
     if len(top) < TOP_EVENTS_CHART_MIN_ROWS:
@@ -879,6 +892,30 @@ def _render_top_events_chart(events: pd.DataFrame) -> None:
     top["Доля негатива"] = (
         pd.to_numeric(top.get("negative_share", 0), errors="coerce").fillna(0)
     )
+
+    if not tone_ok:
+        chart = (
+            alt.Chart(top)
+            .mark_bar(color=CATEGORICAL_PALETTE[0])
+            .encode(
+                x=alt.X("Важность:Q", title="Важность"),
+                y=alt.Y(
+                    "Сюжет / инфоповод:N",
+                    sort=alt.EncodingSortField(field="Важность", order="descending"),
+                    title=None,
+                    axis=alt.Axis(labelLimit=260),
+                ),
+                tooltip=[
+                    alt.Tooltip("Сюжет / инфоповод:N", title="Инфоповод"),
+                    alt.Tooltip("Сообщений:Q", format=","),
+                    alt.Tooltip("Источников:Q"),
+                    alt.Tooltip("Важность:Q", format=".1f"),
+                ],
+            )
+            .properties(height=alt.Step(28))
+        )
+        st.altair_chart(chart, width="stretch")
+        return
 
     chart = (
         alt.Chart(top)
@@ -1041,7 +1078,12 @@ def render_events(
         )
         return
 
-    _render_top_events_chart(filtered_events)
+    # Признак — по сообщениям всего раздела, до фильтра по слову: фильтр
+    # сужает выборку, но разметки в выгрузке от этого не становится меньше.
+    tone_ok = has_sentiment_markup(messages)
+    if not tone_ok:
+        st.caption(f"Доля негатива по инфоповодам не показана. {NO_SENTIMENT_REASON}")
+    _render_top_events_chart(filtered_events, tone_ok=tone_ok)
 
     table = filtered_events.copy()
     table["Период"] = table.apply(
@@ -1052,7 +1094,9 @@ def render_events(
         ),
         axis=1,
     )
-    table["Негатив"] = (table["negative_share"] * 100).round(1).astype(str) + "%"
+    table["Негатив"] = (
+        (table["negative_share"] * 100).round(1).astype(str) + "%" if tone_ok else "—"
+    )
     if "merged_titles" in table.columns:
         # «+2» рядом с сюжетом означает, что под ним лежат ещё две формулировки
         # заголовка. Подробности — в блоке склейки над таблицей.

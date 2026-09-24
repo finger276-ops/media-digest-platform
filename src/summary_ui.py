@@ -22,7 +22,12 @@ from services.cached_store import (
     get_manual_version,
     save_manual,
 )
-from services.metrics_compute import format_int, overview_metrics
+from services.metrics_compute import (
+    format_int,
+    no_sentiment_line,
+    overview_metrics,
+    sentiment_unmarked,
+)
 from services.period_comparison import selected_period_label
 from services.project_settings import DEMO_MESSAGE
 from services.report_highlights import event_title_column, top_report_events
@@ -93,10 +98,16 @@ def build_auto_summary(
             .index.tolist()
         )
 
+    # Без разметки тональности «Негативных сообщений: 0 (0.0%)» — ложный ноль,
+    # и через «Главное» он уходит в PNG/PDF/DOCX.
+    if sentiment_unmarked(metrics.get("sentiment"), messages):
+        negative_line = no_sentiment_line("Негативных сообщений")
+    else:
+        negative_line = f"Негативных сообщений: {format_int(neg)} ({neg_share:.1f}%)."
     intro = [
         f"За выбранный период обработано {format_int(total)} сообщений из "
         f"{format_int(chats)} чатов; уникальных авторов — {format_int(authors)}.",
-        f"Негативных сообщений: {format_int(neg)} ({neg_share:.1f}%).",
+        negative_line,
     ]
     if period_names:
         intro.append(
