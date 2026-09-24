@@ -329,6 +329,107 @@ check(
     str(rows["new-src"]),
 )
 
+print("14. Давность: чужие проекты, пробелы в ключе, огромный порог")
+# Мутационные проверки: без фильтра по проекту роняется «чужой проект»; без
+# сравнения обрезанного ключа — «похожий ключ» и «подчёркивание»; поиск через
+# eq вместо like — «ключ с переводом строки»; без потолка порога —
+# «огромный порог».
+
+
+def _arrived_raw(source_key, created_at, project_id):
+    CLIENT.db[queue.QUEUE_TABLE].append(
+        {
+            "task_id": f"fresh_{len(CLIENT.db[queue.QUEUE_TABLE])}",
+            "project_id": project_id,
+            "source_key": source_key,
+            "status": "done",
+            "file_sha256": "",
+            "created_at": created_at,
+        }
+    )
+
+
+# Ключ зашит в шаблон n8n: другой проект с тем же ключом шлёт файлы каждый день,
+# а наш источник молчит 12 дней. Чужие файлы не должны прятать молчание.
+_arrived_raw("shared-src", _ago(days=12), "tn_project")
+_arrived_raw("shared-src", _ago(days=1), "other_project")
+# Задача без проекта раскладывается по источнику — это наш файл.
+_arrived_raw("orphan-src", _ago(days=2), None)
+_arrived_raw("blank-project-src", _ago(days=2), "")
+# n8n кладёт ключ как есть: с пробелом или переводом строки. Обработка его
+# обрезает и файл загружается — значит, файл пришёл.
+_arrived_raw("spaced-src\n", _ago(days=1), "tn_project")
+_arrived_raw("  padded-src ", _ago(days=1), "tn_project")
+# Похожие ключи — не тот же источник.
+_arrived_raw("prefix-src-weekly", _ago(days=1), "tn_project")
+_arrived_raw("underXsrc", _ago(days=1), "tn_project")
+
+arrivals = queue.last_arrivals(
+    ["shared-src", "orphan-src", "blank-project-src", "spaced-src", "padded-src", "prefix-src", "under_src"],
+    project_id="tn_project",
+)
+check(
+    "файлы чужого проекта с тем же ключом не считаются",
+    arrivals.get("shared-src") == _ago(days=12),
+    str(arrivals.get("shared-src")),
+)
+check(
+    "задача без проекта считается",
+    arrivals.get("orphan-src") == _ago(days=2) and arrivals.get("blank-project-src") == _ago(days=2),
+    str(arrivals),
+)
+check(
+    "ключ с переводом строки или пробелами — тот же источник",
+    arrivals.get("spaced-src") == _ago(days=1) and arrivals.get("padded-src") == _ago(days=1),
+    str(arrivals),
+)
+check(
+    "похожий ключ (prefix-src-weekly) не считается файлом prefix-src",
+    "prefix-src" not in arrivals,
+    str(arrivals),
+)
+check(
+    "подчёркивание в ключе — обычный символ, а не «любой символ»",
+    "under_src" not in arrivals,
+    str(arrivals),
+)
+check(
+    "без проекта (старые вызовы) берётся последняя задача по ключу",
+    queue.last_arrivals(["shared-src"]).get("shared-src") == _ago(days=1),
+    str(queue.last_arrivals(["shared-src"])),
+)
+
+huge = pd.DataFrame(
+    [
+        {"source_key": "huge-src", "title": "Огромный порог", "is_active": True, "params": {"stale_after_days": 10**30}},
+        {"source_key": "neg-src", "title": "Отрицательный порог", "is_active": True, "params": {"stale_after_days": -5}},
+    ]
+)
+try:
+    huge_rows = {row["source_key"]: row for row in queue.source_freshness(huge, {}, now=NOW)}
+    huge_error = ""
+except Exception as exc:  # noqa: BLE001
+    huge_rows, huge_error = {}, repr(exc)
+check(
+    "огромный порог в базе не роняет раздел — ограничен десятью годами",
+    not huge_error
+    and huge_rows["huge-src"]["limit_days"] == queue.MAX_STALE_AFTER_DAYS,
+    huge_error or str(huge_rows.get("huge-src")),
+)
+check(
+    "отрицательный порог — как 0, не следим",
+    not huge_error and huge_rows["neg-src"]["state"] == queue.FRESH_OFF,
+    huge_error or str(huge_rows.get("neg-src")),
+)
+
+stripped_id = queue.enqueue_task(storage_path="inbox/strip-key.xlsx", source_key=" strip-src\n")
+stripped = [r for r in CLIENT.db[queue.QUEUE_TABLE] if r["task_id"] == stripped_id]
+check(
+    "задача из платформы ставится с обрезанным ключом",
+    stripped and stripped[0]["source_key"] == "strip-src",
+    str(stripped),
+)
+
 print()
 if failures:
     print(f"ПРОВАЛЕНО: {len(failures)} → {failures}")

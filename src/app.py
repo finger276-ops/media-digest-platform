@@ -55,7 +55,7 @@ from services.ingest import IngestError, process_canonical, read_canonical_bytes
 from noise_filter_ui import render_noise_filter_block
 from ingest_admin_ui import render_ingest_admin_page
 from brand_metrics_ui import render_brand_metrics_page
-from ai_summary_ui import render_saved_ai_text
+from ai_summary_ui import RERUN_AFTER_RENDER_KEY, render_saved_ai_text
 from services.ai_summary import (
     KIND_BRAND as AI_KIND_BRAND,
     KIND_RISKS as AI_KIND_RISKS,
@@ -930,6 +930,12 @@ def main() -> None:
             )
 
     render_section_safely(page, _render_selected_section, _details=show_error_details)
+
+    # Перерисовка, которую раздел попросил посреди страницы (демо-лимит ИИ):
+    # только теперь, когда все поля страницы уже появились и их введённые
+    # значения не пропадут.
+    if st.session_state.pop(RERUN_AFTER_RENDER_KEY, False):
+        st.rerun()
 
 
 if __name__ == "__main__":

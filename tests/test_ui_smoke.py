@@ -1043,6 +1043,13 @@ check(
     any("Замолчавшая рассылка" in w and "больше 8 дней" in w for w in warnings),
     str(warnings),
 )
+# Название источника по умолчанию — имя проекта, у двух источников оно
+# совпадает; различает их ключ из шаблона n8n.
+check(
+    "в предупреждении назван ключ источника",
+    any("Замолчавшая рассылка" in w and "«ba-silent»" in w for w in warnings),
+    str(warnings),
+)
 check(
     "источник, от которого файл пришёл сегодня, не тревожит",
     not any("Еженедельный отчет BA" in w for w in warnings),
@@ -1054,6 +1061,13 @@ freshness_tables = [
 check(
     "таблица с датой последнего файла по каждому источнику",
     bool(freshness_tables) and len(freshness_tables[0]) == 2,
+    str([list(getattr(d.value, "columns", [])) for d in at.dataframe]),
+)
+check(
+    "в таблице есть ключ каждого источника",
+    bool(freshness_tables)
+    and "Ключ" in freshness_tables[0].columns
+    and "ba-silent" in set(freshness_tables[0]["Ключ"]),
     str([list(getattr(d.value, "columns", [])) for d in at.dataframe]),
 )
 # Порог настраивается в форме источника: у месячной выгрузки 8 дней тишины —

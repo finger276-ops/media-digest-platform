@@ -170,7 +170,7 @@ def _freshness_warning(row: dict[str, Any]) -> str:
     return (
         f"«{row['title']}»: новых файлов нет больше {limit} {_days_word(limit)}, "
         f"последний пришёл {_fmt_dt(row['last_at'])}. Проверьте, пришло ли письмо "
-        "на почту и сработал ли n8n."
+        f"на почту и сработал ли n8n (ключ источника «{row['source_key']}»)."
     )
 
 
@@ -190,22 +190,25 @@ def render_ingest_freshness_block(project_id: str) -> None:
     )
     try:
         sources = queue.list_sources(project_id=project_id)
-        arrivals = (
-            {} if sources.empty else queue.last_arrivals(sources["source_key"].tolist())
-        )
+        if sources.empty:
+            rows = []
+        else:
+            arrivals = queue.last_arrivals(
+                sources["source_key"].tolist(), project_id=project_id
+            )
+            rows = queue.source_freshness(sources, arrivals)
     except Exception as exc:  # noqa: BLE001 — остальной раздел должен работать
         st.warning("Не удалось проверить, когда приходили файлы.")
         st.caption(f"Техническая ошибка: {exc}")
         return
 
-    if sources.empty:
+    if not rows:
         st.info(
             "Источников пока нет. Добавьте источник ниже — и здесь будет видно, "
             "когда от него пришёл последний файл."
         )
         return
 
-    rows = queue.source_freshness(sources, arrivals)
     for row in rows:
         if row["alert"]:
             st.warning(_freshness_warning(row))
@@ -213,6 +216,9 @@ def render_ingest_freshness_block(project_id: str) -> None:
     view = pd.DataFrame(
         {
             "Источник": [row["title"] for row in rows],
+            # Название по умолчанию — имя проекта, у двух источников оно одно;
+            # различает их ключ, тот же, что в шаблоне n8n.
+            "Ключ": [row["source_key"] for row in rows],
             "Последний файл": [_fmt_dt(row["last_at"]) or "—" for row in rows],
             "Дней назад": [
                 "—" if row["days_ago"] is None else str(row["days_ago"]) for row in rows

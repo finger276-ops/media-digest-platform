@@ -416,20 +416,36 @@ def render_ai_summary_panel(
                         # Лимит доиграл другой посетитель, пока эта страница
                         # была открыта: к модели не идём, перерисовка покажет
                         # предупреждение и выключит кнопки.
-                        st.rerun()
-                    _run_generation(
-                        project_id, kind, base_args, extra, config
-                    )
-                    if demo_spend == DEMO_SPENT:
-                        # Остаток в шапке и в панели нарисован до клика. Без
-                        # перерисовки человек видел бы «10 из 10» после первого
-                        # запуска и включённые кнопки после последнего. Итог
-                        # запуска переживает перерисовку в session_state.
-                        st.rerun()
+                        request_rerun_after_render()
+                    else:
+                        _run_generation(
+                            project_id, kind, base_args, extra, config
+                        )
+                        if demo_spend == DEMO_SPENT:
+                            # Остаток в шапке и в панели нарисован до клика. Без
+                            # перерисовки человек видел бы «10 из 10» после
+                            # первого запуска и включённые кнопки после
+                            # последнего. Итог запуска переживает перерисовку в
+                            # session_state.
+                            request_rerun_after_render()
 
         _show_generation_notice(project_id)
         for kind in kinds:
             _render_generated_block(project_id, kind, period_ids)
+
+
+RERUN_AFTER_RENDER_KEY = "_rerun_after_render"
+
+
+def request_rerun_after_render() -> None:
+    """Перерисовать страницу, но только после того, как она дорисуется.
+
+    st.rerun() посреди страницы стирал состояние всех полей ниже панели —
+    правки черновиков ИИ, выбор разделов выгрузки: Streamlit удаляет состояние
+    виджетов, которые не успели появиться в прогоне. Поэтому здесь только флаг,
+    а саму перерисовку делает app.main в самом конце.
+    """
+    st.session_state[RERUN_AFTER_RENDER_KEY] = True
 
 
 def _notice_key(project_id: str) -> str:
@@ -438,6 +454,10 @@ def _notice_key(project_id: str) -> str:
 
 def _show_generation_notice(project_id: str) -> None:
     """Итог последнего запуска: показать один раз и забыть."""
+    if st.session_state.get(RERUN_AFTER_RENDER_KEY):
+        # Страница сейчас перерисуется — покажем итог уже в новом прогоне,
+        # иначе он мелькнул бы и пропал.
+        return
     notice = st.session_state.pop(_notice_key(project_id), None)
     if not isinstance(notice, dict):
         return

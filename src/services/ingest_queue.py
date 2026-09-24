@@ -45,6 +45,7 @@ STALE_PROCESSING_MINUTES = 45
 # задержку письма, чтобы не пугать владельца в сам день выгрузки. Порог
 # переопределяется в источнике (params.stale_after_days); 0 — не следить.
 DEFAULT_STALE_AFTER_DAYS = 8
+MAX_STALE_AFTER_DAYS = 3650
 
 FRESH_OK = "ok"  # последний файл пришёл в пределах порога
 FRESH_LATE = "late"  # файлов нет дольше порога
@@ -237,7 +238,7 @@ def enqueue_task(
         {
             "task_id": task_id,
             "project_id": str(project_id) if project_id else None,
-            "source_key": str(source_key or ""),
+            "source_key": str(source_key or "").strip(),
             "storage_path": str(storage_path),
             "original_filename": str(original_filename or "upload.xlsx"),
             "file_sha256": str(file_sha256 or ""),
@@ -438,30 +439,47 @@ def queue_stats(project_id: str | None = None) -> dict[str, int]:
 # — что от источника давно не было новых задач.
 
 
-def last_arrivals(source_keys: Any) -> dict[str, str]:
+# Сколько последних задач с похожим ключом просматривать, чтобы найти свою.
+ARRIVALS_SCAN_LIMIT = 200
+
+
+def last_arrivals(source_keys: Any, project_id: str | None = None) -> dict[str, str]:
     """Когда от каждого источника пришла последняя задача (её created_at).
 
     Статус задачи не важен: упавшая обработка — это тоже «файл дошёл», про нее
     и так говорит очередь. Запрос отдельный на каждый ключ: источников у проекта
-    единицы, а индекс (source_key, created_at desc) отдает последнюю строку
-    сразу — даже если она старше сотни задач, которые показывает таблица очереди.
+    единицы.
+
+    Считаются только задачи этого проекта и задачи без проекта — так же, как
+    в очереди рядом. Иначе проект с тем же ключом (он зашит в шаблон n8n)
+    прятал бы молчание чужого источника своими файлами. Ключ сравнивается без
+    пробелов по краям, как при обработке: n8n кладёт его в очередь как есть, и
+    «ba-daily\\n» — тот же источник. Поэтому поиск по шаблону, а точное
+    совпадение проверяется уже здесь.
     """
     client = get_supabase_client()
+    project = str(project_id or "").strip()
     arrivals: dict[str, str] = {}
     for key in dict.fromkeys(str(k or "").strip() for k in source_keys):
         if not key:
             continue
         resp = (
             client.table(QUEUE_TABLE)
-            .select("created_at")
-            .eq("source_key", key)
+            .select("created_at,source_key,project_id")
+            .like("source_key", f"%{key}%")
             .order("created_at", desc=True)
-            .limit(1)
+            .limit(ARRIVALS_SCAN_LIMIT)
             .execute()
         )
-        rows = getattr(resp, "data", None) or []
-        if rows and rows[0].get("created_at"):
-            arrivals[key] = str(rows[0]["created_at"])
+        for row in getattr(resp, "data", None) or []:
+            if str(row.get("source_key") or "").strip() != key:
+                continue
+            owner = str(row.get("project_id") or "").strip()
+            if project and owner and owner != project:
+                continue
+            if row.get("created_at"):
+                arrivals[key] = str(row["created_at"])
+                break
     return arrivals
 
 
@@ -471,8 +489,10 @@ def stale_after_days(source: dict[str, Any]) -> int:
     if raw is None or raw == "":
         return DEFAULT_STALE_AFTER_DAYS
     try:
-        return max(0, int(raw))
-    except (TypeError, ValueError):
+        # Потолок — десять лет: огромное число, вписанное руками, ронило бы
+        # timedelta и вместе с ним весь раздел, включая форму, где порог правят.
+        return min(max(0, int(raw)), MAX_STALE_AFTER_DAYS)
+    except (TypeError, ValueError, OverflowError):
         # Порог правят руками в базе — опечатка не должна выключать слежку.
         return DEFAULT_STALE_AFTER_DAYS
 

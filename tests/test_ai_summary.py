@@ -788,6 +788,29 @@ LIMIT_CASES = [
         FakeResponse(429, {"status": 429, "message": "Too Many Requests"}),
         ERROR_RATE,
     ),
+    # Лимит одновременных генераций Yandex Cloud: слово «quota» есть, но он
+    # снимается, как только освободится место. «Повтор не поможет» было бы
+    # ложью, а владелец пошёл бы пополнять баланс без нужды.
+    (
+        "YandexGPT 429: лимит одновременных генераций — временный, не деньги",
+        YANDEX_CONFIG,
+        FakeResponse(429, {"error": {"grpcCode": 8, "httpCode": 429, "message": "ai.textGenerationCompletionSessionsCount.count gauge quota limit exceed: allowed 10 requests", "httpStatus": "Too Many Requests"}}),
+        ERROR_RATE,
+    ),
+    (
+        "429 «Quota exceeded» без признаков денег — временный лимит",
+        YANDEX_CONFIG,
+        FakeResponse(429, {"error": {"httpCode": 429, "message": "Quota exceeded", "httpStatus": "Too Many Requests"}}),
+        ERROR_RATE,
+    ),
+    # «Исчерпан» бывает и про минутный лимит: признак частоты важнее слова,
+    # похожего на деньги.
+    (
+        "429 «Лимит запросов в минуту исчерпан» — частота, не деньги",
+        GIGACHAT_CONFIG,
+        FakeResponse(429, {"status": 429, "message": "Лимит запросов в минуту исчерпан, повторите позже"}),
+        ERROR_RATE,
+    ),
 ]
 
 for label, limit_config, response, expected_kind in LIMIT_CASES:
@@ -854,6 +877,35 @@ try:
     check("отказ OAuth поднимает AIError", False, "исключения не было")
 except AIError as exc:
     check("отказ OAuth не выдаётся за лимит модели", exc.kind == "", f"{exc.kind!r}: {exc}")
+
+# Отказ по правам со словами «quota» и «insufficient» — это про доступ, а не
+# про деньги: «пополните баланс» отправило бы владельца не туда.
+reset_gigachat_token()
+try:
+    complete(
+        "система",
+        "запрос",
+        YANDEX_CONFIG,
+        session=FakeSession([FakeResponse(403, {"error": {"httpCode": 403, "message": "Permission denied: insufficient permissions to use quota of folder b1g", "httpStatus": "Forbidden"}})]),
+    )
+    check("отказ по правам поднимает AIError", False, "исключения не было")
+except AIError as exc:
+    check("отказ по правам не выдаётся за квоту", exc.kind == "", f"{exc.kind!r}: {exc}")
+    check("сказано, что отклонён доступ", "отклонил ключ" in str(exc), str(exc))
+
+# А 403 из-за заблокированного за неуплату аккаунта — это деньги: «проверьте
+# ключ» отправило бы владельца искать ошибку там, где её нет.
+reset_gigachat_token()
+try:
+    complete(
+        "система",
+        "запрос",
+        YANDEX_CONFIG,
+        session=FakeSession([FakeResponse(403, {"error": {"httpCode": 403, "message": "Billing account is not active", "httpStatus": "Forbidden"}})]),
+    )
+    check("403 по оплате поднимает AIError", False, "исключения не было")
+except AIError as exc:
+    check("403 по оплате — квота, а не ключ", exc.kind == ERROR_QUOTA, f"{exc.kind!r}: {exc}")
 
 check(
     "старое поведение: AIError по-прежнему создаётся одной строкой",

@@ -1,5 +1,21 @@
 """Поддельный клиент Supabase для тестов (форма API supabase-py)."""
 
+import re
+
+
+def _like_regex(pattern):
+    """Шаблон SQL LIKE в регулярное выражение: % — любая строка, _ — любой символ."""
+    parts = []
+    for char in str(pattern):
+        if char == "%":
+            parts.append(".*")
+        elif char == "_":
+            parts.append(".")
+        else:
+            parts.append(re.escape(char))
+    return re.compile("".join(parts), re.S)
+
+
 class Result:
     def __init__(self, data):
         self.data = data
@@ -31,6 +47,10 @@ class Query:
         self.filters.append(("in", col, vals))
         return self
 
+    def like(self, col, pattern):
+        self.filters.append(("like", col, _like_regex(pattern)))
+        return self
+
     def order(self, col, desc=False):
         self._order, self._desc = col, desc
         return self
@@ -49,6 +69,8 @@ class Query:
             if kind == "eq" and str(current) != str(val):
                 return False
             if kind == "in" and current not in val:
+                return False
+            if kind == "like" and (current is None or not val.fullmatch(str(current))):
                 return False
             if kind == "lt" and not (current and str(current) < str(val)):
                 return False

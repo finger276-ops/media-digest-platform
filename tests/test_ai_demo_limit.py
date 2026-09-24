@@ -414,6 +414,37 @@ check(
     str(texts(at.error)),
 )
 
+print("7. Перерисовка после списания не стирает то, что гость ввёл ниже кнопок")
+# st.rerun() посреди страницы стирал состояние полей, которые не успели
+# появиться в прогоне: правку черновика ИИ и выбор разделов выгрузки. Теперь
+# перерисовка откладывается до конца страницы.
+set_runs(0)
+PROVIDER.calls = 0
+at = open_report()
+PROVIDER.queue = [MODEL_OK]
+generate_buttons(at)[SUMMARY_KEY].click().run()
+drafts = [a for a in at.text_area if str(a.value) == "Готовый текст от модели."]
+check("черновик саммари появился", bool(drafts), str([str(a.value)[:40] for a in at.text_area]))
+sections = [m for m in at.multiselect if str(m.label) == "Разделы отчёта"]
+check("есть выбор разделов выгрузки", bool(sections))
+if drafts and sections:
+    draft_key = drafts[0].key
+    drafts[0].set_value("Правка гостя").run()
+    sections[0].set_value(["summary_text"]).run()
+    PROVIDER.queue = [MODEL_OK]
+    generate_buttons(at)[BRAND_KEY].click().run()
+    check("вторая генерация без исключений", not at.exception, str(at.exception))
+    check("запуск списан", runs_in_db() == 2, str(runs_in_db()))
+    kept = [a for a in at.text_area if a.key == draft_key]
+    check("правка черновика после перерисовки на месте",
+          bool(kept) and str(kept[0].value) == "Правка гостя",
+          str([str(a.value)[:40] for a in kept]))
+    kept_sections = [m for m in at.multiselect if str(m.label) == "Разделы отчёта"]
+    check("выбор разделов выгрузки после перерисовки на месте",
+          bool(kept_sections) and list(kept_sections[0].value) == ["summary_text"],
+          str([list(m.value) for m in kept_sections]))
+    check("остаток обновлён", shows_left(at, DEMO_AI_LIMIT - 2), str(texts(at.info)))
+
 print()
 if failures:
     print(f"ПРОВАЛЕНО: {len(failures)} → {failures}")

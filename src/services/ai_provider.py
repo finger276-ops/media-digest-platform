@@ -416,28 +416,37 @@ _CONTEXT_MARKERS = (
     "слишком длинн",
 )
 # Кончились деньги или пакет токенов: повтор не поможет, пока владелец не
-# пополнит баланс.
+# пополнит баланс. Само слово «quota» признаком денег не считается: Yandex Cloud
+# так называет и лимит частоты, и лимит одновременных генераций, а они
+# снимаются сами.
 _QUOTA_MARKERS = (
-    "quota",
-    "квот",
     "payment required",
-    "insufficient",
+    "insufficient funds",
+    "insufficient balance",
+    "insufficient_quota",
     "billing",
     "balance",
     "баланс",
     "недостаточно средств",
-    "закончил",
+    "оплат",
+    "exhausted",
     "исчерпан",
+    "закончил",
 )
-# Лимит частоты Yandex Cloud тоже зовёт квотой («...requestCount.rate»), но он
-# снимается сам через минуту — такой ответ не должен звать пополнять баланс.
+# Лимит частоты и одновременных запросов Yandex Cloud тоже зовёт квотой
+# («...requestCount.rate», «...SessionsCount.count gauge quota»), но он
+# снимается сам — такой ответ не должен звать пополнять баланс.
 _RATE_MARKERS = (
     ".rate",
+    ".count",
+    "gauge",
+    "concurrent",
     "rate limit",
     "rate_limit",
     "requests per",
     "per second",
     "per minute",
+    "одновременн",
     "в секунду",
     "в минуту",
 )
@@ -453,6 +462,12 @@ _BILLING_PLACES = {
 def _error_kind(status: int, body: str) -> str:
     """Что случилось по сути: не влез запрос, кончилась квота или слишком часто."""
     text = str(body or "").lower()
+    if status == 401:
+        # Ключ не принят — чинить надо ключ, что бы ни было в тексте ответа.
+        # 403 идёт дальше: заблокированный за неуплату аккаунт — это деньги,
+        # а отказ по правам («insufficient permissions to use quota») признаков
+        # денег не содержит и квотой не станет.
+        return ""
     if 400 <= status < 500:
         rate_like = any(marker in text for marker in _RATE_MARKERS)
         if status == 402 or (
