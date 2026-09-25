@@ -175,8 +175,14 @@ def build_client_insights_summary(
     selected_period_ids: list[str],
     *,
     profile: str = "",
+    granularity_narrowed: bool = False,
 ) -> str:
     """Text version of the client-insights block for automatic summaries.
+
+    granularity_narrowed — то же правило, что у экранного блока в
+    render_client_insights: при сужении гранулярностью «Теги с заметными
+    изменениями» не выводятся, иначе период, чьи дни выпали из выбора,
+    считался бы по нулю сообщений, и в отчёт уходил выдуманный рост.
 
     Раньше здесь ещё дублировались агрегатные дельты периода ("Что
     изменилось к предыдущему периоду") и топ тегов/инфоповодов со своей
@@ -210,7 +216,7 @@ def build_client_insights_summary(
         )
     lines.append(f"Суммарная вовлеченность: {format_int(engagement)}.")
 
-    if len(selected_period_ids or []) >= 2:
+    if len(selected_period_ids or []) >= 2 and not granularity_narrowed:
         tag_changes = build_tag_change_table(
             messages, periods, selected_period_ids, limit=5
         )

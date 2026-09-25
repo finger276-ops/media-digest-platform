@@ -483,6 +483,11 @@ check(
 )
 owner_buttons[SAVE_KEY].click().run()
 check("владелец сохранил текст без исключений", not at.exception, str(at.exception))
+check(
+    "после сохранения владельцу доступно и «Удалить»",
+    DELETE_KEY in write_buttons(at),
+    str(list(write_buttons(at))),
+)
 
 # Теперь тот же проект открывает гость с кодом редактора — тот же путь, что
 # и в остальном файле (open_report() по умолчанию), а текст уже сохранён.
@@ -540,6 +545,41 @@ check(
     "владельцу кнопка стартового раздела видна",
     bool(owner_view_start_buttons),
     str(owner_view_start_buttons),
+)
+
+
+def saved_ai_rows():
+    return [
+        row
+        for row in CLIENT.db.get("platform_manual_rows", [])
+        if row.get("project_id") == PROJECT_ID and row.get("table_name") == "ai_texts"
+    ]
+
+
+check("сохранённый владельцем текст лежит в базе", bool(saved_ai_rows()), str(saved_ai_rows()))
+owner_delete = write_buttons(owner_report_at).get(DELETE_KEY)
+check("у владельца на свежей странице есть «Удалить»", owner_delete is not None, str(list(write_buttons(owner_report_at))))
+if owner_delete is not None:
+    owner_delete.click().run()
+    check("владелец удалил текст без исключений", not owner_report_at.exception, str(owner_report_at.exception))
+    check("после «Удалить» текста в базе нет", not saved_ai_rows(), str(saved_ai_rows()))
+
+# Гостю после генерации нельзя говорить «сохраните»: кнопки записи у него нет.
+set_runs(0)
+PROVIDER.calls = 0
+at = open_report()
+PROVIDER.queue = [MODEL_OK]
+generate_buttons(at)[SUMMARY_KEY].click().run()
+guest_success = " ".join(texts(at.success))
+check(
+    "гостю не предлагают сохранить то, что он сохранить не может",
+    "сохраните" not in guest_success and "не сохраняется" in guest_success,
+    guest_success,
+)
+check(
+    "у черновика гостя нет «Пока не сохранён.»",
+    not any("Пока не сохранён" in t for t in texts(at.caption)),
+    str([t for t in texts(at.caption) if "Черновик" in t]),
 )
 
 print()

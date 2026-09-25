@@ -199,6 +199,58 @@ def _bucket_id(bucket_start: pd.Timestamp, granularity: str) -> str:
     return bucket_start.strftime("%Y-%m-%d")
 
 
+# Выше этого числа дней охват периода не раскрывается поштучно: у выгрузки с
+# ошибочной датой «с 1900 года» множество дней было бы бессмысленно большим.
+MAX_COVERAGE_DAYS = 3660
+
+
+def _parse_period_date(value: Any) -> pd.Timestamp | None:
+    text = str(value or "").strip()
+    if not text or text.lower() in {"nan", "nat", "none"}:
+        return None
+    parsed = pd.to_datetime(text, errors="coerce", format="ISO8601")
+    if pd.isna(parsed):
+        parsed = pd.to_datetime(text, errors="coerce", dayfirst=True)
+    if pd.isna(parsed):
+        return None
+    ts = pd.Timestamp(parsed)
+    if ts.tzinfo is not None:
+        ts = ts.tz_localize(None)
+    return ts.normalize()
+
+
+def period_coverage_days(
+    periods: pd.DataFrame | None, period_ids: list[str] | None
+) -> set[pd.Timestamp] | None:
+    """Календарные дни, которые покрыты выбранными загрузками (date_from–date_to).
+
+    Тихий день и день, которого нет ни в одной загрузке, по сообщениям не
+    отличить: ни там, ни там нет ни одного упоминания. Отличает их только
+    диапазон выгрузки. None — у выбранных периодов нет распознанных дат, и
+    охват неизвестен.
+    """
+    ids = {str(x) for x in (period_ids or []) if str(x).strip()}
+    if (
+        not ids
+        or periods is None
+        or periods.empty
+        or "period_id" not in periods.columns
+    ):
+        return None
+    days: set[pd.Timestamp] = set()
+    known = False
+    for _, row in periods[periods["period_id"].astype(str).isin(ids)].iterrows():
+        start = _parse_period_date(row.get("date_from"))
+        end = _parse_period_date(row.get("date_to"))
+        if start is None or end is None or end < start:
+            continue
+        if (end - start).days > MAX_COVERAGE_DAYS:
+            continue
+        known = True
+        days.update(pd.date_range(start, end, freq="D"))
+    return days if known else None
+
+
 def _bucket_end(bucket_start: pd.Timestamp, granularity: str) -> pd.Timestamp:
     if granularity == "week":
         return bucket_start + pd.Timedelta(days=6)
@@ -239,7 +291,11 @@ def _bucket_label(
 
 
 def _bucketed_metrics(
-    messages: pd.DataFrame, granularity: str, *, min_buckets: int = 1
+    messages: pd.DataFrame,
+    granularity: str,
+    *,
+    min_buckets: int = 1,
+    coverage: set[pd.Timestamp] | None = None,
 ) -> list[dict[str, Any]]:
     bucket_start = _bucket_start(messages, granularity)
     if bucket_start is None:
@@ -253,13 +309,17 @@ def _bucketed_metrics(
     if len(buckets) < min_buckets:
         return []
 
-    # Неделя/месяц на краю выборки часто попадает в неё не целиком: сообщения
-    # выбраны с 23.04, а неделя формально начинается с понедельника 21.04.
-    # Подпись «21.04–27.04» тогда обещает полную неделю, которой в данных
-    # нет, а сравнение с соседней ПОЛНОЙ неделей выглядит как провал или
-    # взлёт, которого не было. Честность нужна только на краях: если внутри
-    # выборки неделя тихая только по вторникам, это реальное затишье, а не
-    # обрезанный край, — такие дни просто останутся нулём на графике.
+    # Неделя/месяц часто попадает в выборку не целиком: выгрузка начинается
+    # в среду 23.04, а неделя формально с понедельника 21.04. Подпись
+    # «21.04–27.04» тогда обещает полную неделю, которой в данных нет, а
+    # сравнение с соседней полной неделей выглядит как провал или взлёт.
+    #
+    # Мерило — диапазоны выгрузок (coverage, см. period_coverage_days), а не
+    # даты сообщений: тихое воскресенье внутри загруженной недели — это
+    # реальный ноль, а не обрезанный край, и неделя остаётся полной. Зато
+    # разрыв между двумя загрузками внутри недели (01–07.03 и 16–22.03)
+    # виден и у внутренних недель. Без дат выгрузок остаётся запасное правило
+    # по датам сообщений — и только для крайних недель/месяцев.
     day_dates = pd.to_datetime(work["datetime"], errors="coerce").dt.floor("D")
     result: list[dict[str, Any]] = []
     for index, bucket in enumerate(buckets):
@@ -270,14 +330,23 @@ def _bucketed_metrics(
         total = max(1, int(sent.get("total", 0) or 0))
         bucket_ts = pd.Timestamp(bucket)
         actual_start = actual_end = None
-        is_edge = granularity in ("week", "month") and index in (0, len(buckets) - 1)
-        if is_edge:
+        if granularity in ("week", "month"):
             bucket_end = _bucket_end(bucket_ts, granularity)
-            covered = day_dates[mask.to_numpy()]
-            reaches_start = bool((covered == bucket_ts).any())
-            reaches_end = bool((covered == bucket_end).any())
-            if not (reaches_start and reaches_end):
-                actual_start, actual_end = covered.min(), covered.max()
+            message_days = day_dates[mask.to_numpy()].dropna()
+            if coverage is not None:
+                bucket_days = pd.date_range(bucket_ts, bucket_end, freq="D")
+                covered = [day for day in bucket_days if day in coverage]
+                if not covered and not message_days.empty:
+                    # Сообщения вне заявленного диапазона выгрузки: охват
+                    # известен только по ним самим.
+                    actual_start, actual_end = message_days.min(), message_days.max()
+                elif covered and len(covered) < len(bucket_days):
+                    actual_start, actual_end = covered[0], covered[-1]
+            elif index in (0, len(buckets) - 1) and not message_days.empty:
+                reaches_start = bool((message_days == bucket_ts).any())
+                reaches_end = bool((message_days == bucket_end).any())
+                if not (reaches_start and reaches_end):
+                    actual_start, actual_end = message_days.min(), message_days.max()
         metrics.update(
             {
                 "period_id": _bucket_id(bucket_ts, granularity),
@@ -303,7 +372,9 @@ def _bucketed_metrics(
     return result
 
 
-def daily_metrics_for_comparison(messages: pd.DataFrame) -> list[dict[str, Any]]:
+def daily_metrics_for_comparison(
+    messages: pd.DataFrame, coverage: set[pd.Timestamp] | None = None
+) -> list[dict[str, Any]]:
     """То же самое, что period_metrics_for_comparison, но по календарным дням.
 
     Раньше динамика считалась по загруженным периодам целиком (неделя —
@@ -319,19 +390,26 @@ def daily_metrics_for_comparison(messages: pd.DataFrame) -> list[dict[str, Any]]
     круговые диаграммы — работает без изменений, просто на других точках.
     Недельная/месячная разбивка (weekly_/monthly_metrics_for_comparison)
     следуют тому же контракту.
+
+    coverage (дни выбранных выгрузок) для дней не нужен и принимается ради
+    единой сигнатуры с неделями и месяцами.
     """
     return _bucketed_metrics(messages, "day", min_buckets=2)
 
 
-def weekly_metrics_for_comparison(messages: pd.DataFrame) -> list[dict[str, Any]]:
+def weekly_metrics_for_comparison(
+    messages: pd.DataFrame, coverage: set[pd.Timestamp] | None = None
+) -> list[dict[str, Any]]:
     """daily_metrics_for_comparison, но по неделям (пн-вс) - авто-группировка
     для длинных периодов, где день-в-день даёт слишком много точек."""
-    return _bucketed_metrics(messages, "week", min_buckets=2)
+    return _bucketed_metrics(messages, "week", min_buckets=2, coverage=coverage)
 
 
-def monthly_metrics_for_comparison(messages: pd.DataFrame) -> list[dict[str, Any]]:
+def monthly_metrics_for_comparison(
+    messages: pd.DataFrame, coverage: set[pd.Timestamp] | None = None
+) -> list[dict[str, Any]]:
     """daily_metrics_for_comparison, но по календарным месяцам."""
-    return _bucketed_metrics(messages, "month", min_buckets=2)
+    return _bucketed_metrics(messages, "month", min_buckets=2, coverage=coverage)
 
 
 GRANULARITY_FUNCS = {
@@ -341,14 +419,18 @@ GRANULARITY_FUNCS = {
 }
 
 
-def available_buckets(messages: pd.DataFrame, granularity: str) -> list[dict[str, Any]]:
+def available_buckets(
+    messages: pd.DataFrame,
+    granularity: str,
+    coverage: set[pd.Timestamp] | None = None,
+) -> list[dict[str, Any]]:
     """Список дней/недель/месяцев для пикера гранулярности - в отличие от
     *_metrics_for_comparison (которым для СРАВНЕНИЯ нужно минимум 2 точки),
     здесь достаточно одного бакета: показать в пикере "24.04 (12 сообщ.)"
     нужно, даже если в выборке всего один день."""
     if granularity not in GRANULARITY_FUNCS:
         return []
-    return _bucketed_metrics(messages, granularity, min_buckets=1)
+    return _bucketed_metrics(messages, granularity, min_buckets=1, coverage=coverage)
 
 
 def unresolved_date_count(messages: pd.DataFrame) -> int:
@@ -467,9 +549,22 @@ def build_comparison_metrics(
     гранулярности сравнивает загруженные периоды целиком, а не дробит их.
     """
     func = GRANULARITY_FUNCS.get(granularity)
-    comparison = func(messages) if func else []
+    coverage = period_coverage_days(periods, period_ids)
+    comparison = func(messages, coverage=coverage) if func else []
     if len(comparison) < 2:
-        comparison = period_metrics_for_comparison(messages, periods, period_ids)
+        # Откат на периоды целиком — только по тем, у которых в сообщениях
+        # что-то осталось. Если гранулярность оставила дни одного периода,
+        # второй посчитался бы по нулю сообщений, и в саммари и отчёте
+        # появлялось «было 0, стало 3» — период не опустел, он выпал из выбора.
+        present_ids = list(period_ids or [])
+        if (
+            isinstance(messages, pd.DataFrame)
+            and not messages.empty
+            and "period_id" in messages.columns
+        ):
+            with_messages = set(messages["period_id"].astype(str))
+            present_ids = [pid for pid in present_ids if str(pid) in with_messages]
+        comparison = period_metrics_for_comparison(messages, periods, present_ids)
     if len(comparison) < 2:
         return None
     previous, current = comparison[-2], comparison[-1]

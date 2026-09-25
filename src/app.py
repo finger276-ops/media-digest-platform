@@ -741,7 +741,7 @@ def main() -> None:
     # проекта, они не должны «прыгать» при переключении гранулярности
     # отображения.
     granularity, selected_bucket_ids = render_granularity_selector(
-        enriched_messages, project_id, selected_period_ids
+        enriched_messages, project_id, selected_period_ids, periods
     )
     granularity_key = ""
     granularity_narrowed = False
@@ -825,14 +825,29 @@ def main() -> None:
                     prev_row = periods[periods["period_id"].astype(str) == str(prev_id)]
                     if not prev_row.empty:
                         prev_label = str(prev_row.iloc[0].get("period_name") or prev_id)
-                elif not comparable_previous:
-                    prev_disabled_reason = (
-                        "Изменение к предыдущему периоду не показано: выбрано "
-                        "несколько периодов."
-                        if len(selected_period_ids) >= 2
-                        else "Изменение к предыдущему периоду не показано: в "
-                        "гранулярности отмечены не все дни периода."
-                    )
+                elif not comparable_previous and prev_id:
+                    # Подпись — только когда сравнивать было с чем: без
+                    # прошлого периода она объясняла бы отсутствие изменения
+                    # не той причиной. Для нескольких периодов она говорит о
+                    # периоде ДО выбранных: изменения между самими выбранными
+                    # периодами «Клиентский обзор» ниже показывает.
+                    if len(selected_period_ids) < 2:
+                        prev_disabled_reason = (
+                            "Изменение к предыдущему периоду не показано: в "
+                            "гранулярности отмечены не все дни периода."
+                        )
+                    elif granularity_narrowed:
+                        prev_disabled_reason = (
+                            "Изменение к периоду до выбранных не показано: "
+                            "выбрано несколько периодов, и в гранулярности "
+                            "отмечены не все их дни."
+                        )
+                    else:
+                        prev_disabled_reason = (
+                            "Изменение к периоду до выбранных не показано: "
+                            "выбрано несколько периодов. Изменения между ними — "
+                            "ниже, в «Клиентском обзоре»."
+                        )
                 metrics = render_project_intro(
                     project_name,
                     enriched_messages,
@@ -925,6 +940,7 @@ def main() -> None:
                 periods,
                 selected_period_ids,
                 granularity=granularity,
+                granularity_narrowed=granularity_narrowed,
                 chart_label_settings=chart_label_settings,
                 comparison_visible_charts=dashboard_view_settings.get(
                     "comparison_visible_charts"
@@ -957,6 +973,7 @@ def main() -> None:
                 project_settings=current_project_settings,
                 client_preview=client_preview,
                 read_only=read_only,
+                granularity_narrowed=granularity_narrowed,
             )
 
     render_section_safely(page, _render_selected_section, _details=show_error_details)

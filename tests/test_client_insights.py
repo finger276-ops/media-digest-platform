@@ -240,6 +240,27 @@ check(
     str(captions5) + " | " + text5_narrow[:200],
 )
 
+print("6. Текст «Клиентского обзора» для саммари и выгрузок при сужении")
+# Находка проверки c46fa02: экранный блок при сужении гранулярностью скрыт,
+# а текстовая версия (build_client_insights_summary — она уходит в саммари
+# «Отчёта» и в Word/PDF/PNG) по-прежнему писала «Теги с заметными
+# изменениями»: период, чьи дни выпали из выбора, считался по нулю.
+# Мутационная проверка: игнорировать granularity_narrowed в
+# build_client_insights_summary → падает «при сужении тегов с изменениями нет».
+from client_insights_ui import build_client_insights_summary  # noqa: E402
+
+tagged = insights_period_msgs.assign(tags="Бренд")
+summary_full = build_client_insights_summary(tagged, no_events, PERIODS, ["p1", "p2"])
+check("без сужения в тексте есть теги с изменениями", "Теги с заметными изменениями" in summary_full, summary_full)
+summary_narrow = build_client_insights_summary(
+    tagged[tagged["period_id"] == "p2"], no_events, PERIODS, ["p1", "p2"], granularity_narrowed=True
+)
+check(
+    "при сужении тегов с изменениями в тексте нет (p1 выпал из выбора, а не опустел)",
+    "Теги с заметными изменениями" not in summary_narrow,
+    summary_narrow,
+)
+
 print()
 if failures:
     print(f"ПРОВАЛЕНО: {len(failures)} → {failures}")

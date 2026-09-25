@@ -39,6 +39,7 @@ from services.period_comparison import (
     chart_number_label,
     comparison_visual_rows,
     metric_delta,
+    period_coverage_days,
     pp_delta,
     selected_period_label,
 )
@@ -112,7 +113,13 @@ def _tone_cards(
         if not comparable:
             return None
         prev_share = prev_sent.get(key, 0) / prev_total if prev_total else 0.0
-        return pp_delta(sent.get(key, 0) / total, prev_share)
+        share = sent.get(key, 0) / total
+        # Streamlit считает «без изменений» только строку "0": «0,0 п.п.» он
+        # рисует стрелкой вверх, а у негатива с инверсией цвета это красная
+        # стрелка «негатив вырос», хотя доля не менялась.
+        if round((share - prev_share) * 100, 1) == 0:
+            return "0"
+        return pp_delta(share, prev_share)
 
     return [
         metric_card(
@@ -288,7 +295,10 @@ def _render_value_distribution_donut(
             )
 
 
-def _fill_daily_chart_gaps(comparison: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _fill_daily_chart_gaps(
+    comparison: list[dict[str, Any]],
+    covered_days: set[pd.Timestamp] | None = None,
+) -> list[dict[str, Any]]:
     """Дни без единого упоминания — нулевая точка на графике, а не разрыв.
 
     daily_metrics_for_comparison строит бакет, только если в нём есть хоть
@@ -299,8 +309,14 @@ def _fill_daily_chart_gaps(comparison: list[dict[str, Any]]) -> list[dict[str, A
     на копию для графиков — сравнительная таблица и карточка изменения к
     прошлому периоду по-прежнему берут исходную последовательность, поэтому
     Δ между соседними НАСТОЯЩИМИ точками не трогается.
+
+    Ноль ставится только в днях, которые точно входят в выгрузку
+    (covered_days — дни диапазонов date_from–date_to выбранных периодов). День
+    между двумя несвязными загрузками или снятый в пикере гранулярности — это
+    не «тихий день», а «данных нет», и нулём он соврал бы о сотнях упоминаний.
+    Без известного охвата ничего не вставляется.
     """
-    if len(comparison) < 2:
+    if len(comparison) < 2 or not covered_days:
         return comparison
     try:
         dates = [pd.Timestamp(item["period_id"]) for item in comparison]
@@ -320,6 +336,8 @@ def _fill_daily_chart_gaps(comparison: list[dict[str, Any]]) -> list[dict[str, A
     filled: list[dict[str, Any]] = []
     for day in full_range:
         item = by_date.get(day)
+        if item is None and day not in covered_days:
+            continue
         if item is None:
             item = {
                 **empty_metrics,
@@ -337,13 +355,16 @@ def render_period_comparison_charts(
     comparison: list[dict[str, Any]],
     *,
     granularity: str = "day",
+    covered_days: set[pd.Timestamp] | None = None,
     label_settings: dict[str, Any] | None = None,
     visible_blocks_default: list[str] | None = None,
 ) -> None:
     if not comparison:
         return
     chart_comparison = (
-        _fill_daily_chart_gaps(comparison) if granularity == "day" else comparison
+        _fill_daily_chart_gaps(comparison, covered_days)
+        if granularity == "day"
+        else comparison
     )
     chart_df = comparison_visual_rows(chart_comparison)
     if chart_df.empty:
@@ -548,7 +569,10 @@ def render_period_comparison_charts(
     else:
         tone_ok = [True] * len(chart_df)
     tone_df = chart_df[tone_ok]
-    tone_items = [item for item, ok in zip(comparison, tone_ok) if ok]
+    # chart_df строится из chart_comparison (с нулевыми тихими днями), поэтому
+    # и пары «точка ↔ тональность» берутся из него же: с исходной comparison
+    # после первого тихого дня каждая дата получала тональность соседней.
+    tone_items = [item for item, ok in zip(chart_comparison, tone_ok) if ok]
 
     if "Динамика тональности" in selected_blocks and tone_df.empty:
         st.markdown("**Динамика долей тональности, %**")
@@ -556,11 +580,25 @@ def render_period_comparison_charts(
     elif "Динамика тональности" in selected_blocks:
         st.markdown("**Динамика долей тональности, %**")
         if len(tone_df) < len(chart_df):
-            skipped = chart_df.loc[[not ok for ok in tone_ok], "Период"].astype(str)
-            st.caption(
-                "Без разметки тональности, на графике не показаны: "
-                + ", ".join(skipped)
-            )
+            # Тихий день (ни одного сообщения) — не «нет разметки»: разметка
+            # у проекта есть, долей просто не из чего считать. Называем их
+            # отдельно, чтобы не сказать о данных клиента неправду.
+            quiet = (chart_df["Сообщения"].astype(int) == 0).to_numpy()
+            not_ok = ~pd.Series(tone_ok, dtype=bool).to_numpy()
+            unmarked_rows = not_ok & ~quiet
+            quiet_rows = not_ok & quiet
+            unmarked = chart_df.loc[unmarked_rows, "Период"].astype(str)
+            quiet_days = chart_df.loc[quiet_rows, "Период"].astype(str)
+            if len(unmarked):
+                st.caption(
+                    "Без разметки тональности, на графике не показаны: "
+                    + ", ".join(unmarked)
+                )
+            if len(quiet_days):
+                st.caption(
+                    "Упоминаний не было, долей тональности нет: "
+                    + ", ".join(quiet_days)
+                )
         sentiment_long = tone_df[
             ["Период", "Позитив, %", "Нейтрал, %", "Негатив, %"]
         ].melt(
@@ -824,12 +862,17 @@ def render_period_comparison_metrics(
     period_ids: list[str],
     *,
     granularity: str = "day",
+    granularity_narrowed: bool = False,
     chart_label_settings: dict[str, Any] | None = None,
     comparison_visible_charts: list[str] | None = None,
 ) -> dict[str, Any] | None:
     """Render sequential comparison, broken down by the active granularity
     (day/week/month by default; falls back to whole periods when fewer than
-    two points come out of it — see build_comparison_metrics)."""
+    two points come out of it — see build_comparison_metrics).
+
+    granularity_narrowed — в пикере отмечена часть дней: тогда тихие дни на
+    график не добавляются вовсе, иначе снятый в пикере день выглядел бы
+    нулём (см. _fill_daily_chart_gaps)."""
     aggregate_metrics = build_comparison_metrics(
         messages, periods, period_ids, granularity=granularity
     )
@@ -886,6 +929,9 @@ def render_period_comparison_metrics(
     render_period_comparison_charts(
         comparison,
         granularity=granularity,
+        covered_days=(
+            None if granularity_narrowed else period_coverage_days(periods, period_ids)
+        ),
         label_settings=chart_label_settings,
         visible_blocks_default=comparison_visible_charts,
     )

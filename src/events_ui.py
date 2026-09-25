@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 import altair as alt
@@ -30,9 +31,12 @@ from services.event_titles import DEFAULT_SIMILARITY, normalize_event_title, pre
 from services.formatting import fmt_date
 from services.manual_moderation import (
     create_manual_event,
+    edit_target_ids,
     event_select_options,
+    hide_payloads,
     manual_undo_items,
     manual_versions,
+    merge_payloads,
     undo_manual_item,
 )
 from services.message_compute import message_link_column, message_text_column
@@ -398,6 +402,8 @@ def _residual_messages_table(
     moved = 0
     conflict = False
     message_ids = [str(x) for x in subset.get("message_id", pd.Series(dtype=str))]
+    snippets = [" ".join(str(x).split())[:80] for x in view["Сообщение"]]
+    titles = _event_title_lookup(events_agg)
     for position, label in enumerate(edited[MOVE_COLUMN].fillna(MOVE_NONE)):
         target = label_to_event.get(str(label))
         if not target or position >= len(message_ids):
@@ -411,7 +417,15 @@ def _residual_messages_table(
                 project_id,
                 "message_moves",
                 row_key,
-                {"message_id": message_id, "target_event_id": target},
+                {
+                    "message_id": message_id,
+                    "target_event_id": target,
+                    # Подписи для списка отмены: сообщение и тема могут
+                    # оказаться вне выбранных периодов, и тогда их уже не
+                    # найти по текущим данным — показывать пришлось бы id.
+                    "message_snippet": snippets[position] if position < len(snippets) else "",
+                    "target_title": titles.get(str(target), ""),
+                },
                 # Сообщение видно в списке — значит, в снимке страницы переноса
                 # не было. Если запись уже появилась, его перенёс кто-то другой.
                 expected_updated_at=versions.get(row_key),
@@ -989,7 +1003,8 @@ def render_manual_undo(
                     messages[text_col].fillna("").astype(str),
                 )
             )
-    items = manual_undo_items(manual_state, _event_title_lookup(events_agg), texts)
+    titles = _event_title_lookup(events_agg)
+    items = manual_undo_items(manual_state, titles, texts)
     if not items:
         return
     demo_help = DEMO_MESSAGE if read_only else None
@@ -1005,14 +1020,14 @@ def render_manual_undo(
             with cols[1]:
                 if st.button(
                     "Отменить",
-                    key=f"undo_{project_id}_{item['row_key']}",
+                    key=f"undo_{project_id}_{item['key']}",
                     width="stretch",
                     disabled=read_only,
                     help=demo_help,
                 ):
                     # save_manual/delete_manual сами сбрасывают кеш правок и
                     # данных — как у «Вернуть» для автосклейки.
-                    undo_manual_item(project_id, item)
+                    undo_manual_item(project_id, item, manual_state, titles)
                     st.rerun()
 
 
@@ -1252,7 +1267,7 @@ def render_events(
                     help=demo_help,
                 ):
                     try:
-                        for event_id in selected_ids:
+                        for event_id in edit_target_ids(selected_ids, manual_state):
                             row_key = f"event_edit::{event_id}"
                             save_manual(
                                 project_id,
@@ -1281,19 +1296,19 @@ def render_events(
                     help=demo_help,
                 ):
                     try:
-                        for event_id in selected_ids:
+                        payloads = hide_payloads(
+                            selected_ids,
+                            manual_state,
+                            label=str(selected.get("title") or ""),
+                            op_id=uuid.uuid4().hex[:12],
+                        )
+                        for event_id, payload in payloads.items():
                             row_key = f"event_edit::{event_id}"
                             save_manual(
                                 project_id,
                                 "event_edits",
                                 row_key,
-                                {
-                                    "event_id": event_id,
-                                    "title": new_title,
-                                    "description": new_desc,
-                                    "tags": new_tags,
-                                    "status": "hidden",
-                                },
+                                payload,
                                 expected_updated_at=versions.get(row_key),
                             )
                     except ManualEditConflict:
@@ -1321,18 +1336,22 @@ def render_events(
                     ):
                         target_event_id = target[0]
                         try:
-                            for source_event_id in selected_ids:
-                                if source_event_id == target_event_id:
-                                    continue
+                            payloads = merge_payloads(
+                                selected_ids,
+                                target_event_id,
+                                op_id=uuid.uuid4().hex[:12],
+                                source_title=str(selected.get("title") or ""),
+                                target_title=_event_title_lookup(events_agg).get(
+                                    str(target_event_id), ""
+                                ),
+                            )
+                            for source_event_id, payload in payloads.items():
                                 row_key = f"event_merge::{source_event_id}"
                                 save_manual(
                                     project_id,
                                     "event_merges",
                                     row_key,
-                                    {
-                                        "source_event_id": source_event_id,
-                                        "target_event_id": target_event_id,
-                                    },
+                                    payload,
                                     expected_updated_at=versions.get(row_key),
                                 )
                         except ManualEditConflict:

@@ -388,6 +388,13 @@ def render_ai_summary_panel(
                 "В выгрузке нет разметки тональности: модель получит «Тональность: "
                 "нет данных» и не будет оценивать негатив."
             )
+        # В демо-проекте панель открыта любой роли (см. комментарий выше), а
+        # generate-кнопки гасит только demo_exhausted — счётчик запусков.
+        # «Сохранить»/«Сделать саммари периода»/«Удалить» пишут в общие для
+        # проекта данные и переживают перерисовку: без этой проверки гость с
+        # любым кодом мог заменить подготовленный владельцем текст витрины
+        # или удалить блок рисков, и это увидел бы каждый следующий гость.
+        can_write = owner or not demo
         columns = st.columns(3)
         kinds = [KIND_SUMMARY, KIND_BRAND, KIND_RISKS]
         for column, kind in zip(columns, kinds):
@@ -419,7 +426,12 @@ def render_ai_summary_panel(
                         request_rerun_after_render()
                     else:
                         _run_generation(
-                            project_id, kind, base_args, extra, config
+                            project_id,
+                            kind,
+                            base_args,
+                            extra,
+                            config,
+                            can_write=can_write,
                         )
                         if demo_spend == DEMO_SPENT:
                             # Остаток в шапке и в панели нарисован до клика. Без
@@ -430,13 +442,6 @@ def render_ai_summary_panel(
                             request_rerun_after_render()
 
         _show_generation_notice(project_id)
-        # В демо-проекте панель открыта любой роли (см. комментарий выше), а
-        # generate-кнопки гасит только demo_exhausted — счётчик запусков.
-        # «Сохранить»/«Сделать саммари периода»/«Удалить» пишут в общие для
-        # проекта данные и переживают перерисовку: без этой проверки гость с
-        # любым кодом мог заменить подготовленный владельцем текст витрины
-        # или удалить блок рисков, и это увидел бы каждый следующий гость.
-        can_write = owner or not demo
         for kind in kinds:
             _render_generated_block(project_id, kind, period_ids, can_write=can_write)
 
@@ -519,6 +524,8 @@ def _run_generation(
     base_args: dict[str, Any],
     extra: str,
     config: Any,
+    *,
+    can_write: bool = True,
 ) -> None:
     args = dict(base_args)
     if kind == KIND_RISKS:
@@ -538,9 +545,17 @@ def _run_generation(
             }
             return
     st.session_state[f"ai_draft_{kind}_{project_id}"] = result
+    # Гостю демо-проекта сохранять нечем (кнопки записи у него нет, см.
+    # _render_generated_block): просить его сохранить значило бы дать
+    # указание, которое рядом же запрещено.
     st.session_state[_notice_key(project_id)] = {
         "ok": True,
-        "text": f"{KIND_TITLES[kind]}: готово. Проверьте текст и сохраните.",
+        "text": (
+            f"{KIND_TITLES[kind]}: готово. Проверьте текст и сохраните."
+            if can_write
+            else f"{KIND_TITLES[kind]}: готово. Текст виден только вам и в "
+            "демонстрационном проекте не сохраняется."
+        ),
     }
 
 
@@ -640,6 +655,6 @@ def _render_generated_block(
     if draft:
         st.caption(
             f"Черновик · {draft.get('provider')} · {draft.get('model')} · "
-            f"запрос ~{draft.get('prompt_tokens_estimate')} токенов. "
-            "Пока не сохранён."
+            f"запрос ~{draft.get('prompt_tokens_estimate')} токенов."
+            + (" Пока не сохранён." if can_write else "")
         )

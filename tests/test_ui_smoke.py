@@ -930,35 +930,66 @@ print("3.56. Ручные правки инфоповодов: скрытую т
 # clear_platform_caches отсюда виден и прогону AppTest.
 from services.cached_store import clear_platform_caches  # noqa: E402
 
+
+def event_table_titles():
+    """Названия строк таблицы инфоповодов на экране."""
+    for frame in at.dataframe:
+        value = frame.value
+        if "Сюжет / инфоповод" in getattr(value, "columns", []):
+            return [str(x) for x in value["Сюжет / инфоповод"]]
+    return []
+
+
+check("до скрытия тема «Запуск завода» в таблице", any("Запуск завода" in t for t in event_table_titles()), str(event_table_titles()))
+# load_generated_tables приписывает к id события префикс периода: настоящий
+# id темы — p_2026_04__e0. С голым «e0» правка ни на что не действовала бы, и
+# тест проверял бы только список, а не то, что тема пропала и вернулась.
+HIDDEN_EVENT_ID = f"{PERIOD_ID}__e0"
 CLIENT.db.setdefault("platform_manual_rows", []).append(
     {
         "project_id": "tn_project",
         "table_name": "event_edits",
-        "row_key": "event_edit::e0",
-        "payload": {"event_id": "e0", "title": "Запуск завода", "status": "hidden"},
+        "row_key": f"event_edit::{HIDDEN_EVENT_ID}",
+        "payload": {
+            "event_id": HIDDEN_EVENT_ID,
+            "status": "hidden",
+            "op_id": "op-smoke",
+            "label": "Запуск завода",
+        },
         "updated_at": now,
     }
 )
 clear_platform_caches("tn_project")
 at.run()
 check("раздел со скрытой темой открылся без исключений", not at.exception, str(at.exception))
+check(
+    "скрытая тема действительно пропала из таблицы",
+    event_table_titles() and not any("Запуск завода" in t for t in event_table_titles()),
+    str(event_table_titles()),
+)
 undo_expanders = [str(e.label) for e in at.expander if "Ручные правки инфоповодов" in str(e.label)]
 check("список ручных правок на месте", bool(undo_expanders), str([str(e.label) for e in at.expander]))
-undo_buttons = [b for b in at.button if str(b.label) == "Отменить" and "event_edit::e0" in str(b.key)]
+undo_captions = [str(c.value) for c in at.caption if "Скрыт инфоповод" in str(c.value)]
+check("пункт отмены назван по теме, а не по id", undo_captions == ["Скрыт инфоповод «Запуск завода»"], str(undo_captions))
+undo_buttons = [b for b in at.button if str(b.label) == "Отменить" and "op-smoke" in str(b.key)]
 check("у скрытой темы есть кнопка «Отменить»", bool(undo_buttons), str([b.key for b in at.button if str(b.label) == "Отменить"]))
 if undo_buttons:
     undo_buttons[0].click().run()
     check("отмена не уронила раздел", not at.exception, str(at.exception))
+    check(
+        "после «Отменить» тема снова в таблице",
+        any("Запуск завода" in t for t in event_table_titles()),
+        str(event_table_titles()),
+    )
     stored_e0 = [
         row
         for row in CLIENT.db["platform_manual_rows"]
-        if row.get("project_id") == "tn_project" and row.get("row_key") == "event_edit::e0"
+        if row.get("project_id") == "tn_project"
+        and row.get("row_key") == f"event_edit::{HIDDEN_EVENT_ID}"
     ]
     check(
-        "тема снова активна, а правка названия не стёрта",
-        len(stored_e0) == 1
-        and (stored_e0[0].get("payload") or {}).get("status") == "active"
-        and (stored_e0[0].get("payload") or {}).get("title") == "Запуск завода",
+        "правок у темы до скрытия не было — строка правки удалена, а не превращена в ручную",
+        not stored_e0,
         str(stored_e0),
     )
     check(

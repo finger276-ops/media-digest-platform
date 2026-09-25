@@ -489,6 +489,49 @@ check(
     total12 == int(mismatched_payload.get("total", 0)) and total12 != last_point_sentiment["total"],
     f"total12={total12}, payload={mismatched_payload.get('total')}, последняя точка={last_point_sentiment['total']}",
 )
+# Сквозь generate_summary_pdf: проверка одного _pdf_metric_cards не ловила бы
+# возврат старой ветки «if len(comparison) >= 2: comparison[-1]» прямо в
+# генераторе PDF — хелпер comparison вообще не принимает. Блоки PDF подменены
+# записывающими подклассами: что пришло в конструктор, то и нарисовано.
+import services.report_export as report_export_module  # noqa: E402
+
+recorded_pdf = {}
+
+
+class _RecordingMetrics(report_export_module._PdfMetricsBlock):
+    def __init__(self, cards, subtitle, *args, **kwargs):
+        recorded_pdf["cards"] = {title: value for title, value, _ in cards}
+        recorded_pdf["subtitle"] = subtitle
+        super().__init__(cards, subtitle, *args, **kwargs)
+
+
+class _RecordingSentiment(report_export_module._PdfSentimentBlock):
+    def __init__(self, values, colors, labels, total, *args, **kwargs):
+        recorded_pdf["sentiment_total"] = total
+        recorded_pdf["sentiment_values"] = list(values)
+        super().__init__(values, colors, labels, total, *args, **kwargs)
+
+
+original_blocks = (report_export_module._PdfMetricsBlock, report_export_module._PdfSentimentBlock)
+report_export_module._PdfMetricsBlock = _RecordingMetrics
+report_export_module._PdfSentimentBlock = _RecordingSentiment
+try:
+    pdf12 = generate_summary_pdf(dict(mismatched_payload, comparison_sequence=fake_comparison))
+finally:
+    report_export_module._PdfMetricsBlock, report_export_module._PdfSentimentBlock = original_blocks
+check("PDF с разбивкой из двух точек собрался", pdf12[:4] == b"%PDF", str(pdf12[:8]))
+check(
+    "PDF целиком: карточка «Сообщения» — итог области, а не последний день",
+    (recorded_pdf.get("cards") or {}).get("Сообщения") == messages_value,
+    str(recorded_pdf.get("cards")),
+)
+check("PDF целиком: без подписи «Последний период»", recorded_pdf.get("subtitle") == "", str(recorded_pdf.get("subtitle")))
+check(
+    "PDF целиком: донат тональности по итогу области",
+    recorded_pdf.get("sentiment_total") == max(1, int(mismatched_payload.get("total", 0))),
+    str(recorded_pdf.get("sentiment_total")),
+)
+
 pdf_cards12, pdf_subtitle12 = _pdf_metric_cards(mismatched_payload)
 pdf_card_values = {title: value for title, value, _ in pdf_cards12}
 check(

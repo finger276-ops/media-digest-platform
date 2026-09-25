@@ -516,6 +516,120 @@ check("единица измерения не искажена", pp_delta(0.48, 
 check("в подписи нет «п,п,»", "п,п," not in pp_delta(0.48, 0.44), pp_delta(0.48, 0.44))
 check("без изменения знак не рисуется", pp_delta(0.5, 0.5) == "0,0 п.п.", pp_delta(0.5, 0.5))
 
+print("14. Неполная неделя/месяц — по границам выгрузок, а не по датам сообщений")
+# Находки проверки d369aec: у малого бизнеса тихий последний день месяца —
+# обычное дело, и весь загруженный март подписывался «неполный месяц:
+# 01.03–30.03». А при двух несвязных загрузках (01–07.03 и 16–22.03) неделя
+# 02–08.03 считалась полной, хотя 08.03 не входит ни в одну. Мерило — диапазоны
+# date_from–date_to выбранных периодов.
+# Мутационные проверки: не передавать coverage в build_comparison_metrics →
+# падают «загруженный март — полный» и «неделя с разрывом»; проверять охват
+# только у крайних недель → падает «неделя с разрывом»; откат на периоды без
+# фильтра по сообщениям → падает «откат не выдумывает пустой период».
+from services.period_comparison import period_coverage_days  # noqa: E402
+
+
+def _rows(days, prefix):
+    rows = []
+    for day, n in days:
+        for i in range(n):
+            rows.append(
+                {
+                    "message_id": f"{prefix}_{day}_{i}",
+                    "period_id": prefix,
+                    "datetime": f"{day}T09:00:00",
+                    "sentiment": "позитив",
+                    "views": 100,
+                    "audience": 50,
+                    "engagement": 5,
+                }
+            )
+    return rows
+
+
+march_periods = pd.DataFrame(
+    [
+        {"period_id": "mar", "period_name": "Март", "date_from": "2026-03-01", "date_to": "2026-03-31"},
+        {"period_id": "apr", "period_name": "Апрель", "date_from": "2026-04-01", "date_to": "2026-04-30"},
+    ]
+)
+quiet_edges = pd.DataFrame(
+    _rows([("2026-03-02", 3), ("2026-03-30", 2)], "mar") + _rows([("2026-04-10", 4)], "apr")
+)
+monthly_cov = build_comparison_metrics(quiet_edges, march_periods, ["mar", "apr"], granularity="month")
+labels_cov = [p["label"] for p in (monthly_cov or {}).get("comparison_sequence", [])]
+check(
+    "загруженный целиком март с тихими 1-м и 31-м — полный месяц",
+    labels_cov[:1] == ["Март 2026"],
+    str(labels_cov),
+)
+check(
+    "апрель загружен целиком — тоже полный, хотя данные только 10.04",
+    labels_cov[1:2] == ["Апрель 2026"],
+    str(labels_cov),
+)
+check(
+    "охват выгрузок: март + апрель = 61 день",
+    len(period_coverage_days(march_periods, ["mar", "apr"]) or set()) == 61,
+    str(len(period_coverage_days(march_periods, ["mar", "apr"]) or set())),
+)
+check("без дат у периодов охват неизвестен", period_coverage_days(pd.DataFrame([{"period_id": "x"}]), ["x"]) is None)
+
+split_periods = pd.DataFrame(
+    [
+        {"period_id": "w1", "period_name": "01–07.03", "date_from": "2026-03-01", "date_to": "2026-03-07"},
+        {"period_id": "w3", "period_name": "16–22.03", "date_from": "2026-03-16", "date_to": "2026-03-22"},
+    ]
+)
+split_msgs = pd.DataFrame(
+    _rows([("2026-03-02", 2), ("2026-03-05", 2)], "w1") + _rows([("2026-03-16", 2), ("2026-03-20", 2)], "w3")
+)
+weekly_split = build_comparison_metrics(split_msgs, split_periods, ["w1", "w3"], granularity="week")
+split_labels = [p["label"] for p in (weekly_split or {}).get("comparison_sequence", [])]
+check(
+    "неделя 02–08.03 с разрывом между загрузками подписана по фактическим дням",
+    "02.03–07.03 (неполная неделя)" in split_labels,
+    str(split_labels),
+)
+check(
+    "неделя 16–22.03 загружена целиком — полная",
+    "16.03–22.03" in split_labels,
+    str(split_labels),
+)
+three_periods = pd.DataFrame(
+    [
+        {"period_id": "a", "period_name": "a", "date_from": "2026-03-02", "date_to": "2026-03-08"},
+        {"period_id": "b", "period_name": "b", "date_from": "2026-03-09", "date_to": "2026-03-12"},
+        {"period_id": "c", "period_name": "c", "date_from": "2026-03-16", "date_to": "2026-03-22"},
+    ]
+)
+three_msgs = pd.DataFrame(
+    _rows([("2026-03-03", 2)], "a") + _rows([("2026-03-10", 2)], "b") + _rows([("2026-03-18", 2)], "c")
+)
+middle = build_comparison_metrics(three_msgs, three_periods, ["a", "b", "c"], granularity="week")
+middle_labels = [p["label"] for p in (middle or {}).get("comparison_sequence", [])]
+check(
+    "внутренняя неделя с разрывом между загрузками тоже подписана честно",
+    middle_labels == ["02.03–08.03", "09.03–12.03 (неполная неделя)", "16.03–22.03"],
+    str(middle_labels),
+)
+
+print("15. Откат на периоды целиком не выдумывает пустой период")
+# Находка проверки c46fa02: при сужении гранулярностью до дней одного периода
+# дневных точек меньше двух, и сравнение откатывалось на периоды — второй
+# считался по нулю сообщений, и отчёт писал «было 0, стало 3».
+two_periods = pd.DataFrame(
+    [
+        {"period_id": "p1", "period_name": "Неделя 1", "date_from": "2026-09-08", "date_to": "2026-09-14"},
+        {"period_id": "p2", "period_name": "Неделя 2", "date_from": "2026-09-15", "date_to": "2026-09-21"},
+    ]
+)
+only_p2_day = pd.DataFrame(_rows([("2026-09-17", 3)], "p2"))
+check(
+    "в выборке остался один период — сравнивать не с чем, а не «было 0»",
+    build_comparison_metrics(only_p2_day, two_periods, ["p1", "p2"], granularity="day") is None,
+)
+
 print()
 if failures:
     print(f"ПРОВАЛЕНО: {len(failures)}")

@@ -16,7 +16,11 @@ import pandas as pd
 import streamlit as st
 
 from services.metrics_compute import format_int
-from services.period_comparison import available_buckets, unresolved_date_count
+from services.period_comparison import (
+    available_buckets,
+    period_coverage_days,
+    unresolved_date_count,
+)
 
 GRANULARITY_LABELS = {
     "day": "День",
@@ -25,10 +29,16 @@ GRANULARITY_LABELS = {
     "period": "Файлы целиком",
 }
 GRANULARITY_ORDER = ["day", "week", "month", "period"]
+# «по дням/неделям/месяцам»: склеивать окончание к подписи нельзя — выходило
+# «по деньм» и «по месяцм».
+_GRANULARITY_DATIVE = {"day": "дням", "week": "неделям", "month": "месяцам"}
 
 
 def render_granularity_selector(
-    messages: pd.DataFrame, project_id: str, period_ids: list[str]
+    messages: pd.DataFrame,
+    project_id: str,
+    period_ids: list[str],
+    periods: pd.DataFrame | None = None,
 ) -> tuple[str, list[str]]:
     """Рисует контрол «Гранулярность» и возвращает (granularity, selected_bucket_ids).
 
@@ -56,7 +66,11 @@ def render_granularity_selector(
 
     selected_bucket_ids: list[str] = []
     if granularity != "period":
-        buckets = available_buckets(messages, granularity)
+        # Границы выгрузок нужны и пикеру: «неполная неделя» в списке должна
+        # совпадать с подписью той же недели на графике.
+        buckets = available_buckets(
+            messages, granularity, coverage=period_coverage_days(periods, period_ids)
+        )
         bucket_ids = [str(b["period_id"]) for b in buckets]
         labels = {
             str(b["period_id"]): f"{b['label']} ({format_int(b['messages'])} сообщ.)"
@@ -65,7 +79,7 @@ def render_granularity_selector(
         if not bucket_ids:
             st.caption(
                 "Нет сообщений с распознанной датой для разбивки по "
-                f"{GRANULARITY_LABELS.get(granularity, granularity).lower()}м."
+                f"{_GRANULARITY_DATIVE.get(granularity, granularity)}."
             )
         else:
             with st.expander(

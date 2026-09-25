@@ -12,9 +12,15 @@
 прошлый период). Выбор [P1, P2] вместе — ложное сравнение, которое теперь
 скрыто, а под карточками сказано, почему.
 
-Мутационная проверка: в app.py убрать `len(selected_period_ids) >= 2` из
-`comparable_previous` (оставить только `not granularity_narrowed`) -> падают
-«при двух периодах дельты не показаны» и «подпись объясняет причину».
+Мутационные проверки (app.py):
+- убрать `len(selected_period_ids) >= 2` из `comparable_previous` -> падают
+  «при двух периодах дельты не показаны» и «подпись объясняет причину»;
+- убрать `not granularity_narrowed` из `comparable_previous` -> падает «часть
+  дней одного периода — дельты нет» (шапка снова показывала ложное падение);
+- не передавать granularity_narrowed в render_client_insights -> падает
+  «Клиентский обзор при сужении не выдумывает рост»;
+- показывать подпись без проверки prev_id -> падает «у первого периода
+  проекта подписи о причине нет».
 """
 
 import os
@@ -80,11 +86,16 @@ _DATETIME = {"p0": "2026-09-03T10:00:00", "p1": "2026-09-10T10:00:00", "p2": "20
 
 
 def _message_row(period_id, index):
+    date, datetime_value = _DATE[period_id], _DATETIME[period_id]
+    # У P1 последнее сообщение — на следующий день: без второго дня внутри
+    # периода гранулярностью нечего сужать.
+    if period_id == "p1" and index == _COUNTS["p1"] - 1:
+        date, datetime_value = "11.09.2026", "2026-09-11T10:00:00"
     payload = {
         "message_id": f"{period_id}_m{index}",
         "period_id": period_id,
-        "date": _DATE[period_id],
-        "datetime": _DATETIME[period_id],
+        "date": date,
+        "datetime": datetime_value,
         "sentiment": "нейтрал",
         "views": 1000,
         "audience": 500,
@@ -199,6 +210,79 @@ if period_multiselect:
         "подпись снова называет конкретный прошлый период",
         any("Изменения — к предыдущему периоду:" in c for c in _captions()),
         str([c for c in _captions() if "предыдущ" in c]),
+    )
+
+
+def _day_picker():
+    return [ms for ms in at.multiselect if "Дни/недели/месяцы" in str(ms.label)]
+
+
+def _texts():
+    return " ".join(str(m.value) for m in at.markdown)
+
+
+if period_multiselect:
+    print("4. Один период, в гранулярности отмечена часть дней — сравнение скрыто")
+    # Карточки считаются по отмеченным дням, а прошлый период — целиком: без
+    # защиты шапка показывала ложное падение.
+    period_multiselect = [m for m in at.sidebar.multiselect if str(m.label) == "Периоды"]
+    period_multiselect[0].set_value(["p1"]).run()
+    picker = _day_picker()
+    check("пикер дней найден", bool(picker), str([m.label for m in at.multiselect]))
+    if picker:
+        picker[0].set_value(["2026-09-10"]).run()
+        messages_card = _metric("Сообщений")
+        check(
+            "отмечен один день из двух — в карточке 2 сообщения",
+            messages_card is not None and str(messages_card.value) == "2",
+            str(messages_card.value if messages_card else None),
+        )
+        check(
+            "часть дней одного периода — дельты нет",
+            messages_card is not None and not messages_card.delta,
+            repr(messages_card.delta if messages_card else None),
+        )
+        check(
+            "подпись объясняет: отмечены не все дни",
+            any("отмечены не все дни периода" in c for c in _captions()),
+            str([c for c in _captions() if "не показано" in c]),
+        )
+
+    print("5. Два периода: подпись шапки не спорит с «Клиентским обзором»")
+    period_multiselect = [m for m in at.sidebar.multiselect if str(m.label) == "Периоды"]
+    period_multiselect[0].set_value(["p1", "p2"]).run()
+    check(
+        "шапка говорит о периоде ДО выбранных и отсылает к изменениям ниже",
+        any("периоду до выбранных" in c and "Клиентском обзоре" in c for c in _captions()),
+        str([c for c in _captions() if "не показано" in c]),
+    )
+    check(
+        "а «Клиентский обзор» ниже показывает изменение между выбранными периодами",
+        "Количество сообщений выросло" in _texts(),
+        _texts()[:300],
+    )
+    picker = _day_picker()
+    if picker:
+        picker[0].set_value(["2026-09-17"]).run()
+        check(
+            "Клиентский обзор при сужении не выдумывает рост (день только из P2)",
+            "Количество сообщений выросло" not in _texts()
+            and any("отмечены не все дни периода" in c for c in _captions()),
+            str([c for c in _captions() if "не показано" in c]) + " | " + _texts()[:200],
+        )
+        check(
+            "подпись шапки не отсылает к изменениям ниже, которых теперь нет",
+            not any("Клиентском обзоре" in c for c in _captions()),
+            str([c for c in _captions() if "не показано" in c]),
+        )
+
+    print("6. Первый период проекта — сравнивать не с чем, подписи о причине нет")
+    period_multiselect = [m for m in at.sidebar.multiselect if str(m.label) == "Периоды"]
+    period_multiselect[0].set_value(["p0", "p1"]).run()
+    check(
+        "у первых периодов проекта подписи о причине нет (прошлого периода нет вовсе)",
+        not any("до выбранных не показано" in c for c in _captions()),
+        str([c for c in _captions() if "не показано" in c]),
     )
 
 print()

@@ -389,6 +389,93 @@ UNDO_HIDDEN = "hidden"
 UNDO_MERGE = "merge"
 UNDO_MOVE = "move"
 
+# Служебные поля правки инфоповода: пишутся самой платформой и правкой
+# аналитика не являются. Содержательные — title, description, tags.
+_EDIT_SERVICE_KEYS = {"event_id", "status", "op_id", "label"}
+_UNKNOWN_EVENT = "тема вне выбранных периодов"
+_UNKNOWN_MESSAGE = "сообщение вне выбранных периодов"
+
+
+def _edit_content(payload: dict[str, Any] | None) -> dict[str, Any]:
+    """Только правки аналитика (название, описание, теги) из строки правки."""
+    return {
+        key: value
+        for key, value in dict(payload or {}).items()
+        if not str(key).startswith("_") and key not in _EDIT_SERVICE_KEYS
+    }
+
+
+def edit_target_ids(
+    selected_ids: set[str] | list[str], manual_state: dict[str, Any] | None
+) -> list[str]:
+    """Кому из строки таблицы писать название/описание/теги («Сохранить правки»).
+
+    После объединения строка цели содержит и источники: у них заголовок цели,
+    поэтому они в ней и оказались. Если записать заголовок формы и в их
+    правку, отмена объединения их уже не разделит — у источника останется
+    ручной заголовок цели, и строки снова сложатся по нему. Заголовок
+    источник и так берёт у цели, поэтому писать ему незачем.
+    """
+    ids = sorted({str(x) for x in selected_ids})
+    merges = (manual_state or {}).get("event_merges") or {}
+    own = [event_id for event_id in ids if str(merges.get(event_id, "")) not in ids]
+    return own or ids
+
+
+def hide_payloads(
+    selected_ids: set[str] | list[str],
+    manual_state: dict[str, Any] | None,
+    *,
+    label: str,
+    op_id: str,
+) -> dict[str, dict[str, Any]]:
+    """Строки правки для «Скрыть инфоповод»: только статус поверх прежних правок.
+
+    Раньше скрытие записывало в правку каждого event_id название, описание и
+    теги из формы — то, что строка показывала, а не то, что правил аналитик.
+    Отмена скрытия превращала их в постоянные ручные правки: у склеенной
+    автосклейкой строки все варианты навсегда получали общий заголовок, и
+    «Не склеивать» переставало что-либо разделять. label — подпись для
+    списка отмены, в данные инфоповода не попадает.
+    """
+    edits = (manual_state or {}).get("event_edits") or {}
+    result: dict[str, dict[str, Any]] = {}
+    for event_id in sorted({str(x) for x in selected_ids}):
+        payload = _edit_content(edits.get(event_id))
+        payload.update(
+            {"event_id": event_id, "status": "hidden", "op_id": op_id, "label": label}
+        )
+        result[event_id] = payload
+    return result
+
+
+def merge_payloads(
+    selected_ids: set[str] | list[str],
+    target_event_id: str,
+    *,
+    op_id: str,
+    source_title: str,
+    target_title: str,
+) -> dict[str, dict[str, Any]]:
+    """Строки для «Объединить»: одна на event_id строки, общий op_id.
+
+    Заголовки кладутся сразу: после объединения заголовок источника уже
+    подменён заголовком цели, и в списке отмены назвать источник было бы
+    нечем, кроме внутреннего id.
+    """
+    result: dict[str, dict[str, Any]] = {}
+    for source in sorted({str(x) for x in selected_ids}):
+        if source == str(target_event_id):
+            continue
+        result[source] = {
+            "source_event_id": source,
+            "target_event_id": str(target_event_id),
+            "op_id": op_id,
+            "source_title": source_title,
+            "target_title": target_title,
+        }
+    return result
+
 
 def manual_undo_items(
     manual_state: dict[str, Any] | None,
@@ -400,79 +487,188 @@ def manual_undo_items(
     Раньше отменить из интерфейса можно было только «Не склеивать». Скрытая
     по ошибке тема исчезала из таблицы вместе с кнопками правки, объединённая
     не имела пути назад, и такая ошибка оставалась у всех пользователей
-    проекта. Здесь только список и подписи — сама отмена в undo_manual_item.
+    проекта.
+
+    Один пункт — одно действие аналитика. Строка таблицы часто собрана из
+    нескольких event_id (одна тема в нескольких периодах, автосклейка), и
+    «Скрыть»/«Объединить» пишут по записи на каждый; пункт на запись вернул
+    бы после одного «Отменить» только часть темы — с частью сообщений.
+    Записи одного действия связывает op_id; у старых записей без него —
+    общий заголовок (скрытие) или общая цель (объединение).
     """
     state = manual_state or {}
     titles = event_titles or {}
     texts = message_texts or {}
+    manual_df = state.get("manual_df")
     items: list[dict[str, Any]] = []
 
+    hidden_groups: dict[str, dict[str, Any]] = {}
     for event_id, payload in sorted((state.get("event_edits") or {}).items()):
         if str(payload.get("status") or "").strip().lower() != "hidden":
             continue
-        title = str(payload.get("title") or "").strip() or titles.get(str(event_id), "")
-        items.append(
+        title = (
+            str(payload.get("label") or "").strip()
+            or str(payload.get("title") or "").strip()
+            or titles.get(str(event_id), "")
+        )
+        key = str(payload.get("op_id") or f"legacy-hidden::{title or event_id}")
+        group = hidden_groups.setdefault(
+            key,
             {
                 "kind": UNDO_HIDDEN,
-                "row_key": str(payload.get("_row_key") or f"event_edit::{event_id}"),
-                "event_id": str(event_id),
-                "label": f"Скрыт инфоповод «{title or event_id}»",
-                "payload": dict(payload),
-            }
+                "key": f"hidden::{key}",
+                "title": title,
+                "row_keys": [],
+                "payloads": [],
+                "event_ids": [],
+            },
         )
+        group["row_keys"].append(str(payload.get("_row_key") or f"event_edit::{event_id}"))
+        group["payloads"].append(dict(payload))
+        group["event_ids"].append(str(event_id))
+    for group in hidden_groups.values():
+        group["label"] = f"Скрыт инфоповод «{group.pop('title') or _UNKNOWN_EVENT}»"
+        items.append(group)
 
-    for source, target in sorted((state.get("event_merges") or {}).items()):
-        target_title = titles.get(str(target), str(target))
-        items.append(
+    merge_groups: dict[str, dict[str, Any]] = {}
+    for payload in manual_payloads(manual_df, "event_merges"):
+        source = str(
+            payload.get("source_event_id")
+            or payload.get("_row_key", "").replace("event_merge::", "")
+        )
+        target = str(payload.get("target_event_id") or "")
+        if not source or not target:
+            continue
+        key = str(payload.get("op_id") or f"legacy-merge::{target}")
+        group = merge_groups.setdefault(
+            key,
             {
                 "kind": UNDO_MERGE,
-                "row_key": f"event_merge::{source}",
-                "event_id": str(source),
-                "label": f"Инфоповод {source} объединён с «{target_title}»",
-                "payload": {"source_event_id": str(source), "target_event_id": str(target)},
-            }
+                "key": f"merge::{key}",
+                "source_title": str(payload.get("source_title") or "").strip(),
+                "target_title": (
+                    str(payload.get("target_title") or "").strip()
+                    or titles.get(target, "")
+                ),
+                "target_event_id": target,
+                "row_keys": [],
+                "payloads": [],
+                "event_ids": [],
+            },
         )
+        group["row_keys"].append(str(payload.get("_row_key") or f"event_merge::{source}"))
+        group["payloads"].append(dict(payload))
+        group["event_ids"].append(source)
+    for group in merge_groups.values():
+        source_title = group.pop("source_title")
+        target_title = group.pop("target_title") or _UNKNOWN_EVENT
+        if source_title:
+            group["label"] = f"«{source_title}» объединён с «{target_title}»"
+        else:
+            count = len(group["event_ids"])
+            group["label"] = (
+                f"Объединение с «{target_title}» "
+                f"({count} {'запись' if count == 1 else 'записи' if count < 5 else 'записей'})"
+            )
+        items.append(group)
 
+    move_payloads = {
+        str(
+            payload.get("message_id")
+            or payload.get("_row_key", "").replace("message_move::", "")
+        ): payload
+        for payload in manual_payloads(manual_df, "message_moves")
+    }
     for message_id, target in sorted((state.get("move_map") or {}).items()):
-        target_title = titles.get(str(target), str(target))
-        text = " ".join(str(texts.get(str(message_id), "")).split())
+        payload = move_payloads.get(str(message_id)) or {}
+        target_title = (
+            str(payload.get("target_title") or "").strip()
+            or titles.get(str(target), "")
+            or _UNKNOWN_EVENT
+        )
+        text = " ".join(
+            str(payload.get("message_snippet") or texts.get(str(message_id), "")).split()
+        )
         snippet = (text[:70] + "…") if len(text) > 70 else text
         items.append(
             {
                 "kind": UNDO_MOVE,
-                "row_key": f"message_move::{message_id}",
-                "event_id": str(target),
+                "key": f"move::{message_id}",
                 "label": (
-                    f"Сообщение «{snippet or message_id}» перенесено в «{target_title}»"
+                    f"«{snippet}» перенесено в «{target_title}»"
+                    if snippet
+                    else f"Сообщение ({_UNKNOWN_MESSAGE}) перенесено в «{target_title}»"
                 ),
-                "payload": {"message_id": str(message_id), "target_event_id": str(target)},
+                "row_keys": [f"message_move::{message_id}"],
+                "payloads": [dict(payload)],
+                "event_ids": [str(target)],
             }
         )
     return items
 
 
-def undo_manual_item(project_id: str, item: dict[str, Any]) -> None:
-    """Отменить одну правку из manual_undo_items.
+def undo_manual_item(
+    project_id: str,
+    item: dict[str, Any],
+    manual_state: dict[str, Any] | None = None,
+    event_titles: dict[str, str] | None = None,
+) -> None:
+    """Отменить одно действие из manual_undo_items — все его записи разом.
 
-    Скрытие отменяется возвратом статуса active с прежними названием,
-    описанием и тегами: удалить строку целиком значило бы заодно стереть
-    правки текста, сделанные до скрытия. Объединение и перенос — это
-    отдельные строки, и отмена их просто удаляет.
+    Скрытие: если до него у инфоповода правок не было, строка удаляется,
+    иначе возвращается статус active с прежними правками аналитика. Служебные
+    поля (op_id, подпись) не сохраняются.
+
+    Объединение: записи удаляются. Если источнику успели записать заголовок
+    цели (старые данные: «Сохранить правки» на объединённой строке писал его
+    всем event_id строки), этот заголовок снимается — иначе источник и цель
+    снова сложатся по одинаковому заголовку, и отмена ничего не изменит.
+
+    Перенос: запись удаляется, сообщение возвращается в свой инфоповод.
     """
     kind = item.get("kind")
-    row_key = str(item.get("row_key") or "")
-    if not row_key:
-        return
+    row_keys = [str(x) for x in item.get("row_keys") or [] if str(x)]
+    payloads = list(item.get("payloads") or [])
     if kind == UNDO_HIDDEN:
-        payload = {
-            key: value
-            for key, value in dict(item.get("payload") or {}).items()
-            if not str(key).startswith("_")
-        }
-        payload["status"] = "active"
-        save_manual(project_id, "event_edits", row_key, payload)
-    elif kind in (UNDO_MERGE, UNDO_MOVE):
-        delete_manual(project_id, row_key)
+        for row_key, payload in zip(row_keys, payloads):
+            content = _edit_content(payload)
+            if content:
+                content.update(
+                    {"event_id": str(payload.get("event_id") or ""), "status": "active"}
+                )
+                save_manual(project_id, "event_edits", row_key, content)
+            else:
+                delete_manual(project_id, row_key)
+    elif kind == UNDO_MERGE:
+        edits = (manual_state or {}).get("event_edits") or {}
+        titles = event_titles or {}
+        for row_key, payload in zip(row_keys, payloads):
+            delete_manual(project_id, row_key)
+            source = str(payload.get("source_event_id") or "")
+            target = str(payload.get("target_event_id") or "")
+            edit = edits.get(source) or {}
+            copied = {
+                normalize_event_title(str(payload.get("target_title") or "")),
+                normalize_event_title(titles.get(target, "")),
+            } - {""}
+            if (
+                source
+                and str(edit.get("title") or "").strip()
+                and normalize_event_title(str(edit.get("title"))) in copied
+            ):
+                content = _edit_content(edit)
+                content.pop("title", None)
+                edit_key = str(edit.get("_row_key") or f"event_edit::{source}")
+                if content or str(edit.get("status") or "") == "hidden":
+                    content.update(
+                        {"event_id": source, "status": str(edit.get("status") or "active")}
+                    )
+                    save_manual(project_id, "event_edits", edit_key, content)
+                else:
+                    delete_manual(project_id, edit_key)
+    elif kind == UNDO_MOVE:
+        for row_key in row_keys:
+            delete_manual(project_id, row_key)
 
 
 def create_manual_event(

@@ -614,17 +614,18 @@ kinds17 = [item["kind"] for item in items17]
 check("в списке одно скрытие, одно объединение, один перенос", sorted(kinds17) == sorted([mm.UNDO_HIDDEN, mm.UNDO_MERGE, mm.UNDO_MOVE]), str(kinds17))
 check(
     "правка без скрытия в список отмены не попадает",
-    not any(item["event_id"] == "e3" and item["kind"] == mm.UNDO_HIDDEN for item in items17),
+    not any("e3" in item["event_ids"] and item["kind"] == mm.UNDO_HIDDEN for item in items17),
 )
 labels17 = " | ".join(item["label"] for item in items17)
 check("у скрытия подпись с названием темы", "Переименованная авария" in labels17, labels17)
 check("у объединения подпись с целевой темой", "Отраслевая статистика" in labels17, labels17)
 check("у переноса подпись с текстом сообщения", "Статистика рынка за квартал" in labels17, labels17)
+check("в подписях нет внутренних id (e2, m5)", not any(x in labels17.split() for x in ("e2", "m5")), labels17)
 
 by_kind = {item["kind"]: item for item in items17}
-mm.undo_manual_item(PROJECT, by_kind[mm.UNDO_HIDDEN])
-mm.undo_manual_item(PROJECT, by_kind[mm.UNDO_MERGE])
-mm.undo_manual_item(PROJECT, by_kind[mm.UNDO_MOVE])
+mm.undo_manual_item(PROJECT, by_kind[mm.UNDO_HIDDEN], state17)
+mm.undo_manual_item(PROJECT, by_kind[mm.UNDO_MERGE], state17)
+mm.undo_manual_item(PROJECT, by_kind[mm.UNDO_MOVE], state17)
 state17b = mm.get_manual_state(PROJECT)
 edit_e1 = state17b["event_edits"].get("e1") or {}
 check("после отмены скрытия e1 снова active", edit_e1.get("status") == "active", str(edit_e1))
@@ -651,6 +652,119 @@ check("e1 снова в таблице", "e1" in set(ev17["event_id"].astype(str
 check("m5 вернулся в свой инфоповод e3", set(msg17[msg17["message_id"] == "m5"]["event_id"]) == {"e3"})
 check("e2 снова со своими сообщениями", counts(ev17, "e2") == (2, 1, 1), str(counts(ev17, "e2")))
 check("в списке отмены больше ничего нет", mm.manual_undo_items(state17b) == [], str(mm.manual_undo_items(state17b)))
+
+
+# ---------------------------------------------------------------------------
+# Блок 18. Отмена — по действию, а не по записи; скрытие не пишет чужого
+# ---------------------------------------------------------------------------
+
+print("18. Одно действие — один пункт отмены; скрытие и правки не мешают разъединить")
+# Находки проверки коммита 5fc1add:
+# - строка таблицы часто собрана из нескольких event_id, «Скрыть»/«Объединить»
+#   пишут по записи на каждый, а пункт отмены был на запись — одно «Отменить»
+#   возвращало только часть темы с частью сообщений;
+# - «Скрыть» писал в правку название/описание/теги формы, и отмена скрытия
+#   превращала их в постоянные ручные правки (варианты автосклейки навсегда
+#   получали общий заголовок);
+# - «Сохранить правки» на объединённой строке писал заголовок цели и в правку
+#   источника, и после отмены объединения строки снова складывались по нему;
+# - подписи объединений показывали внутренний id источника.
+# Мутационные проверки: группировать не по op_id → «одно скрытие двух id —
+# один пункт» и «одно объединение — один пункт»; hide_payloads берёт
+# title из формы → «скрытие не пишет название»; edit_target_ids пишет всем →
+# «источнику объединения заголовок не пишется»; отмена объединения не снимает
+# скопированный заголовок → «после отмены источник снова со своим заголовком».
+
+hidden18 = mm.hide_payloads(
+    {"e1", "e2"},
+    {"event_edits": {"e2": {"event_id": "e2", "title": "Ручное имя e2", "_row_key": "event_edit::e2"}}},
+    label="Авария на заводе",
+    op_id="op-hide",
+)
+check(
+    "скрытие не пишет название/описание/теги формы — только статус",
+    hidden18["e1"] == {"event_id": "e1", "status": "hidden", "op_id": "op-hide", "label": "Авария на заводе"},
+    str(hidden18["e1"]),
+)
+check(
+    "прежняя ручная правка названия при скрытии сохраняется",
+    hidden18["e2"].get("title") == "Ручное имя e2" and "_row_key" not in hidden18["e2"],
+    str(hidden18["e2"]),
+)
+merged18 = mm.merge_payloads(
+    {"e1", "e2", "e3"}, "e3", op_id="op-merge", source_title="Авария на заводе", target_title="Отраслевая статистика"
+)
+check("цель в объединение сама с собой не пишется", set(merged18) == {"e1", "e2"}, str(merged18))
+check(
+    "в записи объединения есть заголовки для подписи",
+    merged18["e1"]["source_title"] == "Авария на заводе" and merged18["e1"]["target_title"] == "Отраслевая статистика",
+    str(merged18["e1"]),
+)
+check(
+    "источнику объединения заголовок строки не пишется",
+    mm.edit_target_ids({"e2", "e3"}, {"event_merges": {"e2": "e3"}}) == ["e3"],
+    str(mm.edit_target_ids({"e2", "e3"}, {"event_merges": {"e2": "e3"}})),
+)
+check(
+    "без объединений правку получают все id строки",
+    mm.edit_target_ids({"e1", "e2"}, {"event_merges": {}}) == ["e1", "e2"],
+)
+
+set_manual(
+    [("event_edits", f"event_edit::{eid}", payload) for eid, payload in hidden18.items()]
+    + [("event_merges", f"event_merge::{eid}", payload) for eid, payload in merged18.items()]
+)
+state18 = mm.get_manual_state(PROJECT)
+items18 = mm.manual_undo_items(state18, {"e3": "Отраслевая статистика"})
+hide_items = [i for i in items18 if i["kind"] == mm.UNDO_HIDDEN]
+merge_items = [i for i in items18 if i["kind"] == mm.UNDO_MERGE]
+check("одно скрытие двух id — один пункт", len(hide_items) == 1 and sorted(hide_items[0]["event_ids"]) == ["e1", "e2"], str(hide_items))
+check("одно объединение двух id — один пункт", len(merge_items) == 1 and sorted(merge_items[0]["event_ids"]) == ["e1", "e2"], str(merge_items))
+check(
+    "подпись объединения по заголовкам, без id",
+    merge_items and merge_items[0]["label"] == "«Авария на заводе» объединён с «Отраслевая статистика»",
+    str([i["label"] for i in merge_items]),
+)
+mm.undo_manual_item(PROJECT, hide_items[0], state18)
+state18b = mm.get_manual_state(PROJECT)
+check("после отмены скрытия у e1 без правок строки нет совсем", "e1" not in state18b["event_edits"], str(state18b["event_edits"].get("e1")))
+check(
+    "у e2 осталась только своя правка названия, без служебных полей",
+    state18b["event_edits"].get("e2", {}).get("title") == "Ручное имя e2"
+    and state18b["event_edits"]["e2"].get("status") == "active"
+    and "op_id" not in state18b["event_edits"]["e2"],
+    str(state18b["event_edits"].get("e2")),
+)
+
+# Старые данные: «Сохранить правки» на объединённой строке успел записать
+# источнику заголовок цели. Отмена объединения его снимает.
+set_manual(
+    [
+        ("event_merges", "event_merge::e1", {"source_event_id": "e1", "target_event_id": "e3"}),
+        ("event_edits", "event_edit::e1", {"event_id": "e1", "title": "Отраслевая статистика", "description": "общее описание", "status": "active"}),
+    ]
+)
+state18c = mm.get_manual_state(PROJECT)
+legacy_merge = [i for i in mm.manual_undo_items(state18c, {"e3": "Отраслевая статистика"}) if i["kind"] == mm.UNDO_MERGE]
+check(
+    "старое объединение без заголовков — подпись без id",
+    legacy_merge and "e1" not in legacy_merge[0]["label"] and "Отраслевая статистика" in legacy_merge[0]["label"],
+    str([i["label"] for i in legacy_merge]),
+)
+mm.undo_manual_item(PROJECT, legacy_merge[0], state18c, {"e3": "Отраслевая статистика"})
+state18d = mm.get_manual_state(PROJECT)
+check(
+    "после отмены у источника снят скопированный заголовок цели, описание осталось",
+    "title" not in state18d["event_edits"].get("e1", {})
+    and state18d["event_edits"].get("e1", {}).get("description") == "общее описание",
+    str(state18d["event_edits"].get("e1")),
+)
+ev18, _, _ = mm.apply_manual_overrides(PROJECT, base_events(), base_messages())
+check(
+    "после отмены источник снова со своим заголовком — строки не сложатся",
+    cell(ev18, "e1", "event_title") == "Авария на заводе",
+    str(cell(ev18, "e1", "event_title")),
+)
 
 
 print()

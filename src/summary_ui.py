@@ -52,6 +52,7 @@ def build_auto_summary(
     selected_period_ids: list[str],
     *,
     metrics: dict | None = None,
+    granularity_narrowed: bool = False,
 ) -> str:
     """Читаемый текст саммари без ИИ - пока никто не сгенерировал и не \
 сохранил версию от модели, аналитик и экспорт видят именно это.
@@ -127,7 +128,11 @@ def build_auto_summary(
         blocks.append(_as_subheading(comparison_block(metrics)))
 
     client_overview = build_client_insights_summary(
-        messages, events_agg, periods, selected_period_ids
+        messages,
+        events_agg,
+        periods,
+        selected_period_ids,
+        granularity_narrowed=granularity_narrowed,
     )
     if client_overview:
         blocks.append(client_overview)
@@ -157,12 +162,20 @@ def render_period_summary(
     project_settings: dict[str, Any] | None = None,
     client_preview: bool = False,
     read_only: bool = False,
+    granularity_narrowed: bool = False,
 ) -> None:
     """Unified editable/exportable period summary for all project profiles."""
     st.subheader("Саммари периода")
     key = summary_storage_key(period_ids, profile)
     manual = get_manual(project_id, key)
-    auto_summary = build_auto_summary(messages, events_agg, periods, period_ids, metrics=metrics)
+    auto_summary = build_auto_summary(
+        messages,
+        events_agg,
+        periods,
+        period_ids,
+        metrics=metrics,
+        granularity_narrowed=granularity_narrowed,
+    )
     summary_text = str((manual or {}).get("summary") or "").strip() or auto_summary
     st.markdown(summary_text.replace("\n", "  \n"))
     if str((manual or {}).get("source") or "") == "ai":
