@@ -1,8 +1,9 @@
-"""Приведение сырой выгрузки к канонической таблице сообщений.
+"""Прежний разбор выгрузки — эталон для tests/test_message_normalize.py.
 
-Вынесено из preprocess.py при распиле монолита. normalize_messages — самая
-большая функция бывшего preprocess.py (было 471-829, 359 строк): один проход
-по сырому кадру, который определяет практически весь набор колонок messages.
+Это normalize_messages из src/services/message_normalize.py в том виде, в
+каком он был до ускорения (коммит e4cfe2c): df.apply(row_tags, axis=1),
+обход Series напрямую, микротема из tests/microtopics_reference.py. Заморожен
+намеренно: тест сверяет с ним новый разбор на случайных выгрузках.
 """
 
 from __future__ import annotations
@@ -11,16 +12,15 @@ import pandas as pd
 
 from services.message_kinds import classify_kinds
 
-from .microtopics import classify_microtopic
-from .tag_parsing import (
-    ROW_TAG_TOPIC_FIELDS,
+from microtopics_reference import classify_microtopic
+from services.tag_parsing import (
     infer_display_tags,
     normalize_relevant,
     row_tags,
     split_source_topics,
     unique_labels,
 )
-from .text_cleaning import (
+from services.text_cleaning import (
     chat_key_from_link,
     clean_text,
     get_text_series,
@@ -49,7 +49,7 @@ def is_brand_analytics_dataframe(df: pd.DataFrame) -> bool:
     return False
 
 
-def normalize_messages(
+def normalize_messages_reference(
     raw: pd.DataFrame, tag_cols: list[str]
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     df = raw.copy()
@@ -70,14 +70,9 @@ def normalize_messages(
         aliases=["Распознанный текст", "OCR", "Текст с изображения", "recognized_text"],
     )
 
-    # Колонки идут в циклы списками (.tolist()), а не самими Series: обход
-    # Series на строках pyarrow выдаёт значения по одному и заметно медленнее
-    # одной массовой выгрузки в список. Значения те же.
     text_pairs = [
         clean_text(message, recognized)
-        for message, recognized in zip(
-            message_series.tolist(), recognized_series.tolist()
-        )
+        for message, recognized in zip(message_series, recognized_series)
     ]
     df["text_clean"] = [x[0] for x in text_pairs]
     df["text_source"] = [x[1] for x in text_pairs]
@@ -137,7 +132,7 @@ def normalize_messages(
             prefix="c_",
         )
         for i, (profile, title, link) in enumerate(
-            zip(blog_profile.tolist(), blog_title.tolist(), link_series.tolist())
+            zip(blog_profile, blog_title, link_series)
         )
     ]
 
@@ -156,37 +151,13 @@ def normalize_messages(
             pick_first_non_empty(profile, author, fallback=f"unknown_author_{i}"),
             prefix="a_",
         )
-        for i, (profile, author) in enumerate(
-            zip(author_profile.tolist(), author_name.tolist())
-        )
+        for i, (profile, author) in enumerate(zip(author_profile, author_name))
     ]
 
     is_brand_analytics = is_brand_analytics_dataframe(df)
-    # row_tags читает из строки только колонки тегов и тем через .get(), поэтому
-    # ей хватает словаря с этими колонками. Раньше здесь был df.apply(axis=1):
-    # он собирал pandas-строку из всех ~70 колонок на каждое сообщение.
-    tag_fields = [
-        c
-        for c in dict.fromkeys(list(tag_cols) + list(ROW_TAG_TOPIC_FIELDS))
-        if c in df.columns
-    ]
-    tag_rows = zip(*(df[c].tolist() for c in tag_fields))
-    raw_tag_lists = pd.Series(
-        [
-            row_tags(
-                dict(zip(tag_fields, values)),
-                tag_cols,
-                include_topic_fields=not is_brand_analytics,
-            )
-            for values in tag_rows
-        ]
-        if tag_fields
-        else [
-            row_tags({}, tag_cols, include_topic_fields=not is_brand_analytics)
-            for _ in range(len(df))
-        ],
-        index=df.index,
-        dtype="object",
+    raw_tag_lists = df.apply(
+        lambda r: row_tags(r, tag_cols, include_topic_fields=not is_brand_analytics),
+        axis=1,
     )
 
     if is_brand_analytics:
@@ -239,9 +210,7 @@ def normalize_messages(
             [
                 unique_labels(list(tags) + [main_topic, topics], limit=8)
                 for tags, main_topic, topics in zip(
-                    raw_tag_lists.tolist(),
-                    source_main_topic_series.tolist(),
-                    source_topics_series.tolist(),
+                    raw_tag_lists, source_main_topic_series, source_topics_series
                 )
             ],
             index=df.index,
@@ -267,9 +236,9 @@ def normalize_messages(
     df["microtopic"] = [
         classify_microtopic((text if len(str(text)) > 45 else f"{text} {parent}"), tags)
         for text, parent, tags in zip(
-            df["text_clean"].astype(str).tolist(),
-            parent_context.tolist(),
-            ["|".join(tags) for tags in raw_tag_lists.tolist()],
+            df["text_clean"].astype(str),
+            parent_context,
+            ["|".join(tags) for tags in raw_tag_lists],
         )
     ]
 
@@ -277,16 +246,15 @@ def normalize_messages(
         # Tags are exactly Brand Analytics system/user tags from columns after
         # `Обработано`. Do not append auto-generated semantic tags here.
         tag_lists = [
-            list(tags) if list(tags) else ["Без тега"]
-            for tags in raw_tag_lists.tolist()
+            list(tags) if list(tags) else ["Без тега"] for tags in raw_tag_lists
         ]
     else:
         tag_lists = [
             infer_display_tags(text, microtopic, tags)
             for text, microtopic, tags in zip(
-                df["text_clean"].astype(str).tolist(),
-                df["microtopic"].astype(str).tolist(),
-                raw_tag_lists.tolist(),
+                df["text_clean"].astype(str),
+                df["microtopic"].astype(str),
+                raw_tag_lists,
             )
         ]
     df["tags"] = ["|".join(tags) for tags in tag_lists]

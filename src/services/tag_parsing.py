@@ -244,6 +244,17 @@ def label_microtopic(label: str) -> str:
     return "label_" + stable_hash(clean.lower().replace("ё", "е"), prefix="")[:8]
 
 
+# Колонки тем, из которых row_tags добирает метки, когда include_topic_fields.
+ROW_TAG_TOPIC_FIELDS = (
+    "Основная тема",
+    "Все темы",
+    "Все темы (список)",
+    "Теги",
+    "Категории",
+    "Сюжет",
+)
+
+
 def row_tags(
     row: pd.Series, tag_cols: list[str], include_topic_fields: bool = True
 ) -> list[str]:
@@ -291,14 +302,7 @@ def row_tags(
             add_tag(raw_value or tag)
 
     if include_topic_fields:
-        for col in [
-            "Основная тема",
-            "Все темы",
-            "Все темы (список)",
-            "Теги",
-            "Категории",
-            "Сюжет",
-        ]:
+        for col in ROW_TAG_TOPIC_FIELDS:
             for tag in unique_labels([row.get(col, "")], limit=12):
                 add_tag(tag)
 

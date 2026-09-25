@@ -20,11 +20,25 @@ def stable_hash(value: str, prefix: str = "") -> str:
     return f"{prefix}{digest}" if prefix else digest
 
 
+# normalize_spaces вызывается на каждое поле каждого сообщения — сотни тысяч
+# раз на выгрузку, и почти всегда менять в тексте нечего. Поэтому замена
+# регуляркой идёт, только если ей есть что заменить: «пробелы и табуляции
+# подряд → один пробел» ничего не меняет, когда нет ни табуляции, ни двух
+# пробелов подряд, а «три и больше переводов строки → два» — когда нет трёх
+# подряд. Проверка подстроки на порядок дешевле прохода регулярки, результат
+# тот же на любом тексте.
+_SPACES_RE = re.compile(r"[ \t]+")
+_BLANK_LINES_RE = re.compile(r"\n{3,}")
+
+
 def normalize_spaces(value: str) -> str:
     value = "" if value is None else str(value)
-    value = value.replace("\xa0", " ")
-    value = re.sub(r"[ \t]+", " ", value)
-    value = re.sub(r"\n{3,}", "\n\n", value)
+    if "\xa0" in value:
+        value = value.replace("\xa0", " ")
+    if "\t" in value or "  " in value:
+        value = _SPACES_RE.sub(" ", value)
+    if "\n\n\n" in value:
+        value = _BLANK_LINES_RE.sub("\n\n", value)
     return value.strip()
 
 
