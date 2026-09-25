@@ -43,6 +43,7 @@ python tests/test_except_hygiene.py          # гигиена except: молча
 python tests/test_tag_tier_analytics.py      # аналитика по уровням тегов: own/subtree, покрытие
 python tests/test_ui_smoke.py                # интерфейс: приложение стартует, разделы рисуются
 python tests/test_roles.py                   # роли: что видит зритель/редактор/владелец, клиентский предпросмотр
+python tests/test_email_login.py             # вход по email: код из письма, список доступа, запомненный вход
 ```
 
 Каждый тест печатает список проверок и завершается с ненулевым кодом при провале,
