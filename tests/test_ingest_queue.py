@@ -12,7 +12,12 @@
 - бросать там голый ValueError вместо SourceConfigError → раздел 10;
 - проверять is_active только когда в задаче нет project_id → раздел 11;
 - убрать .strip() ключа в resolve_task_target и get_source → раздел 12;
-- сравнивать ключ через .lower() → раздел 12 (регистр важен, как в PostgREST).
+- сравнивать ключ через .lower() → раздел 12 (регистр важен, как в PostgREST);
+- claim_next_task не фильтрует по проекту → раздел 15, «аналитик альфы не
+  берёт задачи беты»;
+- upsert_source без проверки чужого ключа → раздел 15, «чужой источник не
+  перепривязан»;
+- delete_source без фильтра по проекту → раздел 15, «чужой источник не удалён».
 """
 
 import sys
@@ -429,6 +434,78 @@ check(
     stripped and stripped[0]["source_key"] == "strip-src",
     str(stripped),
 )
+
+print("15. Кнопка раздела берёт только задачи своего проекта")
+# Раньше «Обработать очередь сейчас» в разделе любого проекта забирала первые
+# задачи всей очереди: аналитик одного заказчика обрабатывал выгрузки другого,
+# а сохранение источника с чужим ключом молча перепривязывало его к себе.
+CLIENT.db["platform_ingest_queue"] = []
+CLIENT.db["platform_ingest_sources"] = []
+queue.upsert_source(source_key="alpha-src", project_id="alpha")
+queue.upsert_source(source_key="beta-src", project_id="beta")
+
+
+def enqueue(name, *, project_id=None, source_key=""):
+    return queue.enqueue_task(
+        storage_path=f"inbox/{name}.xlsx",
+        original_filename=f"{name}.xlsx",
+        file_sha256=f"hash-{name}",
+        project_id=project_id,
+        source_key=source_key,
+    )
+
+
+beta_own = enqueue("beta-own", project_id="beta")
+alpha_own = enqueue("alpha-own", project_id="alpha")
+beta_by_source = enqueue("beta-by-source", source_key="beta-src")
+alpha_by_source = enqueue("alpha-by-source", source_key="alpha-src")
+unmapped = enqueue("typo", source_key="alpha-scr")
+
+
+def claim_all(**kwargs):
+    taken = []
+    while True:
+        task = queue.claim_next_task("ui", **kwargs)
+        if not task:
+            return taken
+        taken.append(task["task_id"])
+
+
+alpha_taken = claim_all(project_id="alpha")
+check(
+    "аналитик альфы берёт свои задачи — и с проектом, и по источнику",
+    sorted(alpha_taken) == sorted([alpha_own, alpha_by_source]),
+    str(alpha_taken),
+)
+check("аналитик альфы не берёт задачи беты", beta_own not in alpha_taken and beta_by_source not in alpha_taken)
+check("и ничьи задачи не берёт", unmapped not in alpha_taken)
+owner_taken = claim_all(project_id="beta", include_unmapped=True)
+check(
+    "владелец в разделе беты берёт задачи беты и ничьи",
+    sorted(owner_taken) == sorted([beta_own, beta_by_source, unmapped]),
+    str(owner_taken),
+)
+check("задачи без проекта опознаются по источнику", queue.task_belongs_to({"source_key": "alpha-src"}, "alpha"))
+check("ничья — это незаведённый ключ", queue.task_is_unmapped({"source_key": "alpha-scr"}))
+check("задача с проектом ничьей не бывает", not queue.task_is_unmapped({"project_id": "alpha", "source_key": "x"}))
+
+CLIENT.db["platform_ingest_queue"] = []
+first = enqueue("first", project_id="beta")
+enqueue("second", project_id="alpha")
+worker_task = queue.claim_next_task("worker")
+check("воркер по-прежнему берёт любую задачу, старшую первой", worker_task and worker_task["task_id"] == first)
+
+try:
+    queue.upsert_source(source_key="alpha-src", project_id="beta")
+    check("чужой источник не перепривязан", False, "ошибки не было")
+except queue.SourceKeyTaken:
+    check("чужой источник не перепривязан", queue.get_source("alpha-src")["project_id"] == "alpha")
+queue.upsert_source(source_key="alpha-src", project_id="alpha", is_active=False)
+check("свой источник меняется как раньше", queue.get_source("alpha-src")["is_active"] is False)
+queue.delete_source("alpha-src", project_id="beta")
+check("чужой источник не удалён", queue.get_source("alpha-src") is not None)
+queue.delete_source("alpha-src", project_id="alpha")
+check("свой источник удалён", queue.get_source("alpha-src") is None)
 
 print()
 if failures:

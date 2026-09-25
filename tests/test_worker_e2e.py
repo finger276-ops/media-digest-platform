@@ -278,7 +278,9 @@ ui_task = queue.enqueue_task(
     original_filename="Опечатка из интерфейса.xlsx",
     file_sha256="hash-typo-ui",
 )
-ingest_admin_ui._run_queue_now("tn_project", ARGS.work_dir)
+# Ключ с опечаткой не заведён ни в одном проекте — задача ничья. Такие
+# задачи разбирает кнопка владельца платформы: только он их и видит.
+ingest_admin_ui._run_queue_now("tn_project", ARGS.work_dir, is_admin=True)
 ui_result = queue.get_task(ui_task)
 check(
     "задача сразу в «Ошибке» с одной попыткой",

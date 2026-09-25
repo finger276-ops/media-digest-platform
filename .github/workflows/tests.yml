@@ -160,3 +160,6 @@ jobs:
 
       - name: Коды доступа (уникальность, дубли закрывают вход)
         run: python tests/test_access_codes.py
+
+      - name: Права на страницах (каждая закрывает сама, а не через меню)
+        run: python tests/test_page_access.py

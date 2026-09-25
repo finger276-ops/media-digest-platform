@@ -25,7 +25,7 @@ from services.project_settings import (
     story_build_settings_from_project_settings,
     with_story_build,
 )
-from services.roles import role_rank
+from services.roles import can_change_project_data
 from noise_filter_ui import render_noise_filter_block
 from tag_hierarchy_ui import render_tag_hierarchy_block
 
@@ -254,10 +254,16 @@ def render_upload_page(
     role: str,
     work_dir: str,
     project_settings: dict[str, Any] | None = None,
+    *,
+    read_only: bool,
 ) -> None:
     st.header("Загрузка файла")
-    if role_rank(role) < role_rank("editor"):
-        st.info("Для загрузки файлов нужен доступ редактора или владельца.")
+    if not can_change_project_data(role, read_only=read_only):
+        st.info(
+            "Загрузка закрыта: в демо-проекте ничего менять нельзя."
+            if read_only
+            else "Для загрузки файлов нужен доступ аналитика или владельца."
+        )
         return
 
     render_tag_hierarchy_block(project_id)
@@ -362,10 +368,14 @@ def render_upload_page(
     clear_platform_caches(project_id)
 
 
-def render_period_history(project_id: str, role: str) -> None:
+def render_period_history(project_id: str, role: str, *, read_only: bool) -> None:
     st.header("История периодов")
-    if role_rank(role) < role_rank("editor"):
-        st.info("Для редактирования истории нужен доступ редактора или владельца.")
+    if not can_change_project_data(role, read_only=read_only):
+        st.info(
+            "История закрыта: в демо-проекте ничего менять нельзя."
+            if read_only
+            else "Для редактирования истории нужен доступ аналитика или владельца."
+        )
         return
     periods = list_periods(project_id, include_inactive=True)
     if periods.empty:

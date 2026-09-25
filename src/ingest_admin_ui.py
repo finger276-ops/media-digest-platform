@@ -20,6 +20,7 @@ from metric_cards_ui import metric_card, render_metric_row
 from services import ingest_queue as queue
 from services.cached_store import clear_platform_caches
 from services.ingest import IngestError, file_sha256, ingest_file_bytes
+from services.roles import can_change_project_data
 
 SOURCE_SYSTEM_LABELS = {
     "auto": "Автоопределение",
@@ -50,19 +51,27 @@ def _fmt_dt(value: Any) -> str:
 def _tasks_view(tasks: pd.DataFrame) -> pd.DataFrame:
     if tasks.empty:
         return pd.DataFrame()
+
+    def column(name: str, default: Any = "") -> pd.Series:
+        # tasks.get(name, "") вернул бы строку, и .map на ней падал бы, если
+        # колонки нет: задачи, ещё не обработанные ни разу, без finished_at.
+        if name in tasks.columns:
+            return tasks[name]
+        return pd.Series(default, index=tasks.index)
+
     view = pd.DataFrame(
         {
             "Статус": tasks["status"].map(
                 lambda s: f"{STATUS_ICONS.get(s, '')} {queue.STATUS_LABELS.get(s, s)}"
             ),
-            "Файл": tasks.get("original_filename", ""),
-            "Источник": tasks.get("source_key", ""),
-            "Период": tasks.get("period_name", ""),
-            "Получено": tasks.get("created_at", "").map(_fmt_dt),
-            "Обработано": tasks.get("finished_at", "").map(_fmt_dt),
-            "Попытки": tasks.get("attempts", 0),
-            "Комментарий": tasks.get("error_message", "").astype(str).str.slice(0, 160),
-            "task_id": tasks.get("task_id", ""),
+            "Файл": column("original_filename"),
+            "Источник": column("source_key"),
+            "Период": column("period_name"),
+            "Получено": column("created_at").map(_fmt_dt),
+            "Обработано": column("finished_at").map(_fmt_dt),
+            "Попытки": column("attempts", 0),
+            "Комментарий": column("error_message").fillna("").astype(str).str.slice(0, 160),
+            "task_id": column("task_id"),
         }
     )
     return view
@@ -101,13 +110,21 @@ def _process_task_in_ui(task: dict[str, Any], work_dir: str) -> dict[str, Any]:
     )
 
 
-def _run_queue_now(project_id: str, work_dir: str, limit: int = 5) -> None:
-    """Обработать задачи очереди прямо из интерфейса."""
+def _run_queue_now(
+    project_id: str, work_dir: str, limit: int = 5, *, is_admin: bool
+) -> None:
+    """Обработать задачи очереди прямо из интерфейса.
+
+    Только задачи этого проекта; владелец платформы заодно разбирает ничьи —
+    их в разделе видит только он.
+    """
     worker_id = f"streamlit:{project_id}"
     processed, failed = 0, 0
     progress = st.progress(0.0, text="Обрабатываю очередь...")
     for index in range(limit):
-        task = queue.claim_next_task(worker_id)
+        task = queue.claim_next_task(
+            worker_id, project_id=project_id, include_unmapped=is_admin
+        )
         if not task:
             break
         task_id = str(task.get("task_id"))
@@ -233,15 +250,39 @@ def render_ingest_freshness_block(project_id: str) -> None:
     st.dataframe(view, width="stretch", hide_index=True)
 
 
-def render_ingest_queue_block(project_id: str, work_dir: str) -> None:
+def _visible_orphans(orphan: pd.DataFrame, project_id: str, *, is_admin: bool) -> pd.DataFrame:
+    """Задачи без проекта, которые можно показать в разделе этого проекта.
+
+    Проект такой задачи определяется по её источнику. Своя — видна всем, у
+    кого есть раздел. Задача с незаведённым ключом ничья: её видит только
+    владелец платформы, чтобы завести источник или удалить задачу. Задачи
+    источников других проектов не видны никому, кроме их проекта: раньше
+    аналитик одного заказчика видел файлы и ошибки всех остальных.
+    """
+    sources: dict = {}
+    keep = []
+    for _, row in orphan.iterrows():
+        task = row.to_dict()
+        if queue.task_belongs_to(task, project_id, sources):
+            keep.append(True)
+            continue
+        keep.append(bool(is_admin and queue.task_is_unmapped(task, sources)))
+    return orphan[keep] if keep else orphan.iloc[0:0]
+
+
+def render_ingest_queue_block(project_id: str, work_dir: str, *, is_admin: bool) -> None:
     st.subheader("Очередь автозагрузки")
 
     try:
         tasks = queue.list_tasks(project_id=project_id, limit=100)
-        # Задачи без project_id резолвятся по источнику — показываем и их.
+        # Задачи без project_id относятся к проекту по источнику — показываем
+        # свои (и ничьи — владельцу), но не задачи других проектов.
         pending_by_source = queue.list_tasks(limit=100)
         if not pending_by_source.empty and "project_id" in pending_by_source.columns:
-            orphan = pending_by_source[pending_by_source["project_id"].isna()]
+            orphan = pending_by_source[
+                pending_by_source["project_id"].fillna("").astype(str).str.strip() == ""
+            ]
+            orphan = _visible_orphans(orphan, project_id, is_admin=is_admin)
             if not orphan.empty:
                 tasks = pd.concat([tasks, orphan], ignore_index=True)
     except Exception as exc:  # noqa: BLE001
@@ -276,7 +317,7 @@ def render_ingest_queue_block(project_id: str, work_dir: str) -> None:
     action_cols = st.columns([2, 1, 1])
     with action_cols[0]:
         if st.button("Обработать очередь сейчас", type="primary"):
-            _run_queue_now(project_id, work_dir)
+            _run_queue_now(project_id, work_dir, is_admin=is_admin)
             st.rerun()
     with action_cols[1]:
         if st.button("Обновить"):
@@ -413,7 +454,7 @@ def render_ingest_sources_block(project_id: str, project_name: str) -> None:
                 "Ключ", sources["source_key"].astype(str).tolist(), key="ingest_source_delete"
             )
             if st.button("Удалить"):
-                queue.delete_source(key_to_delete)
+                queue.delete_source(key_to_delete, project_id=project_id)
                 st.success("Источник удален.")
                 st.rerun()
 
@@ -451,8 +492,25 @@ Body: {{
         )
 
 
-def render_ingest_admin_page(project_id: str, project_name: str, work_dir: str) -> None:
+def render_ingest_admin_page(
+    project_id: str,
+    project_name: str,
+    work_dir: str,
+    *,
+    role: str,
+    read_only: bool,
+    is_admin: bool,
+) -> None:
     st.header("Автозагрузка")
+    # Проверка здесь, а не только в меню: страница запускает обработку
+    # выгрузок и меняет источники, а пункт меню — не граница прав.
+    if not can_change_project_data(role, read_only=read_only):
+        st.info(
+            "Автозагрузка закрыта: в демо-проекте ничего менять нельзя."
+            if read_only
+            else "Автозагрузка доступна аналитику проекта и владельцу платформы."
+        )
+        return
     st.caption(
         "Выгрузки Brand Analytics приходят сюда автоматически: n8n забирает файл "
         "из почты, кладет его в хранилище и ставит задачу, платформа обрабатывает "
@@ -462,7 +520,7 @@ def render_ingest_admin_page(project_id: str, project_name: str, work_dir: str) 
     # доставки важнее, чем разобрать уже пришедшие файлы.
     render_ingest_freshness_block(project_id)
     st.divider()
-    render_ingest_queue_block(project_id, work_dir)
+    render_ingest_queue_block(project_id, work_dir, is_admin=is_admin)
     st.divider()
     render_ingest_sources_block(project_id, project_name)
     render_n8n_hint_block(project_id)

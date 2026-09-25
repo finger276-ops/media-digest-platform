@@ -66,6 +66,15 @@ class SourceConfigError(ValueError):
     """
 
 
+class SourceKeyTaken(ValueError):
+    """Ключ источника уже заведён в другом проекте.
+
+    Источник ищется по ключу, и upsert по source_key молча перепривязал бы
+    чужой источник к этому проекту: выгрузки другого заказчика поехали бы
+    сюда. Перенести источник можно, только удалив его в старом проекте.
+    """
+
+
 def make_task_id(seed: str = "") -> str:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
     digest = hashlib.md5(f"{seed}{uuid.uuid4()}".encode("utf-8")).hexdigest()[:8]
@@ -132,6 +141,12 @@ def upsert_source(
     source_key = str(source_key or "").strip()
     if not source_key:
         raise ValueError("Не указан ключ источника автозагрузки.")
+    existing = get_source(source_key)
+    if existing and str(existing.get("project_id") or "") != str(project_id):
+        raise SourceKeyTaken(
+            f"Ключ «{source_key}» уже занят источником другого проекта. "
+            "Придумайте другой ключ или сначала удалите источник там, где он заведён."
+        )
     client = get_supabase_client()
     client.table(SOURCES_TABLE).upsert(
         {
@@ -147,9 +162,13 @@ def upsert_source(
     ).execute()
 
 
-def delete_source(source_key: str) -> None:
+def delete_source(source_key: str, project_id: str | None = None) -> None:
+    """Удалить источник. С project_id — только если он этого проекта."""
     client = get_supabase_client()
-    client.table(SOURCES_TABLE).delete().eq("source_key", str(source_key)).execute()
+    query = client.table(SOURCES_TABLE).delete().eq("source_key", str(source_key))
+    if project_id:
+        query = query.eq("project_id", str(project_id))
+    query.execute()
 
 
 def resolve_task_target(task: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
@@ -308,22 +327,98 @@ def requeue_stale_tasks(minutes: int = STALE_PROCESSING_MINUTES) -> int:
     return len(getattr(resp, "data", None) or [])
 
 
-def claim_next_task(worker_id: str, candidates: int = 10) -> dict[str, Any] | None:
-    """Атомарно захватить следующую задачу.
+# Сколько ожидающих задач без проекта просматривать, отыскивая среди них
+# задачи своего проекта (их проект определяется по ключу источника).
+ORPHAN_SCAN_LIMIT = 200
 
-    Конкурентная безопасность обеспечивается условием `status = 'pending'`
-    в UPDATE: если задачу уже забрал другой воркер, обновление вернет 0 строк.
+
+def task_belongs_to(task: dict[str, Any], project_id: str, sources: dict | None = None) -> bool:
+    """Задача этого проекта: проект указан в ней или следует из её источника.
+
+    sources — кеш «ключ → источник» на время одного прохода, чтобы не ходить
+    в базу за одним и тем же источником на каждую задачу.
     """
-    client = get_supabase_client()
-    resp = (
+    own = str(task.get("project_id") or "").strip()
+    if own:
+        return own == str(project_id)
+    key = str(task.get("source_key") or "").strip()
+    if not key:
+        return False
+    if sources is None:
+        sources = {}
+    if key not in sources:
+        sources[key] = get_source(key)
+    source = sources[key]
+    return bool(source) and str(source.get("project_id") or "") == str(project_id)
+
+
+def task_is_unmapped(task: dict[str, Any], sources: dict | None = None) -> bool:
+    """Ничья задача: ни проекта в ней, ни заведённого источника по ключу."""
+    if str(task.get("project_id") or "").strip():
+        return False
+    key = str(task.get("source_key") or "").strip()
+    if not key:
+        return True
+    if sources is None:
+        sources = {}
+    if key not in sources:
+        sources[key] = get_source(key)
+    return sources[key] is None
+
+
+def _pending_candidates(
+    client, candidates: int, project_id: str | None, include_unmapped: bool
+) -> list[dict[str, Any]]:
+    base = client.table(QUEUE_TABLE).select("*").eq("status", STATUS_PENDING)
+    if not project_id:
+        resp = base.order("created_at").limit(int(candidates)).execute()
+        return list(getattr(resp, "data", None) or [])
+    own = (
         client.table(QUEUE_TABLE)
         .select("*")
         .eq("status", STATUS_PENDING)
+        .eq("project_id", str(project_id))
         .order("created_at")
         .limit(int(candidates))
         .execute()
     )
-    for row in getattr(resp, "data", None) or []:
+    rows = list(getattr(own, "data", None) or [])
+    scan = base.order("created_at").limit(ORPHAN_SCAN_LIMIT).execute()
+    sources: dict[str, Any] = {}
+    for row in getattr(scan, "data", None) or []:
+        if str(row.get("project_id") or "").strip():
+            continue
+        if task_belongs_to(row, project_id, sources) or (
+            include_unmapped and task_is_unmapped(row, sources)
+        ):
+            rows.append(row)
+    rows.sort(key=lambda r: str(r.get("created_at") or ""))
+    return rows[: int(candidates)]
+
+
+def claim_next_task(
+    worker_id: str,
+    candidates: int = 10,
+    *,
+    project_id: str | None = None,
+    include_unmapped: bool = False,
+) -> dict[str, Any] | None:
+    """Атомарно захватить следующую задачу.
+
+    Конкурентная безопасность обеспечивается условием `status = 'pending'`
+    в UPDATE: если задачу уже забрал другой воркер, обновление вернет 0 строк.
+
+    project_id — брать только задачи этого проекта (кнопка «Обработать
+    очередь сейчас» в разделе проекта). Без него — любые, как воркер
+    автозагрузки: раньше кнопка тоже брала любые, и аналитик одного
+    заказчика обрабатывал из своего раздела выгрузки другого.
+
+    include_unmapped — вместе с задачами проекта брать и ничьи (ключ не
+    заведён ни в одном проекте). Это кнопка владельца платформы: такая задача
+    сразу получит понятную ошибку настройки, а не будет ждать воркер.
+    """
+    client = get_supabase_client()
+    for row in _pending_candidates(client, candidates, project_id, include_unmapped):
         task_id = str(row.get("task_id"))
         attempts = int(row.get("attempts") or 0)
         max_attempts = int(row.get("max_attempts") or DEFAULT_MAX_ATTEMPTS)

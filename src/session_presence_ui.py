@@ -115,8 +115,13 @@ def _render_sessions_table(
     )
 
 
-def render_session_presence_page() -> None:
+def render_session_presence_page(*, is_admin: bool) -> None:
     st.header("Сессии")
+    # Проверка здесь, а не только в меню: панель показывает, кто и в каком
+    # проекте сейчас работает, по всем заказчикам сразу.
+    if not is_admin:
+        st.info("Раздел «Сессии» доступен только владельцу платформы.")
+        return
     if st.button("Обновить", key="presence_refresh"):
         st.rerun()
 

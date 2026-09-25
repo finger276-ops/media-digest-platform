@@ -65,7 +65,7 @@ from tag_tier_analytics_ui import render_tier_analytics_block
 from services.observability import report_failure
 from services.perf import perf_block, render_perf_sidebar, reset_perf_events
 from services.formatting import fmt_date, fmt_period
-from services.roles import role_rank
+from services.roles import can_see_error_details, role_rank
 from services.manual_moderation import (
     blocked_title_merges,
     recompute_event_counts,
@@ -477,7 +477,7 @@ def main() -> None:
     if not groups:
         st.info("Выберите проект или войдите как владелец платформы.")
         if is_admin:
-            render_project_manager(projects)
+            render_project_manager(projects, is_admin=True, role="owner")
         return
 
     start_key = "start_section"
@@ -516,9 +516,11 @@ def main() -> None:
         )
     st.sidebar.caption(f"{APP_TITLE} · {APP_VERSION}")
 
-    # Технические подробности ошибки нужны тем, кто может с ними что-то
-    # сделать; заказчику в клиентском виде показывается только сообщение.
-    show_error_details = is_admin or role_rank(role) >= role_rank("editor")
+    # Технические подробности ошибки — только владельцу и аналитику, и не в
+    # демо: см. can_see_error_details.
+    show_error_details = can_see_error_details(
+        role, is_admin=is_admin, read_only=demo_read_only
+    )
 
     # --- страницы, которым не нужны данные периодов ---
     if page in ("Проекты", "Настройки проекта"):
@@ -534,7 +536,10 @@ def main() -> None:
         return
     if page == "Сессии":
         render_section_safely(
-            "Сессии", render_session_presence_page, _details=show_error_details
+            "Сессии",
+            render_session_presence_page,
+            is_admin=is_admin,
+            _details=show_error_details,
         )
         return
     if not project_id:
@@ -548,6 +553,7 @@ def main() -> None:
             role,
             args.work_dir,
             current_project_settings,
+            read_only=demo_read_only,
             _details=show_error_details,
         )
         return
@@ -557,6 +563,7 @@ def main() -> None:
             render_period_history,
             project_id,
             role,
+            read_only=demo_read_only,
             _details=show_error_details,
         )
         return
@@ -567,6 +574,9 @@ def main() -> None:
             project_id,
             project_name,
             args.work_dir,
+            role=role,
+            read_only=demo_read_only,
+            is_admin=is_admin,
             _details=show_error_details,
         )
         return

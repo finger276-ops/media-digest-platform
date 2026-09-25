@@ -76,11 +76,20 @@ def render_project_access(is_admin: bool) -> tuple[str | None, str, pd.DataFrame
         project_id = st.session_state["platform_project_id"]
         role = st.session_state.get("platform_project_role", "viewer")
         project_row = projects[projects["project_id"].astype(str) == str(project_id)]
-        project_name = str(
-            project_row.iloc[0].get("project_name")
-            if not project_row.empty
-            else project_id
-        )
+        if project_row.empty:
+            # Проект скрыли, отправили в архив или удалили, пока вкладка была
+            # открыта: код в него больше не пускает, значит, и открытая сессия
+            # не должна. Раньше доступ оставался до закрытия вкладки, а у
+            # демо-проекта заодно пропадал режим «только чтение» — настройки
+            # скрытого проекта не находились, и демо считалось выключенным.
+            st.session_state.pop("platform_project_id", None)
+            st.session_state.pop("platform_project_role", None)
+            st.sidebar.warning(
+                "Проект больше недоступен: его скрыли или удалили. Войдите "
+                "кодом другого проекта."
+            )
+            return None, "none", projects
+        project_name = str(project_row.iloc[0].get("project_name") or project_id)
         st.sidebar.success(f"Доступ: {project_name} · {role_title(role)}")
         if st.sidebar.button("Сменить проект / выйти"):
             st.session_state.pop("platform_project_id", None)
@@ -103,11 +112,41 @@ def render_project_access(is_admin: bool) -> tuple[str | None, str, pd.DataFrame
     return None, "none", projects
 
 
+def _render_demo_settings(project_id: str, current_settings: dict) -> tuple[bool, bool]:
+    """Блок «Демонстрационный проект». Возвращает (демо включено, обнулить счётчик)."""
+    with st.expander("Демонстрационный проект", expanded=False):
+        demo_mode = st.checkbox(
+            "Тестовый доступ: витрина без правки",
+            value=is_demo_project(current_settings),
+            key=f"demo_mode_{project_id}",
+            help=(
+                "Проект показывают снаружи. Разделы и аналитика видны "
+                "целиком, но менять нельзя ничего: правка описаний, "
+                "саммари и настроек выключается, загрузка новых файлов "
+                "закрыта. Генерация ИИ остаётся, но не больше "
+                f"{DEMO_AI_LIMIT} запусков на проект."
+            ),
+        )
+        used = demo_ai_runs_used(current_settings)
+        st.caption(
+            f"Израсходовано запусков ИИ: {used} из {DEMO_AI_LIMIT}. "
+            "Счётчик не сбрасывается — демо выдаётся многим, и "
+            "обнуление сделало бы лимит бесконечным."
+        )
+        reset_demo_ai = st.checkbox(
+            "Обнулить счётчик запусков ИИ",
+            value=False,
+            key=f"demo_ai_reset_{project_id}",
+            help="Разовое действие владельца платформы, а не автоматика.",
+        )
+    return bool(demo_mode), bool(reset_demo_ai)
+
+
 def render_project_manager(
     projects: pd.DataFrame,
     *,
-    is_admin: bool = True,
-    role: str = "owner",
+    is_admin: bool = False,
+    role: str = "none",
     current_project_id: str | None = None,
 ) -> None:
     """Настройки проектов. Владельцу платформы — все, аналитику — только свой.
@@ -115,7 +154,9 @@ def render_project_manager(
     Проверка роли стоит здесь, а не только в сборке меню. Раньше страница
     полагалась на то, что её пункт просто не попадёт в боковое меню: любая
     будущая правка навигации сразу становилась дырой в правах, а на этой
-    странице лежат коды доступа и необратимое удаление проекта.
+    странице лежат коды доступа и необратимое удаление проекта. По той же
+    причине права по умолчанию — никакие: вызов без явных is_admin и role
+    не получает прав владельца.
 
     «Владелец проекта» в платформе — это тот, у кого код редактора: личности
     у кодов нет, привязать проект к человеку нечем. Поэтому аналитик работает
@@ -480,30 +521,15 @@ def render_project_manager(
                     "Настройки сохраняют подготовленный клиентский вид проекта: стартовый раздел, набор графиков и уровень технических элементов."
                 )
 
-            with st.expander("Демонстрационный проект", expanded=False):
-                demo_mode = st.checkbox(
-                    "Тестовый доступ: витрина без правки",
-                    value=is_demo_project(current_settings),
-                    key=f"demo_mode_{project_id}",
-                    help=(
-                        "Проект показывают снаружи. Разделы и аналитика видны "
-                        "целиком, но менять нельзя ничего: правка описаний, "
-                        "саммари и настроек выключается, загрузка новых файлов "
-                        "закрыта. Генерация ИИ остаётся, но не больше "
-                        f"{DEMO_AI_LIMIT} запусков на проект."
-                    ),
-                )
-                used = demo_ai_runs_used(current_settings)
-                st.caption(
-                    f"Израсходовано запусков ИИ: {used} из {DEMO_AI_LIMIT}. "
-                    "Счётчик не сбрасывается — демо выдаётся многим, и "
-                    "обнуление сделало бы лимит бесконечным."
-                )
-                reset_demo_ai = st.checkbox(
-                    "Обнулить счётчик запусков ИИ",
-                    value=False,
-                    key=f"demo_ai_reset_{project_id}",
-                    help="Разовое действие владельца платформы, а не автоматика.",
+            # Демо-режим и счётчик ИИ — решение владельца платформы: демо
+            # выдаётся посторонним, а обнуление счётчика делает лимит ИИ
+            # бесконечным. Аналитику блок не показывается, и при сохранении
+            # его карточки эти настройки остаются как были.
+            demo_mode = is_demo_project(current_settings)
+            reset_demo_ai = False
+            if is_admin:
+                demo_mode, reset_demo_ai = _render_demo_settings(
+                    project_id, current_settings
                 )
 
             st.caption("Коды доступа заполняйте только если хотите заменить текущие.")
