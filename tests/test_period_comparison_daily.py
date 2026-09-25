@@ -295,6 +295,89 @@ if len(weekly) == 2:
         weekly[1]["messages"] == 5,
         str(weekly[1]),
     )
+    check(
+        "первая неделя охватывает оба края (01.01 и 07.01 есть в данных) - не помечена неполной",
+        weekly[0]["partial"] is False,
+        str(weekly[0]),
+    )
+    check(
+        "вторая неделя обрывается на 10.01, до 14.01 (вс) данных нет - помечена неполной",
+        weekly[1]["partial"] is True and "неполная неделя" in weekly[1]["label"],
+        weekly[1]["label"],
+    )
+    check(
+        "подпись неполной недели называет фактический охват (08.01–10.01), а не весь календарь",
+        weekly[1]["label"] == "08.01–10.01 (неполная неделя)",
+        weekly[1]["label"],
+    )
+
+# Три недели подряд, у СРЕДНЕЙ нет сообщений по понедельникам (её край) - это
+# реальное затишье внутри полной выборки, а не обрезанный край выборки.
+# Средняя неделя не должна помечаться неполной только по краям недели самим
+# по себе: помечать нужно только первую/последнюю неделю ВСЕЙ выборки.
+three_week_rows = []
+for day, n in [
+    ("2024-01-01", 2),  # неделя A: пн-вс полностью
+    ("2024-01-07", 2),
+    ("2024-01-09", 3),  # неделя B (08-14.01): вт, без пн и вс
+    ("2024-01-12", 1),
+    ("2024-01-15", 4),  # неделя C: пн-вс полностью
+    ("2024-01-21", 1),
+]:
+    for i in range(n):
+        three_week_rows.append(
+            {
+                "message_id": f"tw_{day}_m{i}",
+                "datetime": f"{day}T09:00:00",
+                "sentiment": "позитив",
+                "views": 100,
+                "audience": 50,
+                "engagement": 5,
+            }
+        )
+three_weeks = weekly_metrics_for_comparison(pd.DataFrame(three_week_rows))
+check("три недели -> три точки", len(three_weeks) == 3, str(len(three_weeks)))
+if len(three_weeks) == 3:
+    check("первая (край) неделя не помечена неполной", three_weeks[0]["partial"] is False, str(three_weeks[0]))
+    check(
+        "средняя неделя не помечена неполной, хотя не начинается с понедельника",
+        three_weeks[1]["partial"] is False and "неполная" not in three_weeks[1]["label"],
+        three_weeks[1]["label"],
+    )
+    check("последняя (край) неделя не помечена неполной", three_weeks[2]["partial"] is False, str(three_weeks[2]))
+
+# Край выборки может обрезаться и с ДРУГОЙ стороны: неделя заканчивается
+# ровно в воскресенье, но начинается позже понедельника — проверяет, что
+# охват сверяется по обеим границам, а не только по одной.
+tail_week_rows = [
+    {"message_id": "tail_a", "datetime": "2024-01-01T09:00:00", "sentiment": "позитив", "views": 100, "audience": 50, "engagement": 5},
+    {"message_id": "tail_b", "datetime": "2024-01-07T09:00:00", "sentiment": "позитив", "views": 100, "audience": 50, "engagement": 5},
+    {"message_id": "tail_c", "datetime": "2024-01-10T09:00:00", "sentiment": "позитив", "views": 100, "audience": 50, "engagement": 5},
+    {"message_id": "tail_d", "datetime": "2024-01-14T09:00:00", "sentiment": "позитив", "views": 100, "audience": 50, "engagement": 5},
+]
+tail_weeks = weekly_metrics_for_comparison(pd.DataFrame(tail_week_rows))
+if len(tail_weeks) == 2:
+    check(
+        "вторая неделя доходит до воскресенья (14.01), но не до понедельника (08.01) - тоже неполная",
+        tail_weeks[1]["partial"] is True and "10.01–14.01" in tail_weeks[1]["label"],
+        tail_weeks[1]["label"],
+    )
+
+# Полный месяц (данные достают до 1-го и до последнего дня) не должен
+# считаться неполным — граница месяца не «неделя+6 дней», а его настоящий
+# последний день (28-31, разный по месяцам).
+full_month_rows = [
+    {"message_id": "fm_a", "datetime": "2024-01-01T09:00:00", "sentiment": "позитив", "views": 100, "audience": 50, "engagement": 5},
+    {"message_id": "fm_b", "datetime": "2024-01-31T09:00:00", "sentiment": "позитив", "views": 100, "audience": 50, "engagement": 5},
+    {"message_id": "fm_c", "datetime": "2024-02-15T09:00:00", "sentiment": "позитив", "views": 100, "audience": 50, "engagement": 5},
+]
+full_month = monthly_metrics_for_comparison(pd.DataFrame(full_month_rows))
+if len(full_month) == 2:
+    check(
+        "январь с данными на 1-е и 31-е число - полный месяц, не помечен неполным",
+        full_month[0]["partial"] is False and full_month[0]["label"] == "Январь 2024",
+        full_month[0]["label"],
+    )
 
 monthly_rows = []
 for day, n in [("2024-01-05", 2), ("2024-01-20", 3), ("2024-02-10", 4)]:
@@ -313,10 +396,20 @@ monthly_messages = pd.DataFrame(monthly_rows)
 monthly = monthly_metrics_for_comparison(monthly_messages)
 check("два месяца -> две точки", len(monthly) == 2, str(len(monthly)))
 if len(monthly) == 2:
+    # Данные за январь — только 05.01 и 20.01, до 01.01 и после 20.01 в
+    # выборке ничего нет: это край выборки (январь — первый месяц), а не
+    # реальное затишье внутри полного месяца, поэтому подпись честно
+    # называет фактический охват вместо всего календарного января.
     check(
-        "подпись месяца - название по-русски и год (Январь 2024)",
-        monthly[0]["label"] == "Январь 2024",
+        "подпись месяца - название по-русски, год и честный охват (неполный январь)",
+        monthly[0]["label"] == "Январь 2024 (неполный месяц: 05.01–20.01)",
         monthly[0]["label"],
+    )
+    check("январь помечен неполным", monthly[0]["partial"] is True, str(monthly[0]))
+    check(
+        "февраль (последний месяц выборки, данные только 10.02) тоже помечен неполным",
+        monthly[1]["partial"] is True and "неполный месяц" in monthly[1]["label"],
+        monthly[1]["label"],
     )
     check(
         "январь объединил оба дня (05.01 и 20.01): 2+3=5",

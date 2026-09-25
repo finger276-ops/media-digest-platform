@@ -199,13 +199,42 @@ def _bucket_id(bucket_start: pd.Timestamp, granularity: str) -> str:
     return bucket_start.strftime("%Y-%m-%d")
 
 
-def _bucket_label(bucket_start: pd.Timestamp, granularity: str) -> str:
+def _bucket_end(bucket_start: pd.Timestamp, granularity: str) -> pd.Timestamp:
+    if granularity == "week":
+        return bucket_start + pd.Timedelta(days=6)
+    if granularity == "month":
+        return bucket_start + pd.offsets.MonthEnd(0)
+    return bucket_start
+
+
+def _bucket_label(
+    bucket_start: pd.Timestamp,
+    granularity: str,
+    *,
+    actual_start: pd.Timestamp | None = None,
+    actual_end: pd.Timestamp | None = None,
+) -> str:
+    """Подпись бакета. actual_start/actual_end — реальный охват датами внутри
+    бакета; передаются, только когда он меньше календарной недели/месяца (см.
+    _bucketed_metrics), и тогда подпись честно называет фактические границы,
+    а не весь календарный срок, которого в выборке нет."""
     if granularity == "week":
         end = bucket_start + pd.Timedelta(days=6)
+        if actual_start is not None and actual_end is not None:
+            return (
+                f"{actual_start.strftime('%d.%m')}–{actual_end.strftime('%d.%m')} "
+                "(неполная неделя)"
+            )
         return f"{bucket_start.strftime('%d.%m')}–{end.strftime('%d.%m')}"
     if granularity == "month":
         name = _MONTH_NAMES_RU.get(bucket_start.month, bucket_start.strftime("%m"))
-        return f"{name} {bucket_start.year}"
+        label = f"{name} {bucket_start.year}"
+        if actual_start is not None and actual_end is not None:
+            return (
+                f"{label} (неполный месяц: {actual_start.strftime('%d.%m')}–"
+                f"{actual_end.strftime('%d.%m')})"
+            )
+        return label
     return bucket_start.strftime("%d.%m")
 
 
@@ -224,17 +253,41 @@ def _bucketed_metrics(
     if len(buckets) < min_buckets:
         return []
 
+    # Неделя/месяц на краю выборки часто попадает в неё не целиком: сообщения
+    # выбраны с 23.04, а неделя формально начинается с понедельника 21.04.
+    # Подпись «21.04–27.04» тогда обещает полную неделю, которой в данных
+    # нет, а сравнение с соседней ПОЛНОЙ неделей выглядит как провал или
+    # взлёт, которого не было. Честность нужна только на краях: если внутри
+    # выборки неделя тихая только по вторникам, это реальное затишье, а не
+    # обрезанный край, — такие дни просто останутся нулём на графике.
+    day_dates = pd.to_datetime(work["datetime"], errors="coerce").dt.floor("D")
     result: list[dict[str, Any]] = []
-    for bucket in buckets:
-        subset = work[work["_bucket"] == bucket]
+    for index, bucket in enumerate(buckets):
+        mask = work["_bucket"] == bucket
+        subset = work[mask]
         metrics = overview_metrics(subset)
         sent = metrics.get("sentiment", {})
         total = max(1, int(sent.get("total", 0) or 0))
         bucket_ts = pd.Timestamp(bucket)
+        actual_start = actual_end = None
+        is_edge = granularity in ("week", "month") and index in (0, len(buckets) - 1)
+        if is_edge:
+            bucket_end = _bucket_end(bucket_ts, granularity)
+            covered = day_dates[mask.to_numpy()]
+            reaches_start = bool((covered == bucket_ts).any())
+            reaches_end = bool((covered == bucket_end).any())
+            if not (reaches_start and reaches_end):
+                actual_start, actual_end = covered.min(), covered.max()
         metrics.update(
             {
                 "period_id": _bucket_id(bucket_ts, granularity),
-                "label": _bucket_label(bucket_ts, granularity),
+                "label": _bucket_label(
+                    bucket_ts,
+                    granularity,
+                    actual_start=actual_start,
+                    actual_end=actual_end,
+                ),
+                "partial": actual_start is not None,
                 "positive_share": (
                     float(sent.get("positive", 0) or 0) / total if total else 0.0
                 ),
@@ -589,8 +642,14 @@ def comparison_visual_rows(comparison: list[dict[str, Any]]) -> pd.DataFrame:
                 "Нейтрал": int(sent.get("neutral", 0) or 0),
                 "Негатив": int(sent.get("negative", 0) or 0),
                 # Числа не трогаем (NaN дал бы «nan%» в подписях): точки без
-                # разметки убирает с графиков тональности сам экран.
-                "Тональность размечена": not sentiment_unmarked(sent),
+                # разметки убирает с графиков тональности сам экран. Точка без
+                # единого сообщения — тоже не «размечена»: sentiment_unmarked
+                # сама по себе считает пустой период измеренным нулём (это
+                # верно для карточек, где 0 периода — законный ноль), но доля
+                # 0/0 для круговой и линии тональности была бы выдуманной
+                # «Позитив 0 %, Нейтрал 0 %», а не честным «данных нет».
+                "Тональность размечена": bool(int(sent.get("total", 0) or 0))
+                and not sentiment_unmarked(sent),
             }
         )
     return pd.DataFrame(rows)

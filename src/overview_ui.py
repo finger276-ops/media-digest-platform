@@ -288,15 +288,64 @@ def _render_value_distribution_donut(
             )
 
 
+def _fill_daily_chart_gaps(comparison: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Дни без единого упоминания — нулевая точка на графике, а не разрыв.
+
+    daily_metrics_for_comparison строит бакет, только если в нём есть хоть
+    одно сообщение (см. services.period_comparison._bucketed_metrics), поэтому
+    тихий день молча выпадал из последовательности: 5, 0, 5 сообщений за три
+    дня превращались в точки только для первого и третьего, и линия рисовала
+    ровный переход между ними, как будто ничего не менялось. Действует только
+    на копию для графиков — сравнительная таблица и карточка изменения к
+    прошлому периоду по-прежнему берут исходную последовательность, поэтому
+    Δ между соседними НАСТОЯЩИМИ точками не трогается.
+    """
+    if len(comparison) < 2:
+        return comparison
+    try:
+        dates = [pd.Timestamp(item["period_id"]) for item in comparison]
+    except (KeyError, ValueError, TypeError):
+        return comparison
+    # Гранулярность день даёт period_id вида "YYYY-MM-DD"; у недели/месяца
+    # другой формат ("YYYY-MM" или составной), и pd.Timestamp на нём либо
+    # упадёт (перехвачено выше), либо даст даты не по дням — тогда упорядочим
+    # и на всякий случай подтвердим шагом ровно в сутки между соседями.
+    if any(pd.isna(d) for d in dates) or list(dates) != sorted(dates):
+        return comparison
+    full_range = pd.date_range(dates[0], dates[-1], freq="D")
+    if len(full_range) <= len(dates):
+        return comparison  # пропусков нет, дни и так идут подряд
+    by_date = dict(zip(dates, comparison))
+    empty_metrics = overview_metrics(pd.DataFrame())
+    filled: list[dict[str, Any]] = []
+    for day in full_range:
+        item = by_date.get(day)
+        if item is None:
+            item = {
+                **empty_metrics,
+                "period_id": day.strftime("%Y-%m-%d"),
+                "label": day.strftime("%d.%m"),
+                "positive_share": 0.0,
+                "neutral_share": 0.0,
+                "negative_share": 0.0,
+            }
+        filled.append(item)
+    return filled
+
+
 def render_period_comparison_charts(
     comparison: list[dict[str, Any]],
     *,
+    granularity: str = "day",
     label_settings: dict[str, Any] | None = None,
     visible_blocks_default: list[str] | None = None,
 ) -> None:
     if not comparison:
         return
-    chart_df = comparison_visual_rows(comparison)
+    chart_comparison = (
+        _fill_daily_chart_gaps(comparison) if granularity == "day" else comparison
+    )
+    chart_df = comparison_visual_rows(chart_comparison)
     if chart_df.empty:
         return
 
@@ -836,6 +885,7 @@ def render_period_comparison_metrics(
 
     render_period_comparison_charts(
         comparison,
+        granularity=granularity,
         label_settings=chart_label_settings,
         visible_blocks_default=comparison_visible_charts,
     )

@@ -29,8 +29,11 @@ for _p in (REPO / "src", REPO / "tests"):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
+import pandas as pd  # noqa: E402
+
 from metric_cards_ui import DELTA_INVERSE, DELTA_NEUTRAL, DELTA_NORMAL  # noqa: E402
-from overview_ui import _tone_cards  # noqa: E402
+from overview_ui import _fill_daily_chart_gaps, _tone_cards  # noqa: E402
+from services.period_comparison import comparison_visual_rows  # noqa: E402
 
 failures = []
 
@@ -72,8 +75,76 @@ check(
     str([c["delta"] for c in _tone_cards(sent_now, None)]),
 )
 
+def _day_point(day, messages, positive=0, negative=0):
+    total = positive + negative
+    return {
+        "period_id": day,
+        "label": pd.Timestamp(day).strftime("%d.%m"),
+        "messages": messages,
+        "audience": messages * 100,
+        "reach": messages * 200,
+        "engagement": messages * 10,
+        "sentiment": {
+            "positive": positive,
+            "neutral": max(0, total - positive - negative),
+            "negative": negative,
+            "total": total,
+            "has_markup": bool(total),
+        },
+        "positive_share": positive / total if total else 0.0,
+        "neutral_share": 0.0,
+        "negative_share": negative / total if total else 0.0,
+    }
+
+
+print("2. Тихий день не выпадает из графика, а становится нулевой точкой")
+# daily_metrics_for_comparison строит бакет, только если в нём есть хоть одно
+# сообщение — тихий день молча пропадал из последовательности, и линия на
+# графике рисовала ровный переход между соседними днями, будто ничего не
+# менялось. Реальный случай из проверки: 5, 0, 5 сообщений за три дня подряд
+# оставляли на графике только две точки.
+gap = [
+    _day_point("2026-04-27", 5, positive=5),
+    _day_point("2026-04-29", 5, positive=5),
+]
+filled = _fill_daily_chart_gaps(gap)
+check("тихий день добавлен - три точки вместо двух", len(filled) == 3, str(len(filled)))
+if len(filled) == 3:
+    check("порядок дат по возрастанию", [p["period_id"] for p in filled] == ["2026-04-27", "2026-04-28", "2026-04-29"], str([p["period_id"] for p in filled]))
+    check("вставленный день пустой (0 сообщений)", filled[1]["messages"] == 0, str(filled[1]))
+    check("подпись вставленного дня — просто дата, без выдумок", filled[1]["label"] == "28.04", filled[1]["label"])
+    check("настоящие дни не тронуты", filled[0] is gap[0] and filled[2] is gap[1])
+
+check("без пропусков список не меняется (та же последовательность)", _fill_daily_chart_gaps([gap[0], gap[0]]) == [gap[0], gap[0]])
+check("меньше двух точек - как есть", _fill_daily_chart_gaps([gap[0]]) == [gap[0]])
+check(
+    "period_id не похож на дату (сработал откат на периоды целиком) - как есть, без исключения",
+    _fill_daily_chart_gaps([{"period_id": "p1"}, {"period_id": "p2"}]) == [{"period_id": "p1"}, {"period_id": "p2"}],
+)
+
+print("3. День без единого сообщения не попадает в круговую/линию тональности как «размечен»")
+# sentiment_unmarked считает пустой период измеренным нулём (это верно для
+# карточек: 0 периода — законный ноль), но для доли 0/0 в тональности это
+# дало бы выдуманные «Позитив 0%, Нейтрал 0%, Негатив 0%» вместо «данных нет».
+visual = comparison_visual_rows(filled)
+check(
+    "у вставленного дня тональность не считается размеченной",
+    not bool(visual.iloc[1]["Тональность размечена"]),
+    str(visual.iloc[1].to_dict()),
+)
+check(
+    "у настоящих дней тональность по-прежнему размечена",
+    bool(visual.iloc[0]["Тональность размечена"]) and bool(visual.iloc[2]["Тональность размечена"]),
+    str(visual[["Тональность размечена"]].to_dict()),
+)
+check(
+    "число сообщений вставленного дня — 0, а не выдуманное",
+    int(visual.iloc[1]["Сообщения"]) == 0,
+    str(visual.iloc[1]["Сообщения"]),
+)
+
 print()
 if failures:
     print(f"ПРОВАЛЕНО: {len(failures)} → {failures}")
     raise SystemExit(1)
-print("Цвет карточек тональности зависит от направления, а не только от знака.")
+print("Цвет карточек тональности и заполнение тихих дней на графике — на месте.")
