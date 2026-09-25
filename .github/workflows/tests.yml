@@ -44,6 +44,9 @@ jobs:
       - name: Контракт распила preprocess.py (ре-экспорт, отсутствие циклов)
         run: python tests/test_preprocess_split.py
 
+      - name: Сборка обсуждений (совпадает с прежней, быстрее)
+        run: python tests/test_discussion_build.py
+
       - name: Инструмент нагрузочного прогона (генератор синтетики, измеритель)
         run: python tests/test_loadtest_pipeline.py
 

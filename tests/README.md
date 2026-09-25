@@ -11,6 +11,7 @@ python tests/test_import_adapters.py         # разбор выгрузок: ф
 python tests/test_import_report.py           # диагностика импорта: что прочитано, что не понято
 python tests/test_preprocess.py              # обработка: микротемы, заголовки инфоповодов, сборка таблиц
 python tests/test_preprocess_split.py        # контракт распила preprocess.py: ре-экспорт, отсутствие циклов
+python tests/test_discussion_build.py        # сборка обсуждений: совпадает с прежней реализацией до байта, быстрее
 python tests/test_loadtest_pipeline.py       # инструмент нагрузочного прогона: генератор синтетики, измеритель
 python tests/test_message_kinds.py           # природа сообщения: отзыв, комментарий, репост, публикация
 python tests/test_story_recovery.py          # восстановление сюжетов: наследование и кластеризация
