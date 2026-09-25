@@ -17,6 +17,7 @@ from metric_cards_ui import metric_card, render_metric_row
 from services.metrics_compute import format_int, sentiment_unmarked
 from services.reviews import (
     LOW_RATING,
+    business_reply_rows,
     complaints,
     praise_phrases,
     review_overview,
@@ -29,6 +30,33 @@ from services.reviews import (
 MAX_COMPLAINTS_SHOWN = 60
 MAX_PRODUCTS_SHOWN = 25
 MAX_REVIEWS_SHOWN = 100
+MAX_REPLIES_SHOWN = 100
+
+
+def _render_business_replies(messages: pd.DataFrame) -> None:
+    """Ответы продавцов и разработчиков — отдельно от отзывов покупателей."""
+    rows = business_reply_rows(messages)
+    if rows.empty:
+        return
+    st.divider()
+    st.markdown(f"**Ответы продавцов на отзывы ({format_int(len(rows))})**")
+    st.caption(
+        "Это ответы продавцов и разработчиков, а не мнения покупателей, поэтому "
+        "в счёт отзывов, среднюю оценку и претензии они не входят. Отзыв, на "
+        "который дан ответ, в выгрузке может отсутствовать, поэтому долю "
+        "отзывов с ответом платформа не считает."
+    )
+    st.dataframe(
+        rows.head(MAX_REPLIES_SHOWN),
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "Ссылка": st.column_config.LinkColumn("Ссылка", display_text="Открыть"),
+            "Ответ": st.column_config.TextColumn("Ответ", width="large"),
+        },
+    )
+    if len(rows) > MAX_REPLIES_SHOWN:
+        st.caption(f"Показаны первые {MAX_REPLIES_SHOWN} из {len(rows)}.")
 
 
 def _rating_bar(counts: dict[int, int], total: int) -> None:
@@ -54,7 +82,16 @@ def render_reviews(messages: pd.DataFrame) -> None:
     st.subheader("Отзывы о товаре")
 
     reviews = select_reviews(messages)
+    overview = review_overview(messages)
+    replies = int(overview["replies"])
     if reviews.empty:
+        if replies:
+            st.info(
+                "За выбранный период отзывов покупателей не найдено — есть только "
+                "ответы продавцов на отзывы. Они собраны ниже."
+            )
+            _render_business_replies(messages)
+            return
         st.info(
             "За выбранный период отзывов не найдено. Раздел наполняется "
             "сообщениями с площадок отзывов и маркетплейсов — их отмечает "
@@ -62,7 +99,6 @@ def render_reviews(messages: pd.DataFrame) -> None:
         )
         return
 
-    overview = review_overview(messages)
     total = int(overview["reviews"])
     rating_avg = overview["rating_avg"]
     # Претензии отбираются по оценке или по негативной тональности. Если нет
@@ -101,6 +137,11 @@ def render_reviews(messages: pd.DataFrame) -> None:
             metric_card("Товаров", format_int(int(overview["products"]))),
         ]
     )
+    if replies:
+        st.caption(
+            f"Ответы продавцов на отзывы ({format_int(replies)}) в эти цифры не "
+            "входят — они собраны отдельно внизу раздела."
+        )
 
     # Прочерк вместо средней оценки выглядит как поломка, хотя означает всего
     # лишь «в выгрузке нет такой колонки». Раз уж платформа отказывается
@@ -204,19 +245,21 @@ def render_reviews(messages: pd.DataFrame) -> None:
     products = reviews_by_product(messages)
     if products.empty:
         st.caption("Товар в отзывах не указан.")
-        return
-    if no_basis and "Претензий" in products.columns:
-        products = products.assign(Претензий="—")
-    st.dataframe(
-        products.head(MAX_PRODUCTS_SHOWN),
-        hide_index=True,
-        width="stretch",
-        column_config={
-            "Средняя оценка": st.column_config.NumberColumn(format="%.2f"),
-        },
-    )
-    if len(products) > MAX_PRODUCTS_SHOWN:
-        st.caption(
-            f"Показаны {MAX_PRODUCTS_SHOWN} товаров из {len(products)} — "
-            "сначала те, где больше претензий."
+    else:
+        if no_basis and "Претензий" in products.columns:
+            products = products.assign(Претензий="—")
+        st.dataframe(
+            products.head(MAX_PRODUCTS_SHOWN),
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "Средняя оценка": st.column_config.NumberColumn(format="%.2f"),
+            },
         )
+        if len(products) > MAX_PRODUCTS_SHOWN:
+            st.caption(
+                f"Показаны {MAX_PRODUCTS_SHOWN} товаров из {len(products)} — "
+                "сначала те, где больше претензий."
+            )
+
+    _render_business_replies(messages)

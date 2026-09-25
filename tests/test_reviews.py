@@ -21,6 +21,7 @@ import pandas as pd  # noqa: E402
 
 from services.reviews import (  # noqa: E402
     _clean_medialogia_title,
+    business_reply_rows,
     complaints,
     parse_review,
     parse_reviews,
@@ -29,6 +30,7 @@ from services.reviews import (  # noqa: E402
     review_overview,
     review_rows,
     reviews_by_product,
+    select_business_replies,
     select_reviews,
 )
 
@@ -333,9 +335,9 @@ medialogia_period = pd.DataFrame(
             sentiment="негативная",
         ),
         review(
-            "Спасибо за отзыв!",
+            "Всё работает",
             rating="5",
-            title="Ответ на отзыв о Winline: ставки на спорт Оценка: 5 из 5 Спасибо за отзыв!",
+            title="Отзыв о Winline: ставки на спорт Оценка: 5 из 5 Всё работает",
         ),
     ]
 )
@@ -355,6 +357,334 @@ check(
     set(review_rows(medialogia_period)["Товар"])
     == {"Фонбет – ставки на спорт", "Winline: ставки на спорт"},
     str(review_rows(medialogia_period)["Товар"].tolist()),
+)
+
+print("11. Ответы продавцов и разработчиков — не отзывы покупателей")
+# В выгрузке Медиалогии по букмекерам 70 «отзывов» из 122 оказались ответами
+# продавцов и разработчиков: раздел показывал 122 отзыва и 56 товаров вместо 52
+# и 20, а три ответа поддержки с негативной разметкой попадали в претензии.
+# Мутационные проверки: без признака по типу роняются «Ответ» и «Answer»; без
+# признака по заголовку — «ответ с типом Комментарий»; \b вместо явного конца
+# слова — все проверки по кириллице (в pandas 3 это pyarrow, а там \b латинский);
+# без конца слова вообще — «Ответственный».
+
+
+def reply(text, *, message_type="Ответ", title="Ответ на отзыв о Гибкая черепица 3м2",
+          sentiment="нейтральная", author="Продавец"):
+    row = review(text, title=title, sentiment=sentiment)
+    row.update({"message_type": message_type, "author": author})
+    return row
+
+
+replies_period = pd.DataFrame(
+    [
+        review("Недостатки: Пришло в рваном пакете", rating="1", sentiment="негативная"),
+        review("Плюсы товара: качество", rating="5", title="Мягкая кровля для беседки"),
+        # Ответ поддержки с негативной разметкой: раньше он становился претензией.
+        reply("Сожалеем, что пришлось столкнуться с подобным", sentiment="негативная",
+              title="Ответ на отзыв о Кровля Про"),
+        reply("Спасибо за отзыв!", message_type="Answer", title="Кровля Про"),
+        # Только тип, заголовок обычный: так ответ узнаётся лишь по кириллице.
+        reply("Благодарим за выбор", message_type="Ответ", title="Черепица Люкс"),
+        # Тип не заполнен как надо, но заголовок выдаёт ответ.
+        reply("Рады, что понравилось", message_type="Комментарий"),
+        # Похоже по началу, но это не ответ.
+        review("Ответственный продавец, всё пришло", rating="5", title="Гвозди кровельные")
+        | {"message_type": "Ответственный отзыв"},
+        post("Новость рынка кровли"),
+    ]
+)
+ov = review_overview(replies_period)
+check("в счёт отзывов идут только покупатели", ov["reviews"] == 3, str(ov))
+check("ответы посчитаны отдельно", ov["replies"] == 4, str(ov))
+check(
+    "ответ поддержки с негативом — не претензия",
+    ov["negative"] == 1 and len(complaints(replies_period)) == 1,
+    str(complaints(replies_period).to_dict("records")),
+)
+check(
+    "товар из ответа не добавляет товаров в разрез",
+    ov["products"] == 3 and "Кровля Про" not in set(reviews_by_product(replies_period)["Товар"]),
+    str(reviews_by_product(replies_period).to_dict("records")),
+)
+check("в общем списке отзывов ответов нет", len(review_rows(replies_period)) == 3)
+check(
+    "«Ответственный …» — не ответ",
+    "Гвозди кровельные" in set(review_rows(replies_period)["Товар"]),
+    str(review_rows(replies_period)["Товар"].tolist()),
+)
+check(
+    "ответы выделены целиком: по типу «Ответ», «Answer» и по заголовку",
+    len(select_business_replies(replies_period)) == 4,
+    str(select_business_replies(replies_period)[["message_type", "title"]].to_dict("records")),
+)
+reply_rows = business_reply_rows(replies_period)
+check(
+    "в списке ответов видно, кто ответил, товар и сам ответ",
+    list(reply_rows.columns) == ["Кто ответил", "Товар", "Ответ", "Дата", "Ссылка"]
+    and reply_rows.iloc[0]["Кто ответил"] == "Продавец"
+    and reply_rows.iloc[0]["Товар"] == "Кровля Про"
+    and reply_rows.iloc[0]["Ответ"] == "Сожалеем, что пришлось столкнуться с подобным",
+    str(reply_rows.to_dict("records")),
+)
+only_replies = pd.DataFrame([reply("Спасибо за отзыв!"), post("Новость")])
+check(
+    "период только с ответами: отзывов ноль, ответы видны",
+    select_reviews(only_replies).empty
+    and review_overview(only_replies)["reviews"] == 0
+    and review_overview(only_replies)["replies"] == 1,
+    str(review_overview(only_replies)),
+)
+check("без ответов список ответов пустой", business_reply_rows(period).empty)
+
+print("12. Шапка Медиалогии не съедает текст отзыва")
+# Медиалогия начинает текст отзыва из магазина приложений шапкой: «Отзыв о X»,
+# «Оценка: N из 5» — отдельными строками. Заголовок — это та же шапка вместе с
+# текстом в одну строку, и срезание заголовка с начала текста стирало отзыв
+# целиком: в выгрузке по букмекерам пустыми были 31 отзыв из 52 и 7 претензий
+# из 11. Мутационные проверки: без разбора шапки роняются «текст отзыва» и
+# «претензия»; без пропуска строки с оценкой — «строка с оценкой не в тексте»;
+# товар из заголовка вместо первой строки — «товар ответа из первой строки».
+rustore = pd.DataFrame(
+    [
+        review(
+            "Отзыв о Фонбет – ставки на спорт\nОценка: 1 из 5\nНе загружается видео с матча КХЛ!",
+            rating="1",
+            title="Отзыв о Фонбет – ставки на спорт Оценка: 1 из 5 Не загружается видео с матча КХЛ!",
+            sentiment="негативная",
+        ),
+        review(
+            "Отзыв о Фонбет – ставки на спорт\nОценка: 5 из 5",
+            rating="5",
+            title="Отзыв о Фонбет – ставки на спорт Оценка: 5 из 5",
+        ),
+        reply(
+            "Ответ на отзыв о BETBOOM — ставки на спорт\nПривет! Напиши, пожалуйста, на почту",
+            title="Ответ на отзыв о BETBOOM — ставки на спорт Привет! Напиши, пожалуйста, на почту",
+            author="BETBOOM — ставки на спорт",
+        ),
+    ]
+)
+rows12 = review_rows(rustore)
+check(
+    "текст отзыва на месте",
+    "Не загружается видео с матча КХЛ!" in set(rows12["Отзыв"]),
+    str(rows12["Отзыв"].tolist()),
+)
+check(
+    "строка с оценкой не в тексте",
+    not any("Оценка:" in str(t) for t in rows12["Отзыв"]),
+    str(rows12["Отзыв"].tolist()),
+)
+check(
+    "отзыв из одной оценки остаётся без текста, а не с шапкой",
+    "" in set(rows12["Отзыв"]),
+    str(rows12["Отзыв"].tolist()),
+)
+claims12 = complaints(rustore)
+check(
+    "претензия не пустая",
+    len(claims12) == 1 and claims12.iloc[0]["Претензия"] == "Не загружается видео с матча КХЛ!",
+    str(claims12.to_dict("records")),
+)
+rr12 = business_reply_rows(rustore)
+check(
+    "товар ответа из первой строки, а не весь заголовок",
+    len(rr12) == 1 and rr12.iloc[0]["Товар"] == "BETBOOM — ставки на спорт",
+    str(rr12.to_dict("records")),
+)
+check(
+    "текст ответа без шапки",
+    len(rr12) == 1 and rr12.iloc[0]["Ответ"] == "Привет! Напиши, пожалуйста, на почту",
+    str(rr12.to_dict("records")),
+)
+inline = pd.DataFrame(
+    [
+        review(
+            "Отзыв о Фонбет – ставки на спорт Оценка: 2 из 5 Вылетает при входе",
+            rating="2",
+            title="Отзыв о Фонбет – ставки на спорт Оценка: 2 из 5 Вылетает при входе",
+        )
+    ]
+)
+check(
+    "шапка в одну строку (переносы потерялись) тоже срезается",
+    review_rows(inline).iloc[0]["Отзыв"] == "Вылетает при входе",
+    str(review_rows(inline).to_dict("records")),
+)
+
+print("13. Ответы в Brand Analytics, App Store и крайние случаи шапки")
+# Brand Analytics ставит ответу продавца тот же тип «Комментарий», что и отзыву:
+# в выгрузке Knauf так пришли 598 «отзывов» из 1208. На Wildberries автор —
+# «Ответ представителя», на Озоне заголовок «Комментарий к отзыву о …» или
+# «Ответ на вопрос о "…"...». Заголовок BA приклеен к тексту первой строкой.
+# Мутационные проверки: без признака по автору роняется «WB»; без новых
+# заголовков — «Озон»; без снятия кавычек — «товар без кавычек»; без
+# подтверждения шапки — «Отзыв о доставке»; без заголовка-фразы App Store —
+# «Кидалово в тексте»; без запасного пути для ответа в одну строку — «ответ в
+# одну строку»; без хвоста « - ответ» — «карты».
+ba = pd.DataFrame(
+    [
+        reply(
+            "ТЕХНОНИКОЛЬ / Утеплитель LOGICPIR 30мм\nЗдравствуйте! Спасибо за отзыв.",
+            message_type="Комментарий",
+            title="ТЕХНОНИКОЛЬ / Утеплитель LOGICPIR 30мм",
+            author="Ответ представителя",
+        ),
+        reply(
+            "Комментарий к отзыву о Утеплитель Vetonit 50 мм\nДобрый день! Благодарим за отзыв",
+            message_type="Комментарий",
+            title="Комментарий к отзыву о Утеплитель Vetonit 50 мм",
+            author="Ozon.ru - Онлайн-мегамаркет",
+        ),
+        reply(
+            'Ответ на вопрос о "Техноплекс 30 мм (12 упаковок)"...\nЗдравствуйте, изготовлен из XPS',
+            message_type="Комментарий",
+            title='Ответ на вопрос о "Техноплекс 30 мм (12 упаковок)"...',
+            author="Ozon.ru - Онлайн-мегамаркет",
+        ),
+        review(
+            "ТЕХНОНИКОЛЬ / Утеплитель LOGICPIR 30мм\nНедостатки: крошится",
+            rating="2",
+            title="ТЕХНОНИКОЛЬ / Утеплитель LOGICPIR 30мм",
+            sentiment="негативная",
+        ),
+    ]
+)
+ba_replies = business_reply_rows(ba)
+check("WB: «Ответ представителя» — ответ", len(select_reviews(ba)) == 1, str(select_reviews(ba)[["author", "title"]].to_dict("records")))
+check(
+    "Озон: «Комментарий к отзыву о» и «Ответ на вопрос о» — ответы",
+    len(ba_replies) == 3,
+    str(ba_replies.to_dict("records")),
+)
+check(
+    "у ответа BA текст без карточки товара",
+    "Здравствуйте! Спасибо за отзыв." in set(ba_replies["Ответ"]),
+    str(ba_replies["Ответ"].tolist()),
+)
+check(
+    "товар ответа Озона без приставки и без кавычек",
+    set(ba_replies["Товар"])
+    == {"ТЕХНОНИКОЛЬ / Утеплитель LOGICPIR 30мм", "Утеплитель Vetonit 50 мм", "Техноплекс 30 мм (12 упаковок)"},
+    str(ba_replies["Товар"].tolist()),
+)
+
+app_store = pd.DataFrame(
+    [
+        review(
+            "Отзыв о Фонбет – ставки на спорт\nОценка: 1 из 5\nДаете рекламу и кидаете",
+            rating="1",
+            title="Кидалово",
+            sentiment="негативная",
+        ),
+        review(
+            "Отзыв о доставке: привезли на неделю позже\nКлей не держит",
+            rating="1",
+            title="Гибкая черепица 3м2",
+        ),
+    ]
+)
+app_rows = review_rows(app_store).set_index("Оценка", drop=False)
+check(
+    "App Store: товар из шапки, а не заголовок покупателя",
+    "Фонбет – ставки на спорт" in set(reviews_by_product(app_store)["Товар"])
+    and "Кидалово" not in set(reviews_by_product(app_store)["Товар"]),
+    str(reviews_by_product(app_store).to_dict("records")),
+)
+check(
+    "App Store: заголовок покупателя остаётся в тексте",
+    "Кидалово. Даете рекламу и кидаете" in set(review_rows(app_store)["Отзыв"]),
+    str(review_rows(app_store)["Отзыв"].tolist()),
+)
+check(
+    "«Отзыв о доставке: …» без оценки и без такого заголовка — не шапка, строка на месте",
+    "Отзыв о доставке: привезли на неделю позже Клей не держит" in set(review_rows(app_store)["Отзыв"]),
+    str(review_rows(app_store)["Отзыв"].tolist()),
+)
+one_line_reply = pd.DataFrame(
+    [
+        reply(
+            "Ответ на отзыв о BETBOOM — ставки на спорт Привет! Напиши на почту",
+            title="Ответ на отзыв о BETBOOM — ставки на спорт Привет! Напиши на почту",
+        )
+    ]
+)
+check(
+    "ответ в одну строку не остаётся пустым",
+    business_reply_rows(one_line_reply).iloc[0]["Ответ"]
+    == "BETBOOM — ставки на спорт Привет! Напиши на почту",
+    str(business_reply_rows(one_line_reply).to_dict("records")),
+)
+maps = pd.DataFrame(
+    [reply("Спасибо, что выбрали нас", title="Шоколадница, кофейня, Советская площадь, 5 - ответ")]
+)
+check(
+    "карты: у товара ответа нет хвоста « - ответ»",
+    business_reply_rows(maps).iloc[0]["Товар"] == "Шоколадница, кофейня, Советская площадь, 5",
+    str(business_reply_rows(maps).to_dict("records")),
+)
+
+print("14. Раздел «Отзывы»: ответы продавцов показаны отдельно")
+from streamlit.testing.v1 import AppTest  # noqa: E402
+
+
+def _reviews_app():
+    import streamlit as st
+
+    from reviews_ui import render_reviews
+
+    render_reviews(st.session_state["frame"])
+
+
+def _render(frame):
+    app = AppTest.from_function(_reviews_app, default_timeout=60)
+    app.session_state["frame"] = frame
+    return app.run()
+
+
+app = _render(replies_period)
+check("раздел с ответами открылся без исключений", not app.exception, str(app.exception))
+cards = {str(m.label): str(m.value) for m in app.metric}
+check("в карточке только отзывы покупателей", cards.get("Отзывов") == "3", str(cards))
+check("претензия от ответа поддержки не добавилась", cards.get("Претензий") == "1", str(cards))
+captions = [str(c.value) for c in app.caption]
+check(
+    "под карточками сказано, что ответы не считаются",
+    any("Ответы продавцов на отзывы (4)" in c and "не входят" in c and "внизу раздела" in c for c in captions),
+    str(captions),
+)
+blocks = [str(m.value) for m in app.markdown]
+check(
+    "внизу отдельный блок ответов",
+    any("Ответы продавцов на отзывы (4)" in b for b in blocks),
+    str(blocks),
+)
+check(
+    "ответы таблицей с автором",
+    any("Кто ответил" in list(getattr(d.value, "columns", [])) for d in app.dataframe),
+    str([list(getattr(d.value, "columns", [])) for d in app.dataframe]),
+)
+
+app = _render(only_replies)
+check("период только с ответами не падает", not app.exception, str(app.exception))
+check(
+    "сказано, что отзывов покупателей нет, а ответы есть",
+    any("отзывов покупателей не найдено" in str(i.value) for i in app.info),
+    str([str(i.value) for i in app.info]),
+)
+check(
+    "ответы всё равно показаны",
+    any("Кто ответил" in list(getattr(d.value, "columns", [])) for d in app.dataframe),
+    str([list(getattr(d.value, "columns", [])) for d in app.dataframe]),
+)
+
+app = _render(period)
+check("без ответов раздел как раньше", not app.exception, str(app.exception))
+check(
+    "без ответов нет ни подписи, ни блока ответов",
+    not any("Ответы продавцов" in str(c.value) for c in app.caption)
+    and not any("Ответы продавцов" in str(m.value) for m in app.markdown),
 )
 
 print()

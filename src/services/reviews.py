@@ -53,13 +53,21 @@ _PRODUCT_COLUMNS = ("product", "Товар", "title", "Заголовок")
 #   «Отзыв о X [Оценка: N из 5 ...]»       — RuStore, Wildberries, Озон, Legalbet
 #   «Ответ на отзыв о X [...]»              — App Store, Wildberries, RuStore
 #   «Отзыв: X - ...»                        — Otzovik
+#   «X - ответ»                             — ответы организаций на картах
+# Так же Brand Analytics подписывает Озон: «Комментарий к отзыву о X»,
+# «Ответ на вопрос о "X"...», «Вопрос о "X"...».
 # Там, где ни один шаблон не подошёл — например, у Irecommend, где в этот же
 # «Тип площадки» проваливаются рецензии на фильмы и книги, потому что монитор
 # ищет по ключевым словам, а не по товарным карточкам, — заголовок остаётся
 # как есть: это уже не наша каша, а естественный шум источника.
 _MEDIALOGIA_RATING_SUFFIX = re.compile(r"\s*Оценка:\s*\d\s*из\s*5.*$", re.IGNORECASE | re.DOTALL)
-_MEDIALOGIA_REVIEW_PREFIX = re.compile(r"^(?:Ответ на отзыв о|Отзыв о)\s+", re.IGNORECASE)
+_MEDIALOGIA_REVIEW_PREFIX = re.compile(
+    r"^(?:Ответ на отзыв о|Комментарий к отзыву о|Ответ на вопрос о|Вопрос о|Отзыв о)\s+",
+    re.IGNORECASE,
+)
 _MEDIALOGIA_OTZOVIK_PREFIX = re.compile(r"^Отзыв:\s*", re.IGNORECASE)
+_MAP_REPLY_SUFFIX = re.compile(r"\s+-\s+ответ\s*$", re.IGNORECASE)
+_QUOTED_PRODUCT = re.compile(r'^"(.+?)"')
 
 
 def _clean_medialogia_title(title: str) -> str:
@@ -69,7 +77,7 @@ def _clean_medialogia_title(title: str) -> str:
     быть уже чистое название (Brand Analytics, будущая колонка «Товар») или
     шум источника, который мы всё равно не умеем разобрать надёжнее, чем есть.
     """
-    text = str(title or "").strip()
+    text = _MAP_REPLY_SUFFIX.sub("", str(title or "").strip())
     if not text:
         return ""
     if _MEDIALOGIA_OTZOVIK_PREFIX.match(text):
@@ -79,13 +87,59 @@ def _clean_medialogia_title(title: str) -> str:
     if _MEDIALOGIA_REVIEW_PREFIX.match(text):
         rest = _MEDIALOGIA_REVIEW_PREFIX.sub("", text, count=1)
         rest = _MEDIALOGIA_RATING_SUFFIX.sub("", rest)
-        return rest.strip()
+        quoted = _QUOTED_PRODUCT.match(rest)
+        return (quoted.group(1) if quoted else rest).strip()
     return text
+
+
+# Текст отзыва из магазинов приложений Медиалогия начинает шапкой — отдельными
+# строками «Отзыв о X» (или «Ответ на отзыв о X») и «Оценка: N из 5», — а
+# заголовок собирает ту же шапку вместе с текстом в одну строку. Поэтому срезать
+# заголовок с начала текста значит срезать весь отзыв: в выгрузке по букмекерам
+# так пустыми показывались 31 отзыв из 52 и 7 претензий из 11. И товар у ответа
+# из заголовка не достать — оценки, на которой он кончается, у ответа нет, — а
+# из первой строки текста достаётся ровно он.
+#
+# Шапкой строка считается, только если это подтверждено: следом идёт оценка
+# или заголовок тоже начинается с «Отзыв о»/«Ответ на отзыв о». Иначе обычный
+# отзыв, который покупатель начал словами «Отзыв о доставке: …», потерял бы
+# первую строку. У App Store подтверждает оценка: заголовок там — фраза самого
+# покупателя («Кидалово»), а товар есть только в шапке.
+_HEADER_LINE = re.compile(r"^(?:Ответ на отзыв о|Отзыв о)\s+(.+)$", re.IGNORECASE)
+_RATING_LINE = re.compile(r"^Оценка:\s*\d(?:[.,]\d+)?\s*из\s*5\s*$", re.IGNORECASE)
+# Та же шапка, если переносы строк по дороге потерялись.
+_INLINE_HEADER = re.compile(
+    r"^(?:Ответ на отзыв о|Отзыв о)\s.+?\sОценка:\s*\d\s*из\s*5\s*", re.IGNORECASE
+)
+_ONE_LINE_REPLY = re.compile(r"^Ответ на отзыв о\s+", re.IGNORECASE)
+
+
+def _medialogia_header(text: str, title: str) -> tuple[str, str] | None:
+    """(товар, текст без шапки), если текст начинается шапкой Медиалогии."""
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    if len(lines) < 2:
+        return None
+    match = _HEADER_LINE.match(lines[0])
+    if not match:
+        return None
+    rest = lines[1:]
+    rated = bool(_RATING_LINE.match(rest[0]))
+    if rated:
+        rest = rest[1:]
+    if not rated and not _MEDIALOGIA_REVIEW_PREFIX.match(str(title or "").strip()):
+        return None
+    return match.group(1).strip(), " ".join(rest)
 
 
 def _product_series(messages: pd.DataFrame) -> pd.Series:
     """Название товара для показа — с очисткой от склейки Медиалогии."""
-    return _column(messages, _PRODUCT_COLUMNS).map(_clean_medialogia_title)
+    titles = _column(messages, _PRODUCT_COLUMNS)
+    texts = _column(messages, _TEXT_COLUMNS)
+    products = []
+    for title, text in zip(titles, texts):
+        header = _medialogia_header(text, title)
+        products.append(header[0] if header else _clean_medialogia_title(title))
+    return pd.Series(products, index=messages.index, dtype="object")
 
 # Оценки приходят и дробные — это сводный рейтинг карточки товара, а не ошибка.
 RATING_MIN = 1.0
@@ -117,14 +171,72 @@ def _column(messages: pd.DataFrame, names: tuple[str, ...]) -> pd.Series:
     return pd.Series([""] * len(messages), index=messages.index, dtype="object")
 
 
-def select_reviews(messages: pd.DataFrame) -> pd.DataFrame:
-    """Только отзывы: они и составляют раздел репутации товара."""
+# Ответ продавца или разработчика приходит с площадки отзывов, поэтому по типу
+# площадки он неотличим от отзыва. В выгрузке Медиалогии по букмекерам таких
+# ответов было 70 из 122 «отзывов»: раздел показывал 122 отзыва и 56 товаров
+# вместо 52 и 20, а три ответа поддержки с негативной разметкой попадали в
+# претензии. У Медиалогии их отличает тип сообщения («Ответ») или заголовок
+# «Ответ на отзыв о …» — у отзывов покупателей там «Отзыв о …». У Brand
+# Analytics тип у ответа тот же «Комментарий», что у отзыва, зато на Wildberries
+# автор — «Ответ представителя», а на Озоне заголовок «Комментарий к отзыву о …»
+# или «Ответ на вопрос о …»: в выгрузке Knauf так пришли 598 «отзывов» из 1208.
+# Конец слова нужен, чтобы тип вроде «Ответственный …» ответом не считался. Он
+# задан классом символов, а не \b: в pandas 3 строки по умолчанию хранятся в
+# pyarrow, а там \b понимает только латиницу и после кириллицы не срабатывает.
+#
+# Не узнаются официальные ответы, опубликованные обычным комментарием (Otzovik,
+# Banki.ru): по выгрузке они ничем, кроме имени автора, не отличаются от
+# комментариев покупателей.
+_REPLY_TYPE = r"^(?:ответ|answer|reply)(?:[^а-яa-z0-9_]|$)"
+_REPLY_TITLE = r"^(?:ответ на отзыв|ответ на вопрос|комментарий к отзыву)"
+_REPLY_AUTHOR = r"^ответ представителя"
+_TYPE_COLUMNS = ("message_type", "Тип")
+_AUTHOR_COLUMNS = ("author", "Автор")
+
+
+def _all_reviews(messages: pd.DataFrame) -> pd.DataFrame:
+    """Всё, что пришло с площадок отзывов, вместе с ответами продавцов."""
     if messages is None or len(messages) == 0:
         return pd.DataFrame()
     kinds = (
         messages["kind"] if "kind" in messages.columns else classify_kinds(messages)
     )
     return messages[kinds == KIND_REVIEW]
+
+
+def business_reply_mask(messages: pd.DataFrame) -> pd.Series:
+    """Какие строки — ответ продавца или разработчика, а не отзыв покупателя."""
+    if messages is None or len(messages) == 0:
+        return pd.Series(dtype=bool)
+
+    def normalized(names: tuple[str, ...]) -> pd.Series:
+        return (
+            _column(messages, names)
+            .str.strip()
+            .str.lower()
+            .str.replace("ё", "е", regex=False)
+        )
+
+    by_type = normalized(_TYPE_COLUMNS).str.contains(_REPLY_TYPE, na=False)
+    by_title = normalized(("title", "Заголовок")).str.contains(_REPLY_TITLE, na=False)
+    by_author = normalized(_AUTHOR_COLUMNS).str.contains(_REPLY_AUTHOR, na=False)
+    return (by_type | by_title | by_author).astype(bool)
+
+
+def select_reviews(messages: pd.DataFrame) -> pd.DataFrame:
+    """Только отзывы покупателей: они и составляют раздел репутации товара."""
+    reviews = _all_reviews(messages)
+    if reviews.empty:
+        return reviews
+    return reviews[~business_reply_mask(reviews)]
+
+
+def select_business_replies(messages: pd.DataFrame) -> pd.DataFrame:
+    """Ответы продавцов и разработчиков на отзывы."""
+    reviews = _all_reviews(messages)
+    if reviews.empty:
+        return reviews
+    return reviews[business_reply_mask(reviews)]
 
 
 def rating_values(messages: pd.DataFrame) -> pd.Series:
@@ -188,6 +300,34 @@ def _strip_leading_title(text: str, title: str) -> str:
     return body
 
 
+def _review_body(text: str, title: str) -> str:
+    """Текст отзыва или ответа без шапки Медиалогии и без карточки товара."""
+    header = _medialogia_header(text, title)
+    if header is not None:
+        body = re.sub(r"\s+", " ", header[1]).strip()
+        # У App Store в заголовке — заголовок самого покупателя («Кидалово»).
+        # Товаром он больше не служит, и без этого пропал бы из строки совсем.
+        headline = re.sub(r"\s+", " ", str(title or "")).strip()
+        if (
+            headline
+            and not _MEDIALOGIA_REVIEW_PREFIX.match(headline)
+            and headline.lower() not in body.lower()
+        ):
+            body = f"{headline}. {body}" if body else headline
+        return body
+    one_line = re.sub(r"\s+", " ", str(text or "")).strip()
+    inline = _INLINE_HEADER.match(one_line)
+    if inline:
+        return one_line[inline.end():].strip()
+    body = _strip_leading_title(text, title)
+    reply_head = _ONE_LINE_REPLY.match(one_line)
+    if not body and reply_head:
+        # Шапка ответа слиплась с текстом в одну строку, а заголовок её
+        # повторяет: товар от ответа уже не отделить, но и стирать ответ нельзя.
+        return one_line[reply_head.end():].strip()
+    return body
+
+
 def parse_reviews(messages: pd.DataFrame) -> pd.DataFrame:
     """Разобранные части отзывов, выровненные по индексу сообщений."""
     if messages is None or len(messages) == 0:
@@ -195,7 +335,7 @@ def parse_reviews(messages: pd.DataFrame) -> pd.DataFrame:
     texts = _column(messages, _TEXT_COLUMNS)
     titles = _column(messages, _PRODUCT_COLUMNS)
     parsed = [
-        parse_review(_strip_leading_title(text, title))
+        parse_review(_review_body(text, title))
         for text, title in zip(texts, titles)
     ]
     return pd.DataFrame(parsed, index=messages.index)
@@ -204,10 +344,12 @@ def parse_reviews(messages: pd.DataFrame) -> pd.DataFrame:
 def review_overview(messages: pd.DataFrame) -> dict[str, object]:
     """Сводка по отзывам периода."""
     reviews = select_reviews(messages)
+    replies = len(select_business_replies(messages))
     total = len(reviews)
     if not total:
         return {
             "reviews": 0,
+            "replies": replies,
             "rated": 0,
             "rating_avg": None,
             "rating_counts": {},
@@ -222,6 +364,7 @@ def review_overview(messages: pd.DataFrame) -> dict[str, object]:
     products = _product_series(reviews).str.strip()
     return {
         "reviews": total,
+        "replies": replies,
         "rated": int(ratings.notna().sum()),
         "rating_avg": float(ratings.mean()) if ratings.notna().any() else None,
         "rating_counts": {
@@ -361,6 +504,36 @@ def review_rows(messages: pd.DataFrame) -> pd.DataFrame:
     # оценки идут следом: их нельзя ранжировать, но и прятать в конец нельзя,
     # потому что в выгрузках без колонки оценки это вообще все отзывы.
     return out.sort_values("Оценка", na_position="last").reset_index(drop=True)
+
+
+def business_reply_rows(messages: pd.DataFrame) -> pd.DataFrame:
+    """Ответы продавцов и разработчиков списком.
+
+    Долю отзывов с ответом отсюда не посчитать: сам отзыв в выгрузку обычно не
+    попадает. Ссылка ответа повторяет ссылку отзыва с хвостом «-answer» или
+    «#Answer», но в выгрузке Медиалогии по букмекерам по ней нашлись отзывы
+    только к 3 ответам из 70.
+    """
+    columns = ["Кто ответил", "Товар", "Ответ", "Дата", "Ссылка"]
+    replies = select_business_replies(messages)
+    if replies.empty:
+        return pd.DataFrame(columns=columns)
+    titles = _column(replies, _PRODUCT_COLUMNS)
+    text = [
+        _review_body(body, title)
+        for body, title in zip(_column(replies, _TEXT_COLUMNS), titles)
+    ]
+    out = pd.DataFrame(
+        {
+            "Кто ответил": _column(replies, _AUTHOR_COLUMNS).str.strip().replace("", "—"),
+            "Товар": _product_series(replies).str.strip().replace("", "—"),
+            "Ответ": pd.Series(text, index=replies.index),
+            "Дата": _column(replies, ("date", "Дата")),
+            "Ссылка": _column(replies, ("message_link", "Ссылка")),
+        },
+        index=replies.index,
+    )
+    return out.reset_index(drop=True)
 
 
 def praise_phrases(messages: pd.DataFrame, top_n: int = 10) -> list[tuple[str, int]]:

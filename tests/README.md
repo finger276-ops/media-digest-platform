@@ -15,7 +15,7 @@ python tests/test_loadtest_pipeline.py       # инструмент нагруз
 python tests/test_message_kinds.py           # природа сообщения: отзыв, комментарий, репост, публикация
 python tests/test_story_recovery.py          # восстановление сюжетов: наследование и кластеризация
 python tests/test_project_settings.py        # пороги сборки инфоповодов в настройках проекта
-python tests/test_reviews.py                 # отзывы о товаре: оценки, шаблон, претензии
+python tests/test_reviews.py                 # отзывы о товаре: оценки, шаблон, претензии, ответы продавцов
 python tests/test_audience_metrics.py        # аудитория считается по площадкам, а не по строкам
 python tests/test_brand_metrics.py           # индексы бренда против примеров из Metric Calculation Guide
 python tests/test_brand_metrics_periods.py   # индексы по периодам: динамика «все периоды», изменение к прошлому
