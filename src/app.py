@@ -695,7 +695,11 @@ def main() -> None:
                         key="main_title_merge",
                         container=view_box,
                     )
-                if role_rank(role) >= role_rank("editor"):
+                # read_only — тот же признак «демо-гость, не владелец», что
+                # гасит запись в панели ИИ и в разделах отчёта: без него гость
+                # с кодом редактора мог сохранить свой вид как умолчание для
+                # всех следующих гостей демо-проекта.
+                if role_rank(role) >= role_rank("editor") and not read_only:
                     st.divider()
                     if st.button(
                         "Открывать проект на этом разделе",

@@ -41,6 +41,7 @@ def render_summary_export_buttons(
     project_settings: dict[str, Any] | None = None,
     project_id: str = "",
     role_can_edit: bool = False,
+    read_only: bool = False,
 ) -> None:
     default_sections = report_sections_from_project_settings(project_settings)
     selected_sections = st.multiselect(
@@ -55,7 +56,10 @@ def render_summary_export_buttons(
             "под выбранный набор, без пустых мест."
         ),
     )
-    if role_can_edit and project_id:
+    # В демо-проекте гость с кодом редактора мог сохранить свой набор
+    # разделов как умолчание для всех следующих гостей — тот же гейт, что и
+    # у «Открывать проект на этом разделе» в app.py.
+    if role_can_edit and project_id and not read_only:
         if st.button(
             "Сохранить как выбор по умолчанию для проекта",
             key=f"{key_prefix}_save_sections",

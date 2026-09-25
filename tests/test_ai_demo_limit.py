@@ -445,6 +445,103 @@ if drafts and sections:
           str([list(m.value) for m in kept_sections]))
     check("остаток обновлён", shows_left(at, DEMO_AI_LIMIT - 2), str(texts(at.info)))
 
+print("8. Демо-проект: сохранить/заменить саммари/удалить текст может только владелец")
+# Панель «Тексты от ИИ» в демо открыта любой роли — это осознанный выбор:
+# демо показывают снаружи, и генерация — главное, ради чего его смотрят.
+# Но «Сохранить»/«Сделать саммари периода»/«Удалить» пишут в общие для всех
+# гостей данные и переживают перерисовку: без проверки владельца гость с
+# кодом редактора мог заменить подготовленный владельцем текст витрины, и
+# его увидел бы каждый следующий гость.
+
+
+def write_buttons(at, kind="summary"):
+    return {
+        str(b.key): b
+        for b in at.button
+        if str(b.key or "") in (
+            f"ai_save_{kind}_{PROJECT_ID}",
+            f"ai_promote_{kind}_{PROJECT_ID}",
+            f"ai_delete_{kind}_{PROJECT_ID}",
+        )
+    }
+
+
+SAVE_KEY = f"ai_save_summary_{PROJECT_ID}"
+PROMOTE_KEY = f"ai_promote_summary_{PROJECT_ID}"
+DELETE_KEY = f"ai_delete_summary_{PROJECT_ID}"
+
+set_runs(0)
+PROVIDER.calls = 0
+at = open_report("owner")
+PROVIDER.queue = [MODEL_OK]
+generate_buttons(at)[SUMMARY_KEY].click().run()
+owner_buttons = write_buttons(at)
+check(
+    "владельцу видны «Сохранить» и «Сделать саммари периода» (ещё не сохранено — «Удалить» рано)",
+    set(owner_buttons) == {SAVE_KEY, PROMOTE_KEY},
+    str(list(owner_buttons)),
+)
+owner_buttons[SAVE_KEY].click().run()
+check("владелец сохранил текст без исключений", not at.exception, str(at.exception))
+
+# Теперь тот же проект открывает гость с кодом редактора — тот же путь, что
+# и в остальном файле (open_report() по умолчанию), а текст уже сохранён.
+PROVIDER.calls = 0
+at = open_report()
+check("гость открыл раздел без исключений", not at.exception, str(at.exception))
+guest_buttons = write_buttons(at)
+check(
+    "у гостя нет ни одной из трёх кнопок записи",
+    not guest_buttons,
+    str(list(guest_buttons)),
+)
+check(
+    "гостю объяснили, почему кнопок нет",
+    any(
+        "только владелец платформы" in t
+        for t in texts(at.caption)
+    ),
+    str([t for t in texts(at.caption) if "демонстрац" in t.lower()]),
+)
+check(
+    "текст владельца всё равно виден гостю (панель не спрятана целиком)",
+    any("Готовый текст от модели." in str(a.value) for a in at.text_area),
+    str([str(a.value)[:40] for a in at.text_area]),
+)
+
+
+def save_sections_buttons(at):
+    return [b for b in at.button if str(b.label) == "Сохранить как выбор по умолчанию для проекта"]
+
+
+check(
+    "гостю-редактору недоступно «Сохранить как выбор по умолчанию для проекта» (тот же read_only)",
+    not save_sections_buttons(at),
+    str([b.key for b in save_sections_buttons(at)]),
+)
+owner_report_at = open_report("owner")
+owner_save_sections = save_sections_buttons(owner_report_at)
+check(
+    "владельцу кнопка выбора разделов по умолчанию видна",
+    bool(owner_save_sections),
+    str(owner_save_sections),
+)
+
+view_start_buttons = [b for b in at.button if str(b.key) == "view_save_start_section"]
+check(
+    "гостю-редактору недоступна «Открывать проект на этом разделе» в панели «⚙️ Вид»",
+    not view_start_buttons,
+    str(view_start_buttons),
+)
+owner_view_start_buttons = [
+    b for b in owner_report_at.button if str(b.key) == "view_save_start_section"
+]
+check(
+    "владельцу кнопка стартового раздела видна",
+    bool(owner_view_start_buttons),
+    str(owner_view_start_buttons),
+)
+
 print()
 if failures:
     print(f"ПРОВАЛЕНО: {len(failures)} → {failures}")

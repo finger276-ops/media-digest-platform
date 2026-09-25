@@ -208,6 +208,7 @@ def render_period_summary(
             project_settings=project_settings,
             project_id=project_id,
             role_can_edit=role_rank(role) >= role_rank("editor"),
+            read_only=read_only,
         )
 
     if role_rank(role) >= role_rank("editor"):

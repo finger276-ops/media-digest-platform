@@ -430,8 +430,15 @@ def render_ai_summary_panel(
                             request_rerun_after_render()
 
         _show_generation_notice(project_id)
+        # В демо-проекте панель открыта любой роли (см. комментарий выше), а
+        # generate-кнопки гасит только demo_exhausted — счётчик запусков.
+        # «Сохранить»/«Сделать саммари периода»/«Удалить» пишут в общие для
+        # проекта данные и переживают перерисовку: без этой проверки гость с
+        # любым кодом мог заменить подготовленный владельцем текст витрины
+        # или удалить блок рисков, и это увидел бы каждый следующий гость.
+        can_write = owner or not demo
         for kind in kinds:
-            _render_generated_block(project_id, kind, period_ids)
+            _render_generated_block(project_id, kind, period_ids, can_write=can_write)
 
 
 RERUN_AFTER_RENDER_KEY = "_rerun_after_render"
@@ -537,7 +544,9 @@ def _run_generation(
     }
 
 
-def _render_generated_block(project_id: str, kind: str, period_ids: list[str]) -> None:
+def _render_generated_block(
+    project_id: str, kind: str, period_ids: list[str], *, can_write: bool = True
+) -> None:
     draft = st.session_state.get(f"ai_draft_{kind}_{project_id}")
     saved = load_ai_text(project_id, kind, period_ids)
     if not draft and not saved:
@@ -564,9 +573,14 @@ def _render_generated_block(project_id: str, kind: str, period_ids: list[str]) -
         label_visibility="collapsed",
     )
 
+    if not can_write:
+        st.caption(
+            "Демонстрационный проект: сохранение, замену саммари и удаление "
+            "текста здесь видит и может сделать только владелец платформы."
+        )
     columns = st.columns(3)
     with columns[0]:
-        if st.button(
+        if can_write and st.button(
             "Сохранить", key=f"ai_save_{kind}_{project_id}", width="stretch"
         ):
             payload = dict(draft or saved or {})
@@ -593,7 +607,7 @@ def _render_generated_block(project_id: str, kind: str, period_ids: list[str]) -
                 st.success("Сохранено. Текст виден в своём разделе дашборда.")
                 st.rerun()
     with columns[1]:
-        if kind == KIND_SUMMARY and st.button(
+        if can_write and kind == KIND_SUMMARY and st.button(
             "Сделать саммари периода",
             key=f"ai_promote_{kind}_{project_id}",
             width="stretch",
@@ -614,7 +628,7 @@ def _render_generated_block(project_id: str, kind: str, period_ids: list[str]) -
             st.success("Саммари периода заменено.")
             st.rerun()
     with columns[2]:
-        if saved and st.button(
+        if can_write and saved and st.button(
             "Удалить",
             key=f"ai_delete_{kind}_{project_id}",
             width="stretch",
