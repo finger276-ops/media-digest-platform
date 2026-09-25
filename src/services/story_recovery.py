@@ -160,13 +160,100 @@ def _cluster_title(titles: pd.Series, texts: pd.Series) -> str:
     return "Обсуждение без названия"
 
 
+# Сколько пар «сообщение × сообщение» сравнивается за один блок. Больше —
+# меньше накладных расходов, меньше — ниже пик памяти: блок разреженный, но на
+# выгрузке с общей лексикой почти плотный, ~30 байт на пару. Два миллиона пар —
+# это около 60 МБ сверху, при любом размере выгрузки.
+BLOCK_PAIRS = 2_000_000
+
+
+def _star_edges(labels: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Связи «каждый узел компонента — к его первому узлу».
+
+    Тот же компонент, что и у исходного графа, но связей не больше, чем
+    сообщений: тысяча перепечаток одного поста — это 999 связей, а не миллион.
+    """
+    sizes = np.bincount(labels)
+    _, first = np.unique(labels, return_index=True)
+    nodes = np.flatnonzero(sizes[labels] > 1)
+    roots = first[labels[nodes]]
+    keep = nodes != roots
+    return nodes[keep], roots[keep]
+
+
+def _similarity_components(matrix, similarity: float) -> np.ndarray:
+    """Связные компоненты графа «косинусная близость >= similarity».
+
+    Раньше близость считалась одним произведением matrix @ matrix.T. Оно
+    разреженное только по названию: почти любые два сообщения делят хоть одно
+    слово, и на 29 тысячах кандидатов в памяти оказывалось ~850 млн пар —
+    12,5 ГБ при лимите Streamlit Cloud около гигабайта (scripts/
+    loadtest_pipeline.py, 50 000 сообщений). Нужны же из них доли процента.
+
+    Теперь произведение считается блоками строк, пары ниже порога выбрасываются
+    сразу, а найденные связи после каждого блока сжимаются до «звёзд»
+    компонентов. Память — блок плюс не больше одной связи на сообщение.
+
+    Результат тот же до метки: каждая строка блока считается тем же умножением
+    разреженных матриц, что и строка полного произведения (те же слагаемые в
+    том же порядке), значит и связи те же. А connected_components нумерует
+    компоненты по наименьшему узлу — номер зависит от разбиения, а не от того,
+    какими связями оно получено.
+    """
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    n = matrix.shape[0]
+    if similarity <= 0:
+        # «Близость >= 0» верна для любой пары, в том числе без общих слов:
+        # прежнее сравнение разреженной матрицы с нулём сцепляло всё в один
+        # компонент. Настройки проекта такой порог не пропускают (зажим 0.2),
+        # но поведение функции сохранено.
+        return np.zeros(n, dtype=np.int32)
+
+    right = matrix.T.tocsr()
+    block = max(1, min(n, BLOCK_PAIRS // n))
+    forest_rows = np.zeros(0, dtype=np.int64)
+    forest_cols = np.zeros(0, dtype=np.int64)
+    for start in range(0, n, block):
+        chunk = (matrix[start : start + block] @ right).tocsr()
+        rows = np.repeat(
+            np.arange(start, start + chunk.shape[0], dtype=np.int64),
+            np.diff(chunk.indptr),
+        )
+        cols = chunk.indices.astype(np.int64, copy=False)
+        # Диагональ — близость сообщения с самим собой, связью не считается.
+        keep = (chunk.data >= similarity) & (rows != cols)
+        if not keep.any():
+            continue
+        graph = csr_matrix(
+            (
+                np.ones(len(forest_rows) + int(keep.sum()), dtype=bool),
+                (
+                    np.concatenate([forest_rows, rows[keep]]),
+                    np.concatenate([forest_cols, cols[keep]]),
+                ),
+            ),
+            shape=(n, n),
+        )
+        _, labels = connected_components(graph, directed=False)
+        forest_rows, forest_cols = _star_edges(labels)
+
+    graph = csr_matrix(
+        (np.ones(len(forest_rows), dtype=bool), (forest_rows, forest_cols)),
+        shape=(n, n),
+    )
+    _, labels = connected_components(graph, directed=False)
+    return labels
+
+
 def _connected_components(texts: list[str], similarity: float) -> np.ndarray:
     """Связные компоненты по косинусной близости TF-IDF.
 
-    Разреженное произведение, а не плотная матрица: на выгрузке в десять тысяч
-    сообщений плотная развёртка съела бы сотни мегабайт ради одного шага.
+    Близость считается блоками и без хранения всех пар — см.
+    _similarity_components: на крупной выгрузке полное произведение не
+    помещалось в память приложения.
     """
-    from scipy.sparse.csgraph import connected_components
     from sklearn.feature_extraction.text import TfidfVectorizer
 
     if len(texts) < 2:
@@ -192,11 +279,7 @@ def _connected_components(texts: list[str], similarity: float) -> np.ndarray:
         # Все слова отсеялись стоп-листом — сцеплять нечего.
         return np.arange(len(texts), dtype=int)
 
-    similarities = (matrix @ matrix.T).tocsr()
-    similarities.setdiag(0)
-    similarities.eliminate_zeros()
-    adjacency = similarities >= similarity
-    _, labels = connected_components(adjacency, directed=False)
+    labels = _similarity_components(matrix, similarity)
 
     # Сообщение без единого признака ни с чем не связано по определению, но
     # connected_components сводит такие строки вместе — им нужен свой ярлык,

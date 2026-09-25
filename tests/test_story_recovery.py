@@ -8,6 +8,23 @@
 Порог именно по авторам, а не по числу сообщений: инфоповод — это когда о чём-то
 пишут разные люди. Без него первым «инфоповодом» августовской выгрузки RUFLEX
 становились 66 сообщений одного бота недвижимости.
+
+Раздел 11 — память. Близость текстов раньше считалась одним произведением
+всех кандидатов на всех: на 50 000 сообщений это 12,5 ГБ при лимите Streamlit
+Cloud около гигабайта. Теперь она считается блоками (_similarity_components),
+и тест сверяет метки компонентов с прежним способом, замороженным здесь же
+(_reference_components), и следит, чтобы пик памяти остался в разы ниже.
+
+Мутационные проверки раздела 11:
+- порог «>» вместо «>=» -> «метки совпадают с прежним способом» краснеет на
+  наборах с порогом 1.0;
+- забыть связи прошлых блоков (не добавлять forest_rows) -> «метки совпадают
+  с прежним способом» и «на плотном корпусе метки те же» краснеют;
+- считать одним блоком всё (BLOCK_PAIRS не ограничивает блок) -> «пик памяти
+  в разы ниже» краснеет.
+Отбрасывание диагонали (rows != cols) тестом не ловится и не должно: петля
+«сообщение само с собой» не соединяет разные сообщения, метки от неё не
+меняются — это только экономия связей.
 """
 
 import sys
@@ -18,8 +35,14 @@ for _p in (REPO / "src", REPO / "scripts", REPO / "tests"):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
+import random  # noqa: E402
+import tracemalloc  # noqa: E402
+
+import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
+import services.story_recovery as story_recovery  # noqa: E402
+from services.ru_text import tokenize_ru  # noqa: E402
 from services.story_recovery import (  # noqa: E402
     ORIGIN_CLUSTERED,
     ORIGIN_INHERITED,
@@ -219,6 +242,112 @@ check(
     str(counts),
 )
 check("пустая сводка не падает", recovery_counts(pd.DataFrame())[ORIGIN_SOURCE] == 0)
+
+print("11. Близость считается блоками: те же сюжеты, в разы меньше памяти")
+
+
+def _reference_components(texts, similarity):
+    """Прежний способ (до блоков): одно произведение matrix @ matrix.T целиком.
+
+    Заморожен здесь намеренно — сверка идёт с ним, а не с рабочим кодом.
+    """
+    from scipy.sparse.csgraph import connected_components
+    from sklearn.feature_extraction.text import TfidfVectorizer
+
+    if len(texts) < 2:
+        return np.zeros(len(texts), dtype=int)
+    small = len(texts) < story_recovery.SMALL_CORPUS
+    vectorizer = TfidfVectorizer(
+        tokenizer=tokenize_ru,
+        token_pattern=None,
+        ngram_range=(1, 2),
+        min_df=1 if small else 2,
+        max_df=1.0 if small else 0.72,
+        max_features=story_recovery.MAX_FEATURES,
+        sublinear_tf=True,
+    )
+    try:
+        matrix = vectorizer.fit_transform(texts)
+    except ValueError:
+        return np.arange(len(texts), dtype=int)
+    similarities = (matrix @ matrix.T).tocsr()
+    similarities.setdiag(0)
+    similarities.eliminate_zeros()
+    adjacency = similarities >= similarity
+    _, labels = connected_components(adjacency, directed=False)
+    empty_rows = np.asarray((matrix.getnnz(axis=1) == 0)).ravel()
+    if empty_rows.any():
+        next_label = int(labels.max()) + 1
+        for position in np.where(empty_rows)[0]:
+            labels[position] = next_label
+            next_label += 1
+    return labels
+
+
+WORDS = [f"слово{i}" for i in range(80)] + ["бренд", "товар", "доставка", "цена"]
+
+
+def corpus(rng, n, words_per_text=(0, 9), duplicates=0.0):
+    texts = []
+    for _ in range(n):
+        if texts and rng.random() < duplicates:
+            texts.append(rng.choice(texts))
+        else:
+            texts.append(" ".join(rng.choice(WORDS) for _ in range(rng.randint(*words_per_text))))
+    return texts
+
+
+mismatches = []
+saved_block = story_recovery.BLOCK_PAIRS
+for seed in range(60):
+    rng = random.Random(seed)
+    texts = corpus(rng, rng.choice([2, 3, 19, 20, 21, 60, 250]), duplicates=rng.choice([0.0, 0.3]))
+    threshold = rng.choice([0.2, 0.3, 0.45, 0.6, 0.95, 1.0])
+    # Крошечный блок — чтобы связи между блоками склеивались сотни раз.
+    story_recovery.BLOCK_PAIRS = rng.choice([1, 7, 100, saved_block])
+    got = story_recovery._connected_components(texts, threshold)
+    expected = _reference_components(texts, threshold)
+    if not np.array_equal(got, expected):
+        mismatches.append(f"seed {seed}: порог {threshold}, блок {story_recovery.BLOCK_PAIRS}")
+story_recovery.BLOCK_PAIRS = saved_block
+check("метки совпадают с прежним способом (60 наборов, разные блоки)", not mismatches, "; ".join(mismatches[:3]))
+
+identical = ["один и тот же пост про бренд"] * 30 + ["совсем другой текст про доставку"] * 2
+check(
+    "одинаковые тексты при пороге 1.0 — один компонент, как и раньше",
+    np.array_equal(
+        story_recovery._connected_components(identical, 1.0), _reference_components(identical, 1.0)
+    ),
+)
+
+rows, cols = story_recovery._star_edges(np.array([0, 0, 1, 0, 2, 2]))
+check(
+    "звезда: связей меньше, чем узлов, одиночный компонент без связей",
+    sorted(zip(rows.tolist(), cols.tolist())) == [(1, 0), (3, 0), (5, 4)],
+    str(list(zip(rows.tolist(), cols.tolist()))),
+)
+
+# Корпус с общей лексикой: почти любые два текста делят слово, и полное
+# произведение почти плотное — ровно тот случай, что ронял прод.
+dense = corpus(random.Random(2026), 3000, words_per_text=(6, 12))
+story_recovery.BLOCK_PAIRS = 200_000
+
+
+def peak_mb(func):
+    tracemalloc.start()
+    try:
+        labels = func(dense, 0.45)
+        return labels, tracemalloc.get_traced_memory()[1] / 2**20
+    finally:
+        tracemalloc.stop()
+
+
+new_labels, new_peak = peak_mb(story_recovery._connected_components)
+story_recovery.BLOCK_PAIRS = saved_block
+old_labels, old_peak = peak_mb(_reference_components)
+print(f"     пик памяти на 3 000 текстах: прежний способ {old_peak:.0f} МБ, блоками {new_peak:.0f} МБ")
+check("на плотном корпусе метки те же", np.array_equal(new_labels, old_labels))
+check("пик памяти в разы ниже", new_peak * 4 < old_peak, f"{new_peak:.0f} против {old_peak:.0f} МБ")
 
 print()
 if failures:
