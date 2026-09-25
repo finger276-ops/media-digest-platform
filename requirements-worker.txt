@@ -10,6 +10,10 @@ numpy>=1.24,<3.0
 openpyxl>=3.1,<4.0
 pandas>=2.0,<4.0
 pyarrow>=14.0,<26.0
+# services/observability.py шлёт алерты через HTTP — тот же модуль импортирует
+# и воркер (через platform_store), поэтому requests нужен и здесь, а не только
+# интерфейсу. Без него плановый запуск падает на импорте раньше первой задачи.
+requests>=2.31,<3.0
 scikit-learn>=1.3,<2.0
 supabase>=2.0,<3.0
 # Excel 97-2003 (.xls) — см. requirements.txt.

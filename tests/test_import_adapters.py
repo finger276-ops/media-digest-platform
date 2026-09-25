@@ -872,6 +872,17 @@ for requirements_file in ("requirements.txt", "requirements-worker.txt"):
     text = (REPO / requirements_file).read_text(encoding="utf-8")
     check(f"xlrd объявлен в {requirements_file}", re.search(r"^xlrd\s*[<>=]", text, re.M) is not None)
 
+# Воркер импортирует platform_store, а тот — services/observability, где на
+# верхнем уровне import requests. requests не тянется транзитивно ни одним
+# пакетом из requirements-worker.txt, поэтому без явного объявления плановый
+# запуск падает ModuleNotFoundError раньше первой задачи (найдено 25.09.2026,
+# requests не добавили вместе с observability ещё 16.09).
+worker_requirements = (REPO / "requirements-worker.txt").read_text(encoding="utf-8")
+check(
+    "requests объявлен в requirements-worker.txt (нужен services/observability)",
+    re.search(r"^requests\s*[<>=]", worker_requirements, re.M) is not None,
+)
+
 print()
 if failures:
     print(f"ПРОВАЛЕНО: {len(failures)} → {failures}")
