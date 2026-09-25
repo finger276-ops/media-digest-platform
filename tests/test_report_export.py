@@ -382,6 +382,8 @@ from services.report_export import (  # noqa: E402
     _draw_metrics_section,
     _draw_sentiment_section,
     _draw_top_lists_section,
+    _export_sentiment,
+    _pdf_metric_cards,
 )
 
 full_payload = summary_export_payload(
@@ -425,6 +427,76 @@ check(
     highlights_bottom >= _FOOTER_CLEARANCE - 0.03,
     f"{highlights_bottom} (порог {_FOOTER_CLEARANCE})",
 )
+
+print("12.1. Карточки и донат — итог по всей области, а не по последней точке разбивки")
+# По умолчанию гранулярность «День»: выгрузка длиннее одного дня даёт
+# comparison_sequence с 2+ точками. Раньше карточки и донат при len>=2 брали
+# ПОСЛЕДНЮЮ точку вместо суммы, и «Сообщения» здесь расходились с «Главным»
+# на той же странице (реальный случай: 54 здесь, 724 там). last-точка и
+# payload специально сильно отличаются, чтобы подмену было видно.
+last_point_sentiment = {"positive": 8, "neutral": 1, "negative": 1, "total": 10}
+fake_comparison = [
+    {
+        "label": "23.09",
+        "messages": 670,
+        "audience": 90000,
+        "reach": 190000,
+        "engagement": 4500,
+        "sentiment": {"positive": 200, "neutral": 400, "negative": 70, "total": 670},
+    },
+    {
+        "label": "24.09",
+        "messages": 54,
+        "audience": 3000,
+        "reach": 5000,
+        "engagement": 90,
+        "sentiment": last_point_sentiment,
+    },
+]
+mismatched_payload = dict(full_payload)
+check(
+    "фикстура честная: итог payload реально отличается от последней точки разбивки",
+    mismatched_payload.get("messages") not in (54, None) and mismatched_payload.get("messages") != 0,
+    str(mismatched_payload.get("messages")),
+)
+fig12 = plt.figure(figsize=(8.27, 11.69), dpi=170)
+ax12 = fig12.add_axes([0, 0, 1, 1])
+ax12.set_xlim(0, 1)
+ax12.set_ylim(0, 1)
+_draw_metrics_section(ax12, mismatched_payload, fake_comparison, "#2563eb", 0.862)
+_draw_sentiment_section(ax12, fig12, mismatched_payload, fake_comparison, 0.6)
+card_texts = [t.get_text() for t in ax12.texts]
+plt.close(fig12)
+messages_value = str(mismatched_payload.get("messages"))
+check(
+    "карточка «Сообщения» показывает итог всей области, а не последний день",
+    any(messages_value == text for text in card_texts),
+    str(card_texts),
+)
+check(
+    "значение последней точки разбивки (54) на карточке не показано",
+    "54" not in card_texts,
+    str(card_texts),
+)
+check(
+    "подписи «Последний период: …» / «к пред. периоду: …» больше нет",
+    not any("Последний период" in text or "к пред. периоду" in text for text in card_texts),
+    str(card_texts),
+)
+pos12, neu12, neg12, total12, unmarked12 = _export_sentiment(mismatched_payload, fake_comparison)
+check(
+    "донат тональности считает по всей области, а не по последней точке",
+    total12 == int(mismatched_payload.get("total", 0)) and total12 != last_point_sentiment["total"],
+    f"total12={total12}, payload={mismatched_payload.get('total')}, последняя точка={last_point_sentiment['total']}",
+)
+pdf_cards12, pdf_subtitle12 = _pdf_metric_cards(mismatched_payload)
+pdf_card_values = {title: value for title, value, _ in pdf_cards12}
+check(
+    "PDF: карточка «Сообщения» тоже показывает итог всей области",
+    pdf_card_values.get("Сообщения") == messages_value,
+    str(pdf_card_values),
+)
+check("PDF: без подписи «Последний период»", pdf_subtitle12 == "", pdf_subtitle12)
 
 print("13. PDF нативный: без растровой картинки, верный шрифт у видимого текста, автоперенос страниц")
 import base64 as _b64  # noqa: E402

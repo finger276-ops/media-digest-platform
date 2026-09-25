@@ -270,21 +270,6 @@ def _short_label(value: Any, max_len: int = 34) -> str:
     return text if len(text) <= max_len else text[: max_len - 1].rstrip() + "…"
 
 
-def _metric_delta_for_export(current: Any, previous: Any) -> str:
-    try:
-        cur = float(current or 0)
-        prev = float(previous or 0)
-    except (TypeError, ValueError):
-        return ""
-    diff = cur - prev
-    if prev:
-        pct = diff / abs(prev) * 100
-        return f"{diff:+,.0f} / {pct:+.1f}%".replace(",", " ")
-    if diff:
-        return f"{diff:+,.0f}".replace(",", " ")
-    return "0"
-
-
 def _adaptive_font_size(value: str, *, base: int = 15, min_size: int = 10) -> int:
     """Keep large metric values readable inside report cards."""
     length = len(str(value or ""))
@@ -365,54 +350,24 @@ _FOOTER_CLEARANCE = 0.075
 
 
 def _draw_metrics_section(ax, payload, comparison, accent, top: float) -> float:
-    if len(comparison) >= 2:
-        previous, current = comparison[-2], comparison[-1]
-        metric_cards = [
-            (
-                "Сообщения",
-                current.get("messages", 0),
-                _metric_delta_for_export(
-                    current.get("messages", 0), previous.get("messages", 0)
-                ),
-            ),
-            (
-                "Аудитория",
-                current.get("audience", 0),
-                _metric_delta_for_export(
-                    current.get("audience", 0), previous.get("audience", 0)
-                ),
-            ),
-            (
-                "Охват",
-                current.get("reach", 0),
-                _metric_delta_for_export(
-                    current.get("reach", 0), previous.get("reach", 0)
-                ),
-            ),
-            (
-                "Вовлеченность",
-                current.get("engagement", 0),
-                _metric_delta_for_export(
-                    current.get("engagement", 0), previous.get("engagement", 0)
-                ),
-            ),
-        ]
-        ax.text(
-            0.060,
-            top,
-            f"Последний период: {_short_label(current.get('label'), 48)}",
-            fontsize=8.2,
-            color="#6b7280",
-            va="top",
-            ha="left",
-        )
-    else:
-        metric_cards = [
-            ("Сообщения", payload.get("messages", 0), ""),
-            ("Аудитория", payload.get("audience", 0), ""),
-            ("Охват", payload.get("reach", 0), ""),
-            ("Вовлеченность", payload.get("engagement", 0), ""),
-        ]
+    """Крупные карточки шапки — сумма по всей выбранной области, не разбивка.
+
+    comparison_sequence — это точки ВНУТРИ уже выбранных данных (день, неделя,
+    месяц или файл целиком, смотря что выбрано в «Гранулярности»), а не
+    период до выбранного диапазона. Раньше при len(comparison) >= 2 — то есть
+    при любой выгрузке длиннее одного дня с гранулярностью по умолчанию
+    («День») — карточки и подпись «Последний период: …» показывали только
+    ПОСЛЕДНЮЮ точку разбивки, а не итог. На реальной выгрузке 17.09–24.09 это
+    выглядело как «Сообщения 54» здесь и «724» на странице «Главное» того же
+    документа. Динамика внутри диапазона — дело графика на экране, а не
+    противоречащих друг другу карточек в отчёте.
+    """
+    metric_cards = [
+        ("Сообщения", payload.get("messages", 0), ""),
+        ("Аудитория", payload.get("audience", 0), ""),
+        ("Охват", payload.get("reach", 0), ""),
+        ("Вовлеченность", payload.get("engagement", 0), ""),
+    ]
 
     xs = [0.060, 0.525]
     ys = [top - 0.107, top - 0.227]
@@ -438,19 +393,12 @@ def _export_sentiment(
 ) -> tuple[int, int, int, int, bool]:
     """Тональность для блока отчёта: (позитив, нейтрал, негатив, всего, не размечено).
 
-    При нескольких периодах диаграмма рисует последний, поэтому и признак
-    разметки проверяется на нём, а не на итоге: итог может быть размечен
-    благодаря прошлому периоду, а последний — нет.
+    Итог по всей выбранной области, а не по последней точке разбивки
+    comparison_sequence — тот же рассинхрон с «Главным», что и у карточек
+    сообщений/аудитории/охвата/вовлечённости (см. _draw_metrics_section):
+    диаграмма рисовала бы тональность только последнего дня, хотя рядом
+    «Сообщений» уже показывает сумму за весь период.
     """
-    if len(comparison) >= 2:
-        sent = comparison[-1].get("sentiment", {}) or {}
-        return (
-            int(sent.get("positive", 0) or 0),
-            int(sent.get("neutral", 0) or 0),
-            int(sent.get("negative", 0) or 0),
-            int(sent.get("total", 0) or 0),
-            sentiment_unmarked(sent),
-        )
     total = int(payload.get("total", 0) or 0)
     return (
         int(payload.get("positive", 0) or 0),
@@ -459,6 +407,19 @@ def _export_sentiment(
         total,
         bool(total) and not payload.get("sentiment_markup", True),
     )
+
+
+def _pdf_metric_cards(payload: dict[str, Any]) -> tuple[list[tuple[str, str, str]], str]:
+    """Карточки «Сообщения/Аудитория/Охват/Вовлеченность» для PDF — то же
+    правило, что у _draw_metrics_section (PNG): итог по всей выбранной
+    области, никогда по последней точке comparison_sequence."""
+    cards = [
+        ("Сообщения", format_int(payload.get("messages", 0)), ""),
+        ("Аудитория", format_int(payload.get("audience", 0)), ""),
+        ("Охват", format_int(payload.get("reach", 0)), ""),
+        ("Вовлеченность", format_int(payload.get("engagement", 0)), ""),
+    ]
+    return cards, ""
 
 
 def _draw_sentiment_section(ax, fig, payload, comparison, top: float) -> float:
@@ -1519,39 +1480,7 @@ def generate_summary_pdf(payload: dict[str, Any]) -> bytes:
     story: list[Any] = []
 
     if "metrics" in sections:
-        if len(comparison) >= 2:
-            previous, current = comparison[-2], comparison[-1]
-            cards = [
-                (
-                    "Сообщения",
-                    format_int(current.get("messages", 0)),
-                    _metric_delta_for_export(current.get("messages", 0), previous.get("messages", 0)),
-                ),
-                (
-                    "Аудитория",
-                    format_int(current.get("audience", 0)),
-                    _metric_delta_for_export(current.get("audience", 0), previous.get("audience", 0)),
-                ),
-                (
-                    "Охват",
-                    format_int(current.get("reach", 0)),
-                    _metric_delta_for_export(current.get("reach", 0), previous.get("reach", 0)),
-                ),
-                (
-                    "Вовлеченность",
-                    format_int(current.get("engagement", 0)),
-                    _metric_delta_for_export(current.get("engagement", 0), previous.get("engagement", 0)),
-                ),
-            ]
-            subtitle = f"Последний период: {_short_label(current.get('label'), 48)}"
-        else:
-            cards = [
-                ("Сообщения", format_int(payload.get("messages", 0)), ""),
-                ("Аудитория", format_int(payload.get("audience", 0)), ""),
-                ("Охват", format_int(payload.get("reach", 0)), ""),
-                ("Вовлеченность", format_int(payload.get("engagement", 0)), ""),
-            ]
-            subtitle = ""
+        cards, subtitle = _pdf_metric_cards(payload)
         story.append(
             _BlockFlowable(
                 _PdfMetricsBlock(cards, subtitle, accent_color, ink_color, muted_color, font_name, bold_font_name)
