@@ -1,6 +1,15 @@
 """Поддельный клиент Supabase для тестов (форма API supabase-py)."""
 
 import re
+from types import SimpleNamespace
+
+try:
+    from supabase_auth.errors import AuthApiError
+except Exception:  # pragma: no cover — без supabase-py тесты входа не нужны
+    class AuthApiError(Exception):
+        def __init__(self, message, status, code):
+            super().__init__(message)
+            self.message, self.status, self.code = message, status, code
 
 
 def _like_regex(pattern):
@@ -178,11 +187,76 @@ class FakeStorage:
         return FakeBucket(self.files)
 
 
+class FakeAuthAdmin:
+    def __init__(self, auth):
+        self._auth = auth
+
+    def create_user(self, attributes):
+        email = attributes["email"]
+        self._auth.admin_calls.append(("create_user", email))
+        if email in self._auth.users:
+            raise AuthApiError(
+                "A user with this email address has already been registered",
+                422,
+                "email_exists",
+            )
+        self._auth.users[email] = {
+            "email": email,
+            "confirmed": bool(attributes.get("email_confirm")),
+        }
+        return SimpleNamespace(user=SimpleNamespace(email=email))
+
+
+class FakeAuth:
+    """Supabase Auth: письмо с кодом и его проверка — без сети.
+
+    Коды выдаются по порядку (100001, 100002, ...), последний отправленный
+    на адрес лежит в codes. Как и настоящий Supabase, на неверный и на
+    просроченный код отвечает одной ошибкой otp_expired; код одноразовый.
+    """
+
+    def __init__(self):
+        self.users = {}
+        self.codes = {}
+        self.sent = []
+        self.verify_calls = []
+        self.admin_calls = []
+        self.expired = set()
+        self.fail_send = None
+        self.admin = FakeAuthAdmin(self)
+
+    def sign_in_with_otp(self, credentials):
+        if self.fail_send is not None:
+            raise self.fail_send
+        email = credentials["email"]
+        options = credentials.get("options") or {}
+        if email not in self.users:
+            if not options.get("should_create_user", True):
+                raise AuthApiError("Signups not allowed for otp", 422, "otp_disabled")
+            self.users[email] = {"email": email, "confirmed": False}
+        code = str(100001 + len(self.sent))
+        self.codes[email] = code
+        self.sent.append(email)
+        return SimpleNamespace(user=None, session=None)
+
+    def verify_otp(self, params):
+        self.verify_calls.append(dict(params))
+        email, token = params.get("email"), params.get("token")
+        if email in self.expired or self.codes.get(email) != token:
+            raise AuthApiError("Token has expired or is invalid", 403, "otp_expired")
+        del self.codes[email]
+        return SimpleNamespace(
+            user=SimpleNamespace(email=email),
+            session=SimpleNamespace(access_token="access", refresh_token="refresh"),
+        )
+
+
 class FakeClient:
     def __init__(self):
         self.db = {}
         self.files: dict[str, bytes] = {}
         self.storage = FakeStorage(self.files)
+        self.auth = FakeAuth()
 
     def table(self, name):
         return Table(self.db, name)

@@ -72,7 +72,8 @@ GIGACHAT_AUTH_KEY = "..."       # для GigaChat, ключ авторизаци
 """
 
 def is_platform_owner() -> bool:
-    """Владелец платформы — тот, кто вошёл по PLATFORM_ADMIN_PASSWORD."""
+    """Владелец платформы — вошёл по PLATFORM_ADMIN_PASSWORD или по адресу из
+    PLATFORM_OWNER_EMAILS: оба входа ставят один и тот же признак сессии."""
     return bool(st.session_state.get("platform_is_admin"))
 
 

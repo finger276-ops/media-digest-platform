@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """Раздел «Платформа»: доступ к проекту и управление проектами.
 
-render_project_access решает, какой проект открыт в этой сессии (владелец
-платформы выбирает из списка, редактор/зритель входит по коду).
+render_project_access решает, какой проект открыт в этой сессии: владелец
+платформы выбирает из всех проектов, вошедший по email — из проектов, к
+которым ему выдан доступ, остальные входят кодом проекта.
 render_project_manager — создание проектов и редактирование существующих:
 профиль алгоритма, подписи графиков, брендирование отчётов, клиентский вид,
 опасная зона удаления.
@@ -13,14 +14,18 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+from auth_ui import current_email
+from members_ui import render_project_members
 from platform_store import AccessCodeError, access_code_problem
 from services.cached_store import (
     create_project,
     delete_project,
     delete_storage_file,
     download_storage_file,
+    list_memberships,
     list_projects,
     resolve_project_access,
+    save_project_member,
     save_report_logo_to_storage,
     update_project,
 )
@@ -72,6 +77,10 @@ def render_project_access(is_admin: bool) -> tuple[str | None, str, pd.DataFrame
         )
         return selected, "owner", projects
 
+    email = current_email()
+    if email:
+        return _render_member_access(email, projects)
+
     if st.session_state.get("platform_project_id"):
         project_id = st.session_state["platform_project_id"]
         role = st.session_state.get("platform_project_role", "viewer")
@@ -103,6 +112,54 @@ def render_project_access(is_admin: bool) -> tuple[str | None, str, pd.DataFrame
     return None, "none", projects
 
 
+def _render_member_access(
+    email: str, projects: pd.DataFrame
+) -> tuple[str | None, str, pd.DataFrame]:
+    """Проект и роль вошедшего по email — по списку доступа, на каждой перерисовке.
+
+    Доступ сверяется заново при каждом нажатии, а не запоминается при входе:
+    снятый владельцем доступ или скрытый проект должны закрыться и в уже
+    открытой вкладке (список доступа кешируется на минуту).
+    """
+    active_ids = set(projects["project_id"].astype(str))
+    roles = {
+        m["project_id"]: m["role"]
+        for m in list_memberships(email)
+        if m["project_id"] in active_ids
+    }
+    if not roles:
+        st.session_state.pop("platform_project_id", None)
+        st.session_state.pop("platform_project_role", None)
+        st.sidebar.warning(
+            "У этого адреса пока нет доступа к проектам. Напишите владельцу "
+            "платформы."
+        )
+        return None, "none", projects
+
+    names = {
+        str(r["project_id"]): str(r.get("project_name") or r["project_id"])
+        for _, r in projects.iterrows()
+    }
+    options = [pid for pid in projects["project_id"].astype(str) if pid in roles]
+    current = str(st.session_state.get("platform_project_id") or "")
+    if len(options) == 1:
+        project_id = options[0]
+    else:
+        project_id = st.sidebar.selectbox(
+            "Проект",
+            options,
+            index=options.index(current) if current in options else 0,
+            format_func=lambda pid: f"{names.get(pid, pid)} · {role_title(roles[pid])}",
+            key="platform_member_project",
+        )
+    role = roles[project_id]
+    st.session_state["platform_project_id"] = project_id
+    st.session_state["platform_project_role"] = role
+    if len(options) == 1:
+        st.sidebar.caption(f"Проект: {names.get(project_id, project_id)} · {role_title(role)}")
+    return project_id, role, projects
+
+
 def render_project_manager(
     projects: pd.DataFrame,
     *,
@@ -117,10 +174,10 @@ def render_project_manager(
     будущая правка навигации сразу становилась дырой в правах, а на этой
     странице лежат коды доступа и необратимое удаление проекта.
 
-    «Владелец проекта» в платформе — это тот, у кого код редактора: личности
-    у кодов нет, привязать проект к человеку нечем. Поэтому аналитик работает
-    ровно с тем проектом, в который вошёл, и заводит новые, сам задавая им
-    коды. Чужие проекты и их коды ему не показываются.
+    Аналитик работает ровно с тем проектом, в который вошёл, и заводит новые,
+    сам задавая им коды. Вошедший по email аналитик получает доступ к
+    созданному проекту сразу. Чужие проекты и их коды ему не показываются, а
+    доступы по email выдаёт только владелец платформы.
     """
     can_manage = is_admin or role_rank(role) >= role_rank("editor")
     if not can_manage:
@@ -133,10 +190,14 @@ def render_project_manager(
         ]
 
     st.header("Управление проектами")
+    creator_email = "" if is_admin else current_email()
     if not is_admin:
         st.caption(
-            "Показан проект, в который вы вошли. Созданный проект открывается "
-            "кодом аналитика, который вы ему зададите."
+            "Показан проект, в который вы вошли. Созданный проект появится в "
+            "списке проектов слева."
+            if creator_email
+            else "Показан проект, в который вы вошли. Созданный проект "
+            "открывается кодом аналитика, который вы ему зададите."
         )
     with st.expander("Создать проект", expanded=projects.empty):
         name = st.text_input("Название проекта", key="new_project_name")
@@ -176,7 +237,13 @@ def render_project_manager(
                     st.error(str(exc))
                 else:
                     st.success(f"Проект создан: {project_id}")
-                    if not is_admin:
+                    if creator_email:
+                        # Кто завёл проект, тот в нём и работает: иначе
+                        # вошедший по email аналитик не увидел бы свой же
+                        # проект, пока владелец не выдаст ему доступ.
+                        save_project_member(project_id, creator_email, "editor")
+                        st.rerun()
+                    elif not is_admin:
                         # Аналитик сидит в проекте, в который вошёл кодом. Новый
                         # проект откроется только своим кодом — сказать об этом
                         # надо сразу, иначе человек будет искать его в списке.
@@ -628,6 +695,8 @@ def render_project_manager(
                     st.stop()
                 st.success("Проект обновлен.")
                 st.rerun()
+
+            render_project_members(project_id, can_edit=is_admin)
 
             # Удаление проекта со всеми периодами необратимо и остаётся за
             # владельцем платформы. Аналитик настраивает проект и заводит

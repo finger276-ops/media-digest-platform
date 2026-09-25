@@ -138,6 +138,19 @@ if st is not None:
         with perf_block("store.get_manual", project_id=project_id):
             return store.get_manual(project_id, row_key)
 
+    # Доступы по email сверяются на каждой перерисовке: снятый владельцем
+    # доступ должен закрыть проект и в уже открытой вкладке. Срок короче,
+    # чем у списка проектов, — это граница прав, а не справочник.
+    @st.cache_data(ttl=60, show_spinner=False, max_entries=256)
+    def _cached_list_memberships(email: str, version: int) -> list[dict[str, Any]]:
+        with perf_block("store.list_memberships"):
+            return store.list_memberships(email)
+
+    @st.cache_data(ttl=60, show_spinner=False, max_entries=16)
+    def _cached_list_project_members(project_id: str, version: int) -> pd.DataFrame:
+        with perf_block("store.list_project_members", project_id=project_id):
+            return store.list_project_members(project_id)
+
 else:  # pragma: no cover
 
     def _cached_load_table(
@@ -167,6 +180,12 @@ else:  # pragma: no cover
         project_id: str, row_key: str, version: int
     ) -> dict[str, Any] | None:
         return store.get_manual(project_id, row_key)
+
+    def _cached_list_memberships(email: str, version: int) -> list[dict[str, Any]]:
+        return store.list_memberships(email)
+
+    def _cached_list_project_members(project_id: str, version: int) -> pd.DataFrame:
+        return store.list_project_members(project_id)
 
 
 def load_table(project_id: str, period_ids: list[str], table_name: str) -> pd.DataFrame:
@@ -229,6 +248,36 @@ def get_manual(project_id: str, row_key: str) -> dict[str, Any] | None:
     return _cached_get_manual(project_id, row_key, cache_version(project_id, "manual"))
 
 
+def _bump_members() -> None:
+    bump_cache("__global__", namespaces=("members",))
+
+
+def list_memberships(email: str) -> list[dict[str, Any]]:
+    email = store.normalize_email(email)
+    if not email:
+        return []
+    return _cached_list_memberships(email, cache_version("__global__", "members"))
+
+
+def list_project_members(project_id: str) -> pd.DataFrame:
+    return _cached_list_project_members(
+        str(project_id), cache_version("__global__", "members")
+    )
+
+
+def save_project_member(project_id: str, email: str, role: str) -> str:
+    with perf_block("store.save_project_member", project_id=project_id):
+        saved = store.save_project_member(project_id, email, role)
+    _bump_members()
+    return saved
+
+
+def remove_project_member(project_id: str, email: str) -> None:
+    with perf_block("store.remove_project_member", project_id=project_id):
+        store.remove_project_member(project_id, email)
+    _bump_members()
+
+
 def resolve_project_access(access_code: str) -> tuple[str | None, str]:
     # Reuse cached project list indirectly through store's logic is hard, so keep raw call.
     # Access checks are small and only happen at entry.
@@ -277,6 +326,8 @@ def delete_project(project_id: str, **kwargs):
         result = store.delete_project(project_id, **kwargs)
     clear_platform_caches(project_id)
     clear_platform_caches(None)
+    # Вместе с проектом удаляются и его доступы по email.
+    _bump_members()
     return result
 
 

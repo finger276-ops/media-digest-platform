@@ -394,6 +394,117 @@ def resolve_project_access(access_code: str) -> tuple[str | None, str]:
     return matches[0] if matches else (None, "none")
 
 
+# --- Доступ по email -------------------------------------------------------
+#
+# Роль человека в проекте — строка platform_project_members. Выдаёт её только
+# владелец платформы. Сам владелец платформы здесь не записывается: он задан
+# секретом PLATFORM_OWNER_EMAILS и видит все проекты.
+
+MEMBER_ROLES = ("viewer", "editor")
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def normalize_email(value: Any) -> str:
+    """Адрес в нижнем регистре без пробелов по краям; пустая строка — не адрес.
+
+    Регистр в адресе ничего не значит для почты, а сравнение идёт по точному
+    совпадению строк: Ivan@ и ivan@ иначе стали бы двумя разными людьми.
+    """
+    email = str(value or "").strip().lower()
+    return email if _EMAIL_RE.match(email) else ""
+
+
+def member_problem(email: str, role: str) -> str | None:
+    """Почему такой доступ нельзя выдать; None — если можно."""
+    if not normalize_email(email):
+        return "Укажите адрес целиком, например ivan@company.ru."
+    if role not in MEMBER_ROLES:
+        return "Роль — «Пользователь» или «Аналитик»."
+    return None
+
+
+def list_project_members(project_id: str) -> pd.DataFrame:
+    """Все выданные доступы проекта, включая закрытые (status != active)."""
+    rows = (
+        get_supabase_client()
+        .table("platform_project_members")
+        .select("*")
+        .eq("project_id", str(project_id))
+        .order("created_at")
+        .execute()
+        .data
+        or []
+    )
+    return pd.DataFrame(rows)
+
+
+def list_memberships(email: str) -> list[dict[str, Any]]:
+    """Действующие доступы одного адреса: [{project_id, role}, ...]."""
+    email = normalize_email(email)
+    if not email:
+        return []
+    rows = (
+        get_supabase_client()
+        .table("platform_project_members")
+        .select("*")
+        .eq("user_email", email)
+        .eq("status", "active")
+        .execute()
+        .data
+        or []
+    )
+    out = []
+    for row in rows:
+        role = str(row.get("role") or "")
+        if role in MEMBER_ROLES:
+            out.append({"project_id": str(row.get("project_id")), "role": role})
+    return out
+
+
+def email_has_access(email: str) -> bool:
+    """Есть ли у адреса хоть один действующий доступ к действующему проекту."""
+    memberships = list_memberships(email)
+    if not memberships:
+        return False
+    active = list_projects(include_inactive=False)
+    if active.empty:
+        return False
+    active_ids = set(active["project_id"].astype(str))
+    return any(m["project_id"] in active_ids for m in memberships)
+
+
+def save_project_member(project_id: str, email: str, role: str) -> str:
+    """Выдать доступ или сменить роль. Возвращает нормализованный адрес.
+
+    Повторная выдача того же адреса не создаёт второй строки: уникальность
+    (project_id, user_email) в базе, и адрес всегда в нижнем регистре.
+    """
+    problem = member_problem(email, role)
+    if problem:
+        raise ValueError(problem)
+    email = normalize_email(email)
+    get_supabase_client().table("platform_project_members").upsert(
+        {
+            "project_id": str(project_id),
+            "user_email": email,
+            "role": role,
+            "status": "active",
+        },
+        on_conflict="project_id,user_email",
+    ).execute()
+    return email
+
+
+def remove_project_member(project_id: str, email: str) -> None:
+    """Закрыть доступ адреса к проекту. Строка удаляется целиком."""
+    email = normalize_email(email)
+    if not email:
+        return
+    get_supabase_client().table("platform_project_members").delete().eq(
+        "project_id", str(project_id)
+    ).eq("user_email", email).execute()
+
+
 def _normalize_date_for_db(value: Any) -> str | None:
     if value is None:
         return None

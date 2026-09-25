@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hmac
 import logging
 import os
 import uuid
@@ -15,7 +16,15 @@ import pandas as pd
 import streamlit as st
 import altair as alt
 
+from auth_ui import (
+    ADMIN_VIA_KEY,
+    current_email,
+    flush_login_cookie,
+    render_account_panel,
+    restore_login_from_cookie,
+)
 from metric_cards_ui import inject_metric_css
+from services.email_login import email_login_enabled, is_owner_email, owner_emails
 from services.cached_store import (
     supabase_configured,
     list_projects,
@@ -145,7 +154,7 @@ from services.project_settings import (
 )
 
 APP_TITLE = "Платформа дайджестов"
-APP_VERSION = "4.12.4: саммари от ИИ, сертификат без терминала"
+APP_VERSION = "4.13.0: вход по email"
 
 
 def _dashboard_data_uncached(
@@ -242,12 +251,31 @@ def get_secret_value(name: str, default: str = "") -> str:
 
 
 def is_platform_admin() -> bool:
+    """Режим владельца платформы: по адресу из PLATFORM_OWNER_EMAILS или паролю.
+
+    Пароль остаётся аварийным входом: если почта или Supabase Auth
+    недоступны, владелец всё равно попадает в платформу.
+    """
     admin_password = get_secret_value("PLATFORM_ADMIN_PASSWORD") or get_secret_value(
         "ADMIN_PASSWORD"
     )
     if "platform_is_admin" not in st.session_state:
         st.session_state["platform_is_admin"] = False
+    email = current_email()
+    if email and is_owner_email(email):
+        st.session_state["platform_is_admin"] = True
+        st.session_state[ADMIN_VIA_KEY] = "email"
+        return True
+    if st.session_state.get(ADMIN_VIA_KEY) == "email":
+        # Адрес убрали из владельцев, пока вкладка была открыта: режим
+        # владельца снимается на следующей же перерисовке.
+        st.session_state["platform_is_admin"] = False
+        st.session_state.pop(ADMIN_VIA_KEY, None)
     if not admin_password:
+        if email_login_enabled() and owner_emails():
+            # Владельцы заданы адресами — значит, владелец платформы
+            # известен, и открывать его режим всем без пароля незачем.
+            return False
         st.sidebar.warning(
             "PLATFORM_ADMIN_PASSWORD не настроен: режим владельца временно доступен всем."
         )
@@ -256,19 +284,40 @@ def is_platform_admin() -> bool:
         st.sidebar.success("Режим: владелец платформы")
         if st.sidebar.button("Выйти из режима владельца"):
             st.session_state["platform_is_admin"] = False
+            st.session_state.pop(ADMIN_VIA_KEY, None)
             st.rerun()
         return True
+    if email:
+        # Вошедшему по email вход по паролю не нужен: владельцем его делает
+        # адрес, а не пароль.
+        return False
     with st.sidebar.expander("Вход владельца платформы", expanded=False):
         password = st.text_input(
             "Пароль владельца", type="password", key="platform_admin_password"
         )
         if st.button("Войти", key="platform_admin_login"):
-            if password == admin_password:
+            if hmac.compare_digest(password.encode("utf-8"), admin_password.encode("utf-8")):
                 st.session_state["platform_is_admin"] = True
+                st.session_state[ADMIN_VIA_KEY] = "password"
                 st.rerun()
             else:
                 st.error("Неверный пароль.")
     return False
+
+
+def login_hint() -> str:
+    """Подсказка на пустой странице: какими способами здесь можно войти."""
+    if current_email():
+        return (
+            "У вашего адреса пока нет доступа к проектам. Напишите владельцу "
+            "платформы, чтобы он выдал доступ."
+        )
+    if email_login_enabled():
+        return (
+            "Войдите по email, кодом проекта или как владелец платформы — "
+            "в боковой панели слева."
+        )
+    return "Введите код доступа к проекту или войдите как владелец платформы."
 
 
 def normalize_text(value: Any) -> str:
@@ -404,8 +453,11 @@ def main() -> None:
         )
         st.stop()
 
+    restore_login_from_cookie()
+    render_account_panel()
     is_admin = is_platform_admin()
     project_id, role, projects = render_project_access(is_admin)
+    flush_login_cookie()
 
     heartbeat_role = "owner" if is_admin else role
     if heartbeat_role in {"owner", "editor", "viewer"}:
@@ -475,7 +527,7 @@ def main() -> None:
         groups.append(("Платформа", ["Проекты", "Сессии"]))
 
     if not groups:
-        st.info("Выберите проект или войдите как владелец платформы.")
+        st.info(login_hint())
         if is_admin:
             render_project_manager(projects)
         return
@@ -538,7 +590,7 @@ def main() -> None:
         )
         return
     if not project_id:
-        st.info("Введите код доступа к проекту или войдите как владелец платформы.")
+        st.info(login_hint())
         return
     if page == "Загрузка файла":
         render_section_safely(

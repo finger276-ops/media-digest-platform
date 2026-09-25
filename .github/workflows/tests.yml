@@ -157,3 +157,6 @@ jobs:
 
       - name: Коды доступа (уникальность, дубли закрывают вход)
         run: python tests/test_access_codes.py
+
+      - name: Вход по email (код из письма, список доступа, запомненный вход)
+        run: python tests/test_email_login.py
