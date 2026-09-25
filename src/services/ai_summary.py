@@ -433,7 +433,7 @@ ACCESS_OWNER = "owner"
 ACCESS_EDITOR = "editor"
 ACCESS_OPTIONS = {
     ACCESS_OWNER: "Только владелец платформы",
-    ACCESS_EDITOR: "Владелец и редакторы проекта",
+    ACCESS_EDITOR: "Владелец и аналитики проекта",
 }
 DEFAULT_ACCESS = ACCESS_OWNER
 
