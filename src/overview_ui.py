@@ -15,7 +15,13 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from metric_cards_ui import metric_card, render_metric_row
+from metric_cards_ui import (
+    DELTA_INVERSE,
+    DELTA_NEUTRAL,
+    DELTA_NORMAL,
+    metric_card,
+    render_metric_row,
+)
 from services.dashboard_config import COMPARISON_CHART_BLOCKS, DEFAULT_DASHBOARD_VIEW_SETTINGS
 from services.metrics_compute import (
     NO_SENTIMENT_LABEL,
@@ -56,6 +62,16 @@ MAIN_METRICS_COLOR_SCALE = fixed_color_scale(
 )
 
 TONE_CARDS = [("Позитив", "positive"), ("Нейтрал", "neutral"), ("Негатив", "negative")]
+# Рост позитива однозначно хорош (обычный зелёный цвет по умолчанию), а вот
+# рост негатива однозначно плох — раньше он тоже красился в зелёный, потому
+# что цвет карточки не различал метрики. Нейтрал неоднозначен в обе стороны
+# (рост нейтрала может значить и что скандал утих, и что бренд перестали
+# обсуждать), поэтому его изменение серое, без оценки.
+_TONE_DELTA_COLOR = {
+    "positive": DELTA_NORMAL,
+    "neutral": DELTA_NEUTRAL,
+    "negative": DELTA_INVERSE,
+}
 
 
 def _tone_cards(
@@ -103,6 +119,7 @@ def _tone_cards(
             label,
             percent_text(sent.get(key, 0), total),
             delta=_share_delta(key),
+            delta_color=_TONE_DELTA_COLOR.get(key, DELTA_NORMAL),
             help_text=f"{format_int(sent.get(key, 0))} {count_hint}",
         )
         for label, key in TONE_CARDS
@@ -898,6 +915,7 @@ def render_project_intro(
     show_title: bool = True,
     previous_metrics: dict[str, Any] | None = None,
     previous_label: str = "",
+    previous_disabled_reason: str = "",
 ) -> dict[str, Any]:
     """Unified top block for all project profiles.
 
@@ -953,6 +971,8 @@ def render_project_intro(
 
     if previous_label:
         st.caption(f"Изменения — к предыдущему периоду: {previous_label}")
+    elif previous_disabled_reason:
+        st.caption(previous_disabled_reason)
 
     metrics["period_label"] = period_label
     metrics["project_name"] = project_name

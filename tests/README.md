@@ -36,6 +36,7 @@ python tests/test_ingest_queue.py            # логика очереди: за
 python tests/test_worker_e2e.py              # воркер целиком: очередь → файл → период проекта
 python tests/test_section_boundary.py        # граница отказа раздела не роняет всю страницу
 python tests/test_manual_conflict.py         # блокировка правок: конфликт двух редакторов
+python tests/test_cached_store.py            # кеш одинаков во всех вкладках и сессиях
 python tests/test_manual_moderation.py       # ручная модерация: правки, слияния, переносы, счётчики
 python tests/test_observability.py           # доставка ошибок владельцу (Sentry/вебхук)
 python tests/test_except_hygiene.py          # гигиена except: молчание должно быть обосновано

@@ -11,6 +11,26 @@ build_period_change_insights склоняет глагол по роду сло�
 Мутационная проверка: вернуть родовую развилку по label (женский род по
 умолчанию, средний только для "сообщений") -> тест "средний род для
 аудитории/охвата/вовлечённости" краснеет.
+
+Разделы 4-5 проверяют две находки независимой проверки коммита 9b89f3d:
+  - карточка «Инфоповодов» и сигнал «Темы с негативом» считали остаточную
+    корзину «Без сюжета» как обычную тему — на СМИ-выгрузке с одним таким
+    инфоповодом карточка писала «1», а раздел «Инфоповоды» на тех же данных
+    писал «ни одного»;
+  - «Что изменилось к предыдущему периоду» сравнивало периоды по messages,
+    уже суженным гранулярностью до части выбранных периодов: период, чьи дни
+    не попали в узкий выбор, считался по нулю сообщений, и получались
+    выдуманные «выросло с 0 до 10» и «доля негатива +50 п.п.» на ровном месте.
+
+Мутационные проверки:
+- убрать фильтр is_residual в _drop_residual (return events_agg как есть) ->
+  падают «карточка не считает остаточную корзину» и «сигнал не подхватывает
+  негатив из остаточной корзины»;
+- убрать использование reportable_events для risky_events (вернуть
+  events_agg.copy()) -> падает «сигнал не подхватывает негатив из остаточной
+  корзины»;
+- убрать ветку granularity_narrowed (всегда показывать инсайты) -> падает
+  «при сужении гранулярностью показана причина, а не выдуманные числа».
 """
 
 import os
@@ -27,7 +47,7 @@ os.environ.setdefault("SUPABASE_SERVICE_ROLE_KEY", "test-key")
 
 import pandas as pd  # noqa: E402
 
-from client_insights_ui import build_period_change_insights  # noqa: E402
+from client_insights_ui import _drop_residual, build_period_change_insights  # noqa: E402
 
 failures = []
 
@@ -112,6 +132,112 @@ print("3. Один период — сравнивать не с чем, пус�
 check(
     "один период не падает и не даёт инсайтов",
     build_period_change_insights(grown[grown["period_id"] == "p1"], PERIODS, ["p1"]) == [],
+)
+
+print("4. Остаточная корзина «Без сюжета» не считается инфоповодом")
+events_with_residual = pd.DataFrame(
+    [
+        {"event_id": "e1", "title": "Тема 1", "message_count": 4, "negative_count": 0, "is_residual": False},
+        {"event_id": "e2", "title": "Тема 2", "message_count": 3, "negative_count": 0, "is_residual": False},
+        {
+            "event_id": "e_residual",
+            "title": "Без сюжета",
+            "message_count": 5,
+            "negative_count": 5,
+            "is_residual": True,
+        },
+    ]
+)
+check(
+    "_drop_residual убирает только остаточную корзину",
+    len(_drop_residual(events_with_residual)) == 2
+    and "e_residual" not in set(_drop_residual(events_with_residual)["event_id"]),
+    str(_drop_residual(events_with_residual)["event_id"].tolist()),
+)
+check(
+    "без колонки is_residual кадр не трогается",
+    len(_drop_residual(events_with_residual.drop(columns=["is_residual"]))) == 3,
+)
+check("пустой кадр не падает", _drop_residual(pd.DataFrame()).empty)
+
+from streamlit.testing.v1 import AppTest  # noqa: E402
+
+from client_insights_ui import render_client_insights  # noqa: E402
+
+
+def _insights_app():
+    import streamlit as st
+
+    from client_insights_ui import render_client_insights
+
+    render_client_insights(
+        st.session_state["messages"],
+        st.session_state["events_agg"],
+        st.session_state["periods"],
+        st.session_state["selected_period_ids"],
+        granularity_narrowed=st.session_state.get("granularity_narrowed", False),
+    )
+
+
+def run_insights(messages, events_agg, periods, selected_period_ids, *, granularity_narrowed=False):
+    app = AppTest.from_function(_insights_app, default_timeout=60)
+    app.session_state["messages"] = messages
+    app.session_state["events_agg"] = events_agg
+    app.session_state["periods"] = periods
+    app.session_state["selected_period_ids"] = selected_period_ids
+    app.session_state["granularity_narrowed"] = granularity_narrowed
+    app.run()
+    return app
+
+
+single_period_messages = messages_for("p1", ["a", "b"], audience=500, reach=1000, engagement=10)
+app4 = run_insights(single_period_messages, events_with_residual, PERIODS, ["p1"])
+check("раздел с остаточной корзиной открылся без исключений", not app4.exception, str(app4.exception))
+cards4 = {str(m.label): str(m.value) for m in app4.metric}
+check(
+    "карточка «Инфоповодов» не считает остаточную корзину",
+    cards4.get("Инфоповодов") == "2",
+    str(cards4),
+)
+signals4 = " ".join(str(m.value) for m in app4.markdown)
+check(
+    "сигнал «Темы с негативом» не подхватывает негатив из остаточной корзины",
+    "Темы с негативом" not in signals4,
+    signals4[:300],
+)
+
+print("5. Сужение гранулярностью прячет сравнение, а не выдуманные числа")
+insights_period_msgs = pd.concat(
+    [
+        messages_for("p1", ["a", "b"], audience=500, reach=1000, engagement=10),
+        messages_for("p2", ["c", "d", "e", "f"], audience=900, reach=2000, engagement=40),
+    ],
+    ignore_index=True,
+)
+no_events = pd.DataFrame(columns=["event_id", "title", "message_count", "negative_count", "is_residual"])
+
+app5_full = run_insights(
+    insights_period_msgs, no_events, PERIODS, ["p1", "p2"], granularity_narrowed=False
+)
+check("без сужения раздел открылся без исключений", not app5_full.exception, str(app5_full.exception))
+text5_full = " ".join(str(m.value) for m in app5_full.markdown)
+check(
+    "без сужения показаны настоящие изменения",
+    "Количество сообщений выросло" in text5_full,
+    text5_full[:300],
+)
+
+app5_narrow = run_insights(
+    insights_period_msgs, no_events, PERIODS, ["p1", "p2"], granularity_narrowed=True
+)
+check("при сужении раздел открылся без исключений", not app5_narrow.exception, str(app5_narrow.exception))
+captions5 = [str(c.value) for c in app5_narrow.caption]
+text5_narrow = " ".join(str(m.value) for m in app5_narrow.markdown)
+check(
+    "при сужении гранулярностью показана причина, а не выдуманные числа",
+    any("отмечены не все дни периода" in c for c in captions5)
+    and "Количество сообщений выросло" not in text5_narrow,
+    str(captions5) + " | " + text5_narrow[:200],
 )
 
 print()

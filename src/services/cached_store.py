@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 import pandas as pd
@@ -24,19 +25,18 @@ delete_storage_file = store.delete_storage_file
 storage_public_url = store.storage_public_url
 
 
-def _session_versions() -> dict[str, int]:
-    if st is None:
-        if not hasattr(_session_versions, "_fallback"):
-            setattr(_session_versions, "_fallback", {})
-        return getattr(_session_versions, "_fallback")
-    try:
-        if "_platform_cache_versions" not in st.session_state:
-            st.session_state["_platform_cache_versions"] = {}
-        return st.session_state["_platform_cache_versions"]
-    except Exception:
-        if not hasattr(_session_versions, "_fallback"):
-            setattr(_session_versions, "_fallback", {})
-        return getattr(_session_versions, "_fallback")
+# Счётчики версий раньше жили в st.session_state — отдельно у каждой вкладки
+# и у каждого пользователя. А сам кеш @st.cache_data общий на весь процесс:
+# ключ записи — это (аргументы, номер версии), и версия у разных сессий росла
+# независимо от 0. Из-за этого: 1) вкладка, открытая заново (или клиентская),
+# после чужой правки до TTL читала старый снимок, потому что у неё самой
+# версия ещё не выросла; 2) два аналитика, начав с одного и того же 0, после
+# по одной правке каждый получали ОДИНАКОВЫЙ номер версии — и то, кто сохранил
+# вторым, читал из кеша результат первого, а не свою же правку. Счётчики
+# сделаны общими на процесс (как и сам кеш), поэтому правка в одной вкладке
+# сразу видна во всех остальных вкладках этого же процесса.
+_VERSIONS_LOCK = threading.Lock()
+_PROCESS_VERSIONS: dict[str, int] = {}
 
 
 def _version_key(project_id: str | None, namespace: str) -> str:
@@ -45,8 +45,8 @@ def _version_key(project_id: str | None, namespace: str) -> str:
 
 
 def cache_version(project_id: str | None = None, namespace: str = "data") -> int:
-    versions = _session_versions()
-    return int(versions.get(_version_key(project_id, namespace), 0) or 0)
+    with _VERSIONS_LOCK:
+        return int(_PROCESS_VERSIONS.get(_version_key(project_id, namespace), 0) or 0)
 
 
 def bump_cache(
@@ -54,14 +54,14 @@ def bump_cache(
     *,
     namespaces: tuple[str, ...] = ("data", "manual", "periods"),
 ) -> None:
-    versions = _session_versions()
-    for namespace in namespaces:
-        key = _version_key(project_id, namespace)
-        versions[key] = int(versions.get(key, 0) or 0) + 1
-    # Project list/access may depend on project metadata and codes.
-    if project_id is None or "projects" in namespaces:
-        key = _version_key("__global__", "projects")
-        versions[key] = int(versions.get(key, 0) or 0) + 1
+    with _VERSIONS_LOCK:
+        for namespace in namespaces:
+            key = _version_key(project_id, namespace)
+            _PROCESS_VERSIONS[key] = int(_PROCESS_VERSIONS.get(key, 0) or 0) + 1
+        # Project list/access may depend on project metadata and codes.
+        if project_id is None or "projects" in namespaces:
+            key = _version_key("__global__", "projects")
+            _PROCESS_VERSIONS[key] = int(_PROCESS_VERSIONS.get(key, 0) or 0) + 1
 
 
 def clear_platform_caches(project_id: str | None = None) -> None:

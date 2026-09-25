@@ -31,6 +31,22 @@ from services.report_highlights import top_report_tags as top_client_tags
 from services.tag_compute import build_tag_statistics
 
 
+def _drop_residual(events_agg: pd.DataFrame) -> pd.DataFrame:
+    """Инфоповоды без остаточной корзины «Без сюжета».
+
+    events_agg всегда включает «Без сюжета», если в выгрузке есть сообщения,
+    которые не удалось собрать в тему, — это техническая корзина, а не тема
+    рынка. Раздел «Инфоповоды» её из счёта уже убирает; здесь тот же приём,
+    иначе на СМИ-выгрузке (Медиалогия, одна корзина на 228 сообщений) карточка
+    «Инфоповодов» пишет «1», а сам раздел «Инфоповоды» — «ни одного».
+    """
+    if not isinstance(events_agg, pd.DataFrame) or events_agg.empty:
+        return events_agg
+    if "is_residual" not in events_agg.columns:
+        return events_agg
+    return events_agg[~events_agg["is_residual"].fillna(False).astype(bool)]
+
+
 def build_period_change_insights(
     messages: pd.DataFrame, periods: pd.DataFrame, selected_period_ids: list[str]
 ) -> list[str]:
@@ -235,6 +251,7 @@ def render_client_insights(
     selected_period_ids: list[str],
     *,
     profile: str = "",
+    granularity_narrowed: bool = False,
 ) -> None:
     st.subheader("Клиентский обзор")
     st.caption(
@@ -266,12 +283,17 @@ def render_client_insights(
             ("Риск негатива", risk_level, f"Негативных сообщений: {format_int(negative)}"),
             ("Доля негатива", f"{negative_share * 100:.1f}%", ""),
         ]
+    reportable_events = _drop_residual(events_agg)
     top_cards = [
         *tone_cards,
         ("Вовлеченность", format_int(engagement), ""),
         (
             "Инфоповодов",
-            format_int(len(events_agg) if isinstance(events_agg, pd.DataFrame) else 0),
+            format_int(
+                len(reportable_events)
+                if isinstance(reportable_events, pd.DataFrame)
+                else 0
+            ),
             "",
         ),
     ]
@@ -310,11 +332,11 @@ def render_client_insights(
         )
 
     if (
-        isinstance(events_agg, pd.DataFrame)
-        and not events_agg.empty
-        and "negative_count" in events_agg.columns
+        isinstance(reportable_events, pd.DataFrame)
+        and not reportable_events.empty
+        and "negative_count" in reportable_events.columns
     ):
-        risky_events = events_agg.copy()
+        risky_events = reportable_events.copy()
         risky_events["negative_count"] = pd.to_numeric(
             risky_events["negative_count"], errors="coerce"
         ).fillna(0)
@@ -381,7 +403,19 @@ def render_client_insights(
                 st.caption(str(signal.get("Что смотреть", "")))
                 st.markdown(f"`{signal.get('Данные', '')}`")
 
-    if len(selected_period_ids or []) >= 2:
+    if len(selected_period_ids or []) >= 2 and granularity_narrowed:
+        # build_period_change_insights и build_tag_change_table считают
+        # metrics по periods["period_id"] внутри уже суженных messages. Если
+        # гранулярность оставила дни только части выбранных периодов, для
+        # остальных periods метрики посчитаются по нулевым сообщениям —
+        # получилось бы «выросло с 0 до 10» и «доля негатива +50 п.п.» на
+        # ровном месте, хотя период просто выпал из выборки целиком.
+        st.markdown("#### Что изменилось к предыдущему периоду")
+        st.caption(
+            "Изменение к предыдущему периоду не показано: в гранулярности "
+            "отмечены не все дни периода."
+        )
+    elif len(selected_period_ids or []) >= 2:
         st.markdown("#### Что изменилось к предыдущему периоду")
         insights = build_period_change_insights(messages, periods, selected_period_ids)
         if insights:

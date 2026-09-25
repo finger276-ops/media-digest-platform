@@ -798,13 +798,37 @@ def main() -> None:
             if page == "Обзор":
                 # В «Обзоре» показатели периода и есть содержание раздела,
                 # поэтому здесь полная полоса с динамикой к прошлому периоду.
+                # «Прошлый период» — это ровно ОДИН период перед самым ранним
+                # выбранным (previous_period_id). Карточки выше показывают
+                # сумму по ВСЕМ выбранным периодам (или по узкому куску,
+                # который оставила гранулярность) — сравнивать это с одним
+                # целым прошлым периодом нечестно: два выбранных периода
+                # против одного такого же дали бы «+100%» на ровном месте, а
+                # выбор части дней — глубокое ложное падение. Та же защита,
+                # что уже стоит в «Индексах бренда» (partial_period).
+                comparable_previous = (
+                    len(selected_period_ids) < 2 and not granularity_narrowed
+                )
                 prev_id = previous_period_id(periods, selected_period_ids)
-                prev_metrics = period_overview_metrics(project_id, prev_id)
+                prev_metrics = (
+                    period_overview_metrics(project_id, prev_id)
+                    if comparable_previous
+                    else None
+                )
                 prev_label = ""
+                prev_disabled_reason = ""
                 if prev_metrics and prev_id and not periods.empty:
                     prev_row = periods[periods["period_id"].astype(str) == str(prev_id)]
                     if not prev_row.empty:
                         prev_label = str(prev_row.iloc[0].get("period_name") or prev_id)
+                elif not comparable_previous:
+                    prev_disabled_reason = (
+                        "Изменение к предыдущему периоду не показано: выбрано "
+                        "несколько периодов."
+                        if len(selected_period_ids) >= 2
+                        else "Изменение к предыдущему периоду не показано: в "
+                        "гранулярности отмечены не все дни периода."
+                    )
                 metrics = render_project_intro(
                     project_name,
                     enriched_messages,
@@ -819,6 +843,7 @@ def main() -> None:
                     show_title=False,
                     previous_metrics=prev_metrics,
                     previous_label=prev_label,
+                    previous_disabled_reason=prev_disabled_reason,
                 )
             else:
                 # В рабочих разделах те же числа нужны как ориентир, а не как
@@ -848,6 +873,7 @@ def main() -> None:
                 periods,
                 selected_period_ids,
                 profile=project_profile,
+                granularity_narrowed=granularity_narrowed,
             )
         elif page == "Индексы бренда":
             _section_brand_metrics(

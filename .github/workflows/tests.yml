@@ -110,6 +110,12 @@ jobs:
       - name: Клиентский обзор (изменения к периоду, согласование рода)
         run: python tests/test_client_insights.py
 
+      - name: Обзор — цвет карточек тональности
+        run: python tests/test_overview_ui.py
+
+      - name: Обзор — сравнение с прошлым периодом не врёт
+        run: python tests/test_overview_previous_period.py
+
       - name: Живые сессии платформы
         run: python tests/test_session_presence.py
 
@@ -124,6 +130,9 @@ jobs:
 
       - name: Блокировка правок (конфликт двух редакторов)
         run: python tests/test_manual_conflict.py
+
+      - name: Кеш платформы одинаков во всех вкладках
+        run: python tests/test_cached_store.py
 
       - name: Ручная модерация (правки, слияния, переносы, счётчики)
         run: python tests/test_manual_moderation.py
