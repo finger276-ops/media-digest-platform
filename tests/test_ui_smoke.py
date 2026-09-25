@@ -923,6 +923,50 @@ check(
 )
 check("аналитический вид не уронил раздел", not at.exception, str(at.exception))
 
+print("3.56. Ручные правки инфоповодов: скрытую тему можно вернуть")
+# Скрытая по ошибке тема исчезала из таблицы вместе с кнопками правки, и
+# вернуть её из интерфейса было нельзя. Теперь такие правки собраны в список
+# с кнопкой «Отменить». Счётчики версий кеша общие на процесс, поэтому
+# clear_platform_caches отсюда виден и прогону AppTest.
+from services.cached_store import clear_platform_caches  # noqa: E402
+
+CLIENT.db.setdefault("platform_manual_rows", []).append(
+    {
+        "project_id": "tn_project",
+        "table_name": "event_edits",
+        "row_key": "event_edit::e0",
+        "payload": {"event_id": "e0", "title": "Запуск завода", "status": "hidden"},
+        "updated_at": now,
+    }
+)
+clear_platform_caches("tn_project")
+at.run()
+check("раздел со скрытой темой открылся без исключений", not at.exception, str(at.exception))
+undo_expanders = [str(e.label) for e in at.expander if "Ручные правки инфоповодов" in str(e.label)]
+check("список ручных правок на месте", bool(undo_expanders), str([str(e.label) for e in at.expander]))
+undo_buttons = [b for b in at.button if str(b.label) == "Отменить" and "event_edit::e0" in str(b.key)]
+check("у скрытой темы есть кнопка «Отменить»", bool(undo_buttons), str([b.key for b in at.button if str(b.label) == "Отменить"]))
+if undo_buttons:
+    undo_buttons[0].click().run()
+    check("отмена не уронила раздел", not at.exception, str(at.exception))
+    stored_e0 = [
+        row
+        for row in CLIENT.db["platform_manual_rows"]
+        if row.get("project_id") == "tn_project" and row.get("row_key") == "event_edit::e0"
+    ]
+    check(
+        "тема снова активна, а правка названия не стёрта",
+        len(stored_e0) == 1
+        and (stored_e0[0].get("payload") or {}).get("status") == "active"
+        and (stored_e0[0].get("payload") or {}).get("title") == "Запуск завода",
+        str(stored_e0),
+    )
+    check(
+        "после отмены список правок пуст и исчез",
+        not any("Ручные правки инфоповодов" in str(e.label) for e in at.expander),
+        str([str(e.label) for e in at.expander]),
+    )
+
 print("3.6. Раздел «Отзывы»: репутация товара и претензии покупателей")
 open_section("Отзывы")
 check("раздел открылся без исключений", not at.exception, str(at.exception))

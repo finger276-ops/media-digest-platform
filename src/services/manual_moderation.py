@@ -16,7 +16,7 @@ from typing import Any
 
 import pandas as pd
 
-from .cached_store import list_manual, save_manual
+from .cached_store import delete_manual, list_manual, save_manual
 from .event_titles import normalize_event_title
 from .metrics_compute import sentiment_masks
 
@@ -347,6 +347,29 @@ def apply_manual_overrides(
             .fillna(messages_out.get("event_title", ""))
         )
 
+    # Инфоповод, который объединили с другим, отдал свои сообщения цели, но
+    # recompute_event_counts обновляет счётчики только у инфоповодов, у
+    # которых сейчас есть сообщения. Источник оставался со старыми
+    # счётчиками, получал заголовок цели — и в таблице (строки с одним
+    # заголовком складываются) цель показывала 6 сообщений вместо 4, 2
+    # негативных вместо 1. Обнуляем источник ДО пересчёта: если на нём всё же
+    # есть сообщения (цепочка e1→e2→e3 не транзитивна, сообщения e1 уезжают
+    # ровно на e2), пересчёт вернёт ему настоящие числа. Цель, которой нет в
+    # выборке, не трогаем: сообщения тогда ни на ком, и обнуление спрятало
+    # бы их совсем.
+    if not events_out.empty and state["event_merges"]:
+        known_ids = set(events_out["event_id"].astype(str))
+        merged_sources = [
+            source
+            for source, target in state["event_merges"].items()
+            if str(target) in known_ids
+        ]
+        if merged_sources:
+            source_mask = events_out["event_id"].astype(str).isin(merged_sources)
+            for column in ("message_count", "chat_count", "negative_count"):
+                if column in events_out.columns:
+                    events_out.loc[source_mask, column] = 0
+
     events_out = recompute_event_counts(events_out, messages_out)
 
     # Hide events after counts are recomputed.
@@ -360,6 +383,96 @@ def apply_manual_overrides(
         ].copy()
 
     return events_out, messages_out, state
+
+
+UNDO_HIDDEN = "hidden"
+UNDO_MERGE = "merge"
+UNDO_MOVE = "move"
+
+
+def manual_undo_items(
+    manual_state: dict[str, Any] | None,
+    event_titles: dict[str, str] | None = None,
+    message_texts: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """Правки, которые можно отменить: скрытые инфоповоды, объединения, переносы.
+
+    Раньше отменить из интерфейса можно было только «Не склеивать». Скрытая
+    по ошибке тема исчезала из таблицы вместе с кнопками правки, объединённая
+    не имела пути назад, и такая ошибка оставалась у всех пользователей
+    проекта. Здесь только список и подписи — сама отмена в undo_manual_item.
+    """
+    state = manual_state or {}
+    titles = event_titles or {}
+    texts = message_texts or {}
+    items: list[dict[str, Any]] = []
+
+    for event_id, payload in sorted((state.get("event_edits") or {}).items()):
+        if str(payload.get("status") or "").strip().lower() != "hidden":
+            continue
+        title = str(payload.get("title") or "").strip() or titles.get(str(event_id), "")
+        items.append(
+            {
+                "kind": UNDO_HIDDEN,
+                "row_key": str(payload.get("_row_key") or f"event_edit::{event_id}"),
+                "event_id": str(event_id),
+                "label": f"Скрыт инфоповод «{title or event_id}»",
+                "payload": dict(payload),
+            }
+        )
+
+    for source, target in sorted((state.get("event_merges") or {}).items()):
+        target_title = titles.get(str(target), str(target))
+        items.append(
+            {
+                "kind": UNDO_MERGE,
+                "row_key": f"event_merge::{source}",
+                "event_id": str(source),
+                "label": f"Инфоповод {source} объединён с «{target_title}»",
+                "payload": {"source_event_id": str(source), "target_event_id": str(target)},
+            }
+        )
+
+    for message_id, target in sorted((state.get("move_map") or {}).items()):
+        target_title = titles.get(str(target), str(target))
+        text = " ".join(str(texts.get(str(message_id), "")).split())
+        snippet = (text[:70] + "…") if len(text) > 70 else text
+        items.append(
+            {
+                "kind": UNDO_MOVE,
+                "row_key": f"message_move::{message_id}",
+                "event_id": str(target),
+                "label": (
+                    f"Сообщение «{snippet or message_id}» перенесено в «{target_title}»"
+                ),
+                "payload": {"message_id": str(message_id), "target_event_id": str(target)},
+            }
+        )
+    return items
+
+
+def undo_manual_item(project_id: str, item: dict[str, Any]) -> None:
+    """Отменить одну правку из manual_undo_items.
+
+    Скрытие отменяется возвратом статуса active с прежними названием,
+    описанием и тегами: удалить строку целиком значило бы заодно стереть
+    правки текста, сделанные до скрытия. Объединение и перенос — это
+    отдельные строки, и отмена их просто удаляет.
+    """
+    kind = item.get("kind")
+    row_key = str(item.get("row_key") or "")
+    if not row_key:
+        return
+    if kind == UNDO_HIDDEN:
+        payload = {
+            key: value
+            for key, value in dict(item.get("payload") or {}).items()
+            if not str(key).startswith("_")
+        }
+        payload["status"] = "active"
+        save_manual(project_id, "event_edits", row_key, payload)
+    elif kind in (UNDO_MERGE, UNDO_MOVE):
+        delete_manual(project_id, row_key)
 
 
 def create_manual_event(

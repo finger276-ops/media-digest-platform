@@ -31,7 +31,9 @@ from services.formatting import fmt_date
 from services.manual_moderation import (
     create_manual_event,
     event_select_options,
+    manual_undo_items,
     manual_versions,
+    undo_manual_item,
 )
 from services.message_compute import message_link_column, message_text_column
 from services.chart_style import CATEGORICAL_PALETTE
@@ -951,6 +953,69 @@ def _render_top_events_chart(events: pd.DataFrame, *, tone_ok: bool = True) -> N
     st.altair_chart(chart, width="stretch")
 
 
+def _event_title_lookup(events_agg: pd.DataFrame) -> dict[str, str]:
+    """event_id → заголовок строки таблицы, куда он попал после склейки."""
+    lookup: dict[str, str] = {}
+    if not isinstance(events_agg, pd.DataFrame) or events_agg.empty:
+        return lookup
+    for _, row in events_agg.iterrows():
+        title = str(row.get("title") or "").strip()
+        for event_id in row.get("event_ids", []) or []:
+            if title:
+                lookup[str(event_id)] = title
+    return lookup
+
+
+def render_manual_undo(
+    project_id: str,
+    events_agg: pd.DataFrame,
+    messages: pd.DataFrame,
+    manual_state: dict[str, Any] | None,
+    *,
+    read_only: bool = False,
+) -> None:
+    """Список ручных правок с кнопкой «Отменить».
+
+    Стоит до проверки «инфоповодов нет»: если аналитик по ошибке скрыл все
+    темы периода, вернуть их надо именно отсюда.
+    """
+    texts: dict[str, str] = {}
+    if isinstance(messages, pd.DataFrame) and not messages.empty and "message_id" in messages.columns:
+        text_col = message_text_column(messages)
+        if text_col:
+            texts = dict(
+                zip(
+                    messages["message_id"].astype(str),
+                    messages[text_col].fillna("").astype(str),
+                )
+            )
+    items = manual_undo_items(manual_state, _event_title_lookup(events_agg), texts)
+    if not items:
+        return
+    demo_help = DEMO_MESSAGE if read_only else None
+    with st.expander(f"Ручные правки инфоповодов: {len(items)}", expanded=False):
+        st.caption(
+            "Скрытые темы, объединения и перенесённые сообщения. Правка действует "
+            "для всех пользователей проекта — здесь её можно отменить."
+        )
+        for item in items:
+            cols = st.columns([8, 2])
+            with cols[0]:
+                st.caption(item["label"])
+            with cols[1]:
+                if st.button(
+                    "Отменить",
+                    key=f"undo_{project_id}_{item['row_key']}",
+                    width="stretch",
+                    disabled=read_only,
+                    help=demo_help,
+                ):
+                    # save_manual/delete_manual сами сбрасывают кеш правок и
+                    # данных — как у «Вернуть» для автосклейки.
+                    undo_manual_item(project_id, item)
+                    st.rerun()
+
+
 def render_events(
     project_id: str,
     role: str,
@@ -987,6 +1052,9 @@ def render_events(
                     create_manual_event(project_id, title, description, tags)
                     st.success("Инфоповод создан.")
                     st.rerun()
+        render_manual_undo(
+            project_id, events_agg, messages, manual_state, read_only=read_only
+        )
 
     if events_agg.empty:
         st.info("Инфоповоды не найдены.")

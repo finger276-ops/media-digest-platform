@@ -7,11 +7,12 @@
 перенос → пересчёт счётчиков → фильтр статусов), поэтому основная часть
 проверок идёт через apply_manual_overrides целиком, а не по функциям поодиночке.
 
-Часть проверок фиксирует ТЕКУЩЕЕ поведение, включая известные пробелы —
-цепочка слияний A→B→C не разворачивается транзитивно, счётчики опустевшего
-инфоповода-источника не обнуляются. Такие отмечены комментарием
-«# текущее поведение» — правка это не баг-репорт, а фиксация контракта,
-который нельзя менять по неосторожности.
+Часть проверок фиксирует ТЕКУЩЕЕ поведение, включая известный пробел —
+цепочка слияний A→B→C не разворачивается транзитивно. Такие отмечены
+комментарием «# текущее поведение» — правка это не баг-репорт, а фиксация
+контракта, который нельзя менять по неосторожности. Счётчики опустевшего
+инфоповода-источника раньше тоже оставались старыми и завышали объединённую
+тему; с 25.09.2026 они обнуляются (блок 8).
 
 Мутационные проверки (что ломает какой тест) — построчно у каждого блока,
 плюс сводка в конце файла.
@@ -366,13 +367,22 @@ check("e3: merged_into отсутствует (NaN)", pd.isna(cell(ev8, "e3", "m
 check("сообщения m1/m2 уезжают РОВНО на e2 (без транзитивности до e3)", set(msg8[msg8["message_id"].isin(["m1", "m2"])]["event_id"]) == {"e2"})
 check("сообщения m3/m4/m5 на e3", set(msg8[msg8["message_id"].isin(["m3", "m4", "m5"])]["event_id"]) == {"e3"})
 check("у всех пяти сообщений заголовок e3 — «Отраслевая статистика»", (msg8["event_title"] == "Отраслевая статистика").all())
-check("e1: счётчики УСТАРЕВШИЕ — сообщений на нём нет # текущее поведение", counts(ev8, "e1") == (2, 2, 1))
+# Раньше у e1 оставались старые счётчики (2, 2, 1), хотя его сообщения
+# уехали на e2, и сумма по таблице была 7 при 5 реальных сообщениях: строки с
+# одним заголовком в таблице складываются, и объединённая тема показывала
+# лишние сообщения и лишний негатив.
+check("e1: сообщений на нём нет — счётчики обнулены", counts(ev8, "e1") == (0, 0, 0), str(counts(ev8, "e1")))
 check("e2 получил счётчики m1+m2", counts(ev8, "e2") == (2, 2, 1), str(counts(ev8, "e2")))
 check("e3 получил счётчики m3+m4+m5", counts(ev8, "e3") == (3, 1, 1), str(counts(ev8, "e3")))
 check(
-    "# текущее поведение: сумма message_count по таблице завышена — 7 при 5 реальных сообщениях",
-    int(ev8["message_count"].sum()) == 7,
+    "сумма message_count по таблице равна числу реальных сообщений (5), а не завышена",
+    int(ev8["message_count"].sum()) == 5,
     str(int(ev8["message_count"].sum())),
+)
+check(
+    "сумма негатива тоже не задвоена (m1 и m3 — по одному)",
+    int(ev8["negative_count"].sum()) == 2,
+    str(int(ev8["negative_count"].sum())),
 )
 
 
@@ -572,6 +582,75 @@ check(
     before16 == {} and "e1" in after16,
     f"before={before16} after={after16}",
 )
+
+
+# ---------------------------------------------------------------------------
+# Блок 17. Отмена правок: скрытие, объединение, перенос
+# ---------------------------------------------------------------------------
+
+print("17. Отмена правок: скрытие, объединение, перенос")
+# Раньше отменить из интерфейса можно было только «Не склеивать». Скрытая по
+# ошибке тема пропадала из таблицы вместе с кнопками правки, объединение и
+# перенос не имели пути назад, и ошибка оставалась у всех пользователей.
+# Мутационные проверки: отмена скрытия удаляет строку целиком (а не
+# возвращает active) → падает «правки названия сохранились»; отмена
+# объединения/переноса ничего не удаляет → падают «после отмены …»; не
+# показывать скрытые/объединения/переносы в списке → падают «в списке …».
+set_manual(
+    [
+        ("event_edits", "event_edit::e1", {"event_id": "e1", "title": "Переименованная авария", "description": "моё описание", "tags": "Тег", "status": "hidden"}),
+        ("event_edits", "event_edit::e3", {"event_id": "e3", "title": "Правка без скрытия", "status": "active"}),
+        ("event_merges", "event_merge::e2", {"source_event_id": "e2", "target_event_id": "e3"}),
+        ("message_moves", "message_move::m5", {"message_id": "m5", "target_event_id": "e1"}),
+    ]
+)
+state17 = mm.get_manual_state(PROJECT)
+items17 = mm.manual_undo_items(
+    state17,
+    {"e1": "Авария на заводе", "e3": "Отраслевая статистика"},
+    {"m5": "Статистика рынка за квартал"},
+)
+kinds17 = [item["kind"] for item in items17]
+check("в списке одно скрытие, одно объединение, один перенос", sorted(kinds17) == sorted([mm.UNDO_HIDDEN, mm.UNDO_MERGE, mm.UNDO_MOVE]), str(kinds17))
+check(
+    "правка без скрытия в список отмены не попадает",
+    not any(item["event_id"] == "e3" and item["kind"] == mm.UNDO_HIDDEN for item in items17),
+)
+labels17 = " | ".join(item["label"] for item in items17)
+check("у скрытия подпись с названием темы", "Переименованная авария" in labels17, labels17)
+check("у объединения подпись с целевой темой", "Отраслевая статистика" in labels17, labels17)
+check("у переноса подпись с текстом сообщения", "Статистика рынка за квартал" in labels17, labels17)
+
+by_kind = {item["kind"]: item for item in items17}
+mm.undo_manual_item(PROJECT, by_kind[mm.UNDO_HIDDEN])
+mm.undo_manual_item(PROJECT, by_kind[mm.UNDO_MERGE])
+mm.undo_manual_item(PROJECT, by_kind[mm.UNDO_MOVE])
+state17b = mm.get_manual_state(PROJECT)
+edit_e1 = state17b["event_edits"].get("e1") or {}
+check("после отмены скрытия e1 снова active", edit_e1.get("status") == "active", str(edit_e1))
+check(
+    "правки названия, описания и тегов, сделанные до скрытия, сохранились",
+    edit_e1.get("title") == "Переименованная авария"
+    and edit_e1.get("description") == "моё описание"
+    and edit_e1.get("tags") == "Тег",
+    str(edit_e1),
+)
+stored_e1 = [
+    row for row in CLIENT.db["platform_manual_rows"] if row.get("row_key") == "event_edit::e1"
+]
+check(
+    "служебный _row_key не записан обратно в payload",
+    len(stored_e1) == 1 and "_row_key" not in (stored_e1[0].get("payload") or {}),
+    str(stored_e1),
+)
+check("после отмены объединения его нет", "e2" not in state17b["event_merges"], str(state17b["event_merges"]))
+check("после отмены переноса его нет", "m5" not in state17b["move_map"], str(state17b["move_map"]))
+check("соседняя правка e3 не тронута", (state17b["event_edits"].get("e3") or {}).get("title") == "Правка без скрытия")
+ev17, msg17, _ = mm.apply_manual_overrides(PROJECT, base_events(), base_messages())
+check("e1 снова в таблице", "e1" in set(ev17["event_id"].astype(str)))
+check("m5 вернулся в свой инфоповод e3", set(msg17[msg17["message_id"] == "m5"]["event_id"]) == {"e3"})
+check("e2 снова со своими сообщениями", counts(ev17, "e2") == (2, 1, 1), str(counts(ev17, "e2")))
+check("в списке отмены больше ничего нет", mm.manual_undo_items(state17b) == [], str(mm.manual_undo_items(state17b)))
 
 
 print()
