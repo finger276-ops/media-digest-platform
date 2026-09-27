@@ -114,6 +114,7 @@ from services.event_filter_state import (
 from messages_ui import render_messages_block, render_message_list
 from reviews_ui import render_reviews
 from sources_ui import render_sources_page
+from ab_compare_ui import render_ab_comparison
 from tags_ui import render_tag_statistics
 from client_insights_ui import render_client_insights
 from project_admin_ui import render_project_access, render_project_manager
@@ -1041,6 +1042,12 @@ def _main() -> None:
                     "распознанной датой в выбранных сообщениях, либо два "
                     "периода в боковой панели."
                 )
+            # Два любых периода проекта, независимо от выбора в боковой панели.
+            render_ab_comparison(
+                project_id,
+                periods,
+                lambda period_id: cached_period_messages(project_id, [period_id]),
+            )
         elif page == "Отчёт":
             report_metrics = (
                 build_comparison_metrics(
