@@ -33,7 +33,29 @@ Run workflow. Ещё один способ — кнопка «Сделать к�
 «Резервные копии» на странице «Проекты» (только владелец).
 
 Задаче нужны те же секреты репозитория, что и автозагрузке:
-`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_STORAGE_BUCKET`.
+`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_STORAGE_BUCKET` — см.
+«Секреты GitHub» ниже.
+
+## Секреты GitHub
+
+Секреты Streamlit Cloud и секреты GitHub Actions — разные хранилища: приложение
+на Streamlit работает, а задачи GitHub (резервная копия, автозагрузка) без своих
+секретов падают с аннотацией «Не заданы секреты репозитория».
+
+1. Откройте репозиторий на GitHub → **Settings** → **Secrets and variables** →
+   **Actions** → **New repository secret**.
+2. Добавьте по одному:
+   - `SUPABASE_URL` — адрес проекта Supabase, вида `https://xxxx.supabase.co`;
+   - `SUPABASE_SERVICE_ROLE_KEY` — ключ `service_role`;
+   - `SUPABASE_STORAGE_BUCKET` — имя бакета хранилища, если в секретах
+     Streamlit он задан; если нет — этот секрет не нужен (по умолчанию
+     `dashboard-csv`).
+
+   Значения те же, что в Streamlit Cloud → приложение → **Settings** →
+   **Secrets**. Их же можно взять в Supabase → **Project Settings** → **API**.
+3. Запустите «Резервная копия» вручную: **Actions** → «Резервная копия» →
+   **Run workflow**. Зелёный запуск и артефакт `platform-backup-…` в нём —
+   значит, всё настроено.
 
 Блок «Резервные копии» предупреждает, если последней копии больше двух суток.
 Частая причина — GitHub отключает расписание в репозитории, где 60 дней не было

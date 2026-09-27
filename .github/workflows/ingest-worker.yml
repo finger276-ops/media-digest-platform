@@ -44,6 +44,22 @@ jobs:
       - name: Установить зависимости
         run: pip install -r requirements-worker.txt
 
+      - name: Проверить секреты Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        # Секреты Streamlit Cloud сюда не попадают: у GitHub Actions свои.
+        # Без этой проверки задача падала трейсбеком, а в сводке запуска
+        # было только «Process completed with exit code 1».
+        run: |
+          missing=""
+          [ -z "$SUPABASE_URL" ] && missing="$missing SUPABASE_URL"
+          [ -z "$SUPABASE_SERVICE_ROLE_KEY" ] && missing="$missing SUPABASE_SERVICE_ROLE_KEY"
+          if [ -n "$missing" ]; then
+            echo "::error title=Не заданы секреты репозитория::Добавьте в GitHub → Settings → Secrets and variables → Actions:$missing (значения те же, что в секретах Streamlit Cloud). Подробно — docs/BACKUPS.md, раздел «Секреты GitHub»."
+            exit 1
+          fi
+
       - name: Обработать очередь
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
