@@ -13,7 +13,16 @@ from typing import Any
 import pandas as pd
 
 from .formatting import fmt_date_short, period_picker_label
-from .metrics_compute import format_int, overview_metrics, percent_text, sentiment_unmarked
+from .metrics_compute import (
+    NO_METRIC_VALUE,
+    format_int,
+    metric_missing,
+    metric_text,
+    metrics_comparable,
+    overview_metrics,
+    percent_text,
+    sentiment_unmarked,
+)
 
 
 def previous_period_id(
@@ -632,6 +641,13 @@ def comparison_row(
             return "—"
         return pp_delta(metric.get(f"{key}_share", 0), previous.get(f"{key}_share", 0))
 
+    def _volume_delta(key: str) -> str:
+        # Метрики нет в выгрузке одного из периодов — изменение не измерено:
+        # «−100 %» было бы пропавшей колонкой, а не событием.
+        if previous is None or not metrics_comparable(metric, previous, key):
+            return NO_METRIC_VALUE
+        return metric_delta(metric.get(key, 0), previous.get(key, 0))
+
     row = {
         "Период": metric.get("label", metric.get("period_id", "")),
         "Сообщений": format_int(metric.get("messages", 0)),
@@ -640,26 +656,12 @@ def comparison_row(
             if previous is None
             else metric_delta(metric.get("messages", 0), previous.get("messages", 0))
         ),
-        "Аудитория": format_int(metric.get("audience", 0)),
-        "Δ аудитории": (
-            "—"
-            if previous is None
-            else metric_delta(metric.get("audience", 0), previous.get("audience", 0))
-        ),
-        "Охват": format_int(metric.get("reach", 0)),
-        "Δ охвата": (
-            "—"
-            if previous is None
-            else metric_delta(metric.get("reach", 0), previous.get("reach", 0))
-        ),
-        "Вовлеченность": format_int(metric.get("engagement", 0)),
-        "Δ вовлеченности": (
-            "—"
-            if previous is None
-            else metric_delta(
-                metric.get("engagement", 0), previous.get("engagement", 0)
-            )
-        ),
+        "Аудитория": metric_text(metric, "audience"),
+        "Δ аудитории": _volume_delta("audience"),
+        "Охват": metric_text(metric, "reach"),
+        "Δ охвата": _volume_delta("reach"),
+        "Вовлеченность": metric_text(metric, "engagement"),
+        "Δ вовлеченности": _volume_delta("engagement"),
         "Позитив": _share("positive"),
         "Δ позитива": _share_delta("positive"),
         "Нейтрал": _share("neutral"),
@@ -745,9 +747,22 @@ def comparison_visual_rows(comparison: list[dict[str, Any]]) -> pd.DataFrame:
                 # «Позитив 0 %, Нейтрал 0 %», а не честным «данных нет».
                 "Тональность размечена": bool(int(sent.get("total", 0) or 0))
                 and not sentiment_unmarked(sent),
+                # Точки, где метрики нет в выгрузке, графики не рисуют: ноль на
+                # линии охвата выглядел бы обвалом.
+                **{
+                    f"{label} в выгрузке": not metric_missing(item, key)
+                    for label, key in VISUAL_VOLUME_METRICS
+                },
             }
         )
     return pd.DataFrame(rows)
+
+
+VISUAL_VOLUME_METRICS = (
+    ("Аудитория", "audience"),
+    ("Охват", "reach"),
+    ("Вовлеченность", "engagement"),
+)
 
 
 def chart_number_label(value: Any, *, percent: bool = False) -> str:

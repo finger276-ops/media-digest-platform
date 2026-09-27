@@ -16,9 +16,15 @@ import streamlit as st
 
 from metric_cards_ui import metric_card, render_metric_row
 from services.metrics_compute import (
+    NO_METRIC_REASON,
+    NO_METRIC_VALUE,
     NO_SENTIMENT_REASON,
     format_int,
     has_sentiment_markup,
+    metric_known,
+    metric_missing,
+    metric_text,
+    metrics_comparable,
     no_sentiment_line,
     overview_metrics,
     sentiment_unmarked,
@@ -62,6 +68,10 @@ def build_period_change_insights(
         ("вовлеченности", "engagement"),
     ]
     for label, key in checks:
+        # Метрики нет в выгрузке одного из периодов — «снизилось на 100 %»
+        # было бы пропавшей колонкой, а не изменением.
+        if not metrics_comparable(cur, prev, key):
+            continue
         old = float(prev.get(key, 0) or 0)
         new = float(cur.get(key, 0) or 0)
         if old == 0 and new == 0:
@@ -115,6 +125,12 @@ def build_tag_change_table(
     # показывается как раньше.
     prev_marked = prev_msgs.empty or has_sentiment_markup(prev_msgs)
     cur_marked = cur_msgs.empty or has_sentiment_markup(cur_msgs)
+    # То же для охвата и вовлечённости: колонки нет в выгрузке — не ноль.
+    cur_known = {key: metric_known(cur_msgs, key) for key in ("reach", "engagement")}
+    comparable = {
+        key: cur_known[key] and metric_known(prev_msgs, key)
+        for key in ("reach", "engagement")
+    }
     prev_stats = build_tag_statistics(prev_msgs)
     cur_stats = build_tag_statistics(cur_msgs)
     if prev_stats.empty and cur_stats.empty:
@@ -145,7 +161,11 @@ def build_tag_change_table(
             0
         )
     tone_comparable = prev_marked and cur_marked
-    delta_columns = ["Δ сообщений", "Δ охват", "Δ вовлеченность"]
+    delta_columns = ["Δ сообщений"]
+    if comparable["reach"]:
+        delta_columns.append("Δ охват")
+    if comparable["engagement"]:
+        delta_columns.append("Δ вовлеченность")
     if tone_comparable:
         delta_columns.append("Δ негатив")
     merged["abs_delta"] = merged[delta_columns].abs().sum(axis=1)
@@ -155,10 +175,22 @@ def build_tag_change_table(
             "Тег": merged["Тег"].astype(str),
             "Сообщений сейчас": merged["Сообщений_cur"].astype(int),
             "Δ сообщений": merged["Δ сообщений"].astype(int),
-            "Охват сейчас": merged["Охват_cur"].astype(int),
-            "Δ охвата": merged["Δ охват"].astype(int),
-            "Вовлеченность сейчас": merged["Вовлеченность_cur"].astype(int),
-            "Δ вовлеченности": merged["Δ вовлеченность"].astype(int),
+            "Охват сейчас": (
+                merged["Охват_cur"].astype(int) if cur_known["reach"] else NO_METRIC_VALUE
+            ),
+            "Δ охвата": (
+                merged["Δ охват"].astype(int) if comparable["reach"] else NO_METRIC_VALUE
+            ),
+            "Вовлеченность сейчас": (
+                merged["Вовлеченность_cur"].astype(int)
+                if cur_known["engagement"]
+                else NO_METRIC_VALUE
+            ),
+            "Δ вовлеченности": (
+                merged["Δ вовлеченность"].astype(int)
+                if comparable["engagement"]
+                else NO_METRIC_VALUE
+            ),
             "Негатив сейчас": (
                 merged["Негатив_cur"].astype(int) if cur_marked else "—"
             ),
@@ -214,7 +246,10 @@ def build_client_insights_summary(
         lines.append(
             f"Риск негатива: {risk_level}; негативных сообщений — {format_int(negative)} ({negative_share * 100:.1f}%)."
         )
-    lines.append(f"Суммарная вовлеченность: {format_int(engagement)}.")
+    if metric_missing(metrics, "engagement"):
+        lines.append("Вовлеченность: нет данных — в выгрузке нет этой колонки.")
+    else:
+        lines.append(f"Суммарная вовлеченность: {format_int(engagement)}.")
 
     if len(selected_period_ids or []) >= 2 and not granularity_narrowed:
         tag_changes = build_tag_change_table(
@@ -296,7 +331,11 @@ def render_client_insights(
     reportable_events = _drop_residual(events_agg)
     top_cards = [
         *tone_cards,
-        ("Вовлеченность", format_int(engagement), ""),
+        (
+            "Вовлеченность",
+            metric_text(metrics, "engagement"),
+            NO_METRIC_REASON["engagement"] if metric_missing(metrics, "engagement") else "",
+        ),
         (
             "Инфоповодов",
             format_int(
@@ -455,15 +494,16 @@ def render_client_insights(
     with c1, st.container(border=True):
         st.markdown("**Топ тегов**")
         top_tags = top_client_tags(messages, limit=5)
+        reach_known = metric_known(messages, "reach")
         if top_tags.empty:
             st.caption("Теги не найдены.")
         else:
             for _, row in top_tags.iterrows():
                 st.markdown(f"**{row['Тег']}**")
-                st.caption(
-                    f"{format_int(row.get('Сообщений', 0))} сообщений · "
-                    f"охват {format_int(row.get('Охват', 0))}"
+                reach_part = (
+                    f" · охват {format_int(row.get('Охват', 0))}" if reach_known else ""
                 )
+                st.caption(f"{format_int(row.get('Сообщений', 0))} сообщений{reach_part}")
     with c2, st.container(border=True):
         st.markdown("**Топ инфоповодов**")
         top_events = top_client_events(events_agg, limit=5)

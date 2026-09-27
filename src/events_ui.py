@@ -42,8 +42,11 @@ from services.manual_moderation import (
 from services.message_compute import message_link_column, message_text_column
 from services.chart_style import CATEGORICAL_PALETTE
 from services.metrics_compute import (
+    NO_METRIC_REASON,
     NO_SENTIMENT_REASON,
     format_int,
+    metric_missing,
+    metric_text,
     has_sentiment_markup,
     numeric_series,
     overview_metrics,
@@ -654,9 +657,18 @@ def render_selected_event_detail(
                 "Важность",
                 str(round(float(selected.get("importance_score", 0) or 0), 2)),
             ),
-            metric_card("Аудитория", format_int(metrics.get("audience", 0))),
-            metric_card("Охват", format_int(metrics.get("reach", 0))),
-            metric_card("Вовлеченность", format_int(metrics.get("engagement", 0))),
+            *[
+                metric_card(
+                    label,
+                    metric_text(metrics, key),
+                    help_text=NO_METRIC_REASON[key] if metric_missing(metrics, key) else "",
+                )
+                for label, key in (
+                    ("Аудитория", "audience"),
+                    ("Охват", "reach"),
+                    ("Вовлеченность", "engagement"),
+                )
+            ],
         ]
     )
 

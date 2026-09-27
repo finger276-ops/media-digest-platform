@@ -20,6 +20,37 @@ NO_SENTIMENT_REASON = (
 NO_SENTIMENT_LABEL = "тональность не размечена"
 PERIOD_MARKUP_COLUMN = "_period_sentiment_marked"
 
+# Аудитория, охват и вовлечённость — тоже данные выгрузки. Пустая ячейка при
+# разборе становится нулём, и выгрузка без колонки «Просмотры» показывала
+# «Охват 0», а сравнение с периодом, где охват был, — «−100 %». Ноль и «нет
+# данных» различаются так:
+# - при загрузке в каждое сообщение пишется, какие из трёх колонок в
+#   выгрузке были (SOURCE_METRICS_COLUMN, см. message_normalize.metrics_in_source);
+# - у периодов, загруженных раньше, признака нет, и действует правило «весь
+#   период нули — значит, колонки не было».
+# Признак, как и у тональности, ставится на выгрузку-период: его наследуют
+# дни, теги и инфоповоды внутри неё.
+VOLUME_METRICS = ("audience", "reach", "engagement")
+SOURCE_METRICS_COLUMN = "metrics_in_source"
+PERIOD_METRIC_COLUMNS = {metric: f"_period_has_{metric}" for metric in VOLUME_METRICS}
+_PREPARED_METRIC_COLUMNS = {
+    "audience": "_audience",
+    "reach": "_reach",
+    "engagement": "_engagement",
+}
+_RAW_METRIC_COLUMNS = {
+    "audience": ["audience", "Аудитория"],
+    "reach": ["views", "Просмотры", "Просмотров", "reach", "Охват"],
+    "engagement": ["engagement", "Вовлечённость", "Вовлеченность", "engagement_count"],
+}
+NO_METRIC_VALUE = "—"
+NO_METRIC_REASON = {
+    "audience": "В выгрузке нет аудитории: колонка «Аудитория» отсутствует или пуста.",
+    "reach": "В выгрузке нет охвата: колонки «Просмотры» (или «Охват») нет или она пуста.",
+    "engagement": "В выгрузке нет вовлечённости: колонка «Вовлечённость» отсутствует или пуста.",
+}
+METRIC_TITLES = {"audience": "аудитория", "reach": "охват", "engagement": "вовлечённость"}
+
 
 def sentiment_text(messages: pd.DataFrame) -> pd.Series:
     """Текст тональности в нижнем регистре, «ё» → «е».
@@ -242,7 +273,118 @@ def prepare_dashboard_messages(messages: pd.DataFrame) -> pd.DataFrame:
             )
         else:
             work[PERIOD_MARKUP_COLUMN] = bool(marked_row.any())
+    # То же для аудитории, охвата и вовлечённости: см. metric_known.
+    for metric, column in PERIOD_METRIC_COLUMNS.items():
+        if column in work.columns:
+            continue
+        known_row = _row_metric_known(work, metric)
+        if "_period_id_str" in work.columns:
+            work[column] = (
+                known_row.groupby(work["_period_id_str"]).transform("any").astype(bool)
+            )
+        else:
+            work[column] = bool(known_row.any())
     return work
+
+
+def _metric_values(messages: pd.DataFrame, metric: str) -> pd.Series:
+    prepared = _PREPARED_METRIC_COLUMNS[metric]
+    if prepared in messages.columns:
+        values = pd.to_numeric(messages[prepared], errors="coerce")
+        missing = values.isna()
+        if not bool(missing.any()):
+            return values
+        # Строки, приклеенные к подготовленному кадру без подготовки.
+        raw = numeric_series(messages[missing].drop(columns=[prepared]), _RAW_METRIC_COLUMNS[metric])
+        values = values.copy()
+        values[missing] = raw
+        return values.fillna(0)
+    return numeric_series(messages, _RAW_METRIC_COLUMNS[metric])
+
+
+def _row_metric_known(messages: pd.DataFrame, metric: str) -> pd.Series:
+    """Была ли метрика в выгрузке, из которой пришло сообщение.
+
+    Точно — по SOURCE_METRICS_COLUMN, если загрузка его записала; у старых
+    периодов — по значению: ненулевое число значит, что колонка была.
+    """
+    by_value = _metric_values(messages, metric).fillna(0).ne(0)
+    if SOURCE_METRICS_COLUMN not in messages.columns:
+        return by_value
+    declared = messages[SOURCE_METRICS_COLUMN]
+    recorded = declared.notna()
+    if not bool(recorded.any()):
+        return by_value
+    text = declared.fillna("").astype(str)
+    # Значение одно на выгрузку — разбираем уникальные, а не каждую строку.
+    lookup = {value: metric in value.split("|") for value in text.unique().tolist()}
+    return text.map(lookup).where(recorded, by_value).astype(bool)
+
+
+def metric_known(messages: pd.DataFrame, metric: str) -> bool:
+    """Есть ли метрика хотя бы в одной из выгрузок, откуда эти сообщения.
+
+    Пустой набор — не «нет данных в выгрузке», а «нет сообщений»: у него
+    законный ноль, как и раньше. Признак периода наследуется срезом: день или
+    тег с нулевым охватом внутри выгрузки, где охват есть, — честный ноль.
+    """
+    if not isinstance(messages, pd.DataFrame) or messages.empty:
+        return True
+    column = PERIOD_METRIC_COLUMNS[metric]
+    if column in messages.columns:
+        flags = messages[column]
+        if flags.notna().all():
+            return bool(flags.astype(bool).any())
+        if bool(flags.fillna(False).astype(bool).any()):
+            return True
+    return bool(_row_metric_known(messages, metric).any())
+
+
+def metric_partly_known(messages: pd.DataFrame, metric: str) -> bool:
+    """Метрика есть в части выбранных выгрузок: сумма — только по ним."""
+    if not isinstance(messages, pd.DataFrame) or messages.empty:
+        return False
+    column = PERIOD_METRIC_COLUMNS[metric]
+    if column not in messages.columns:
+        return False
+    flags = messages[column].dropna().astype(bool)
+    return bool(flags.any()) and not bool(flags.all())
+
+
+def known_metrics(messages: pd.DataFrame) -> dict[str, bool]:
+    return {metric: metric_known(messages, metric) for metric in VOLUME_METRICS}
+
+
+def metric_missing(metrics: Mapping[str, Any] | None, key: str) -> bool:
+    """Показать прочерк вместо метрики из словаря overview_metrics.
+
+    У словарей без ключа known (старые записи кеша, словари, собранные
+    вручную) считается, что метрика есть: лучше прежнее поведение, чем
+    прочерк там, где данные на самом деле есть.
+    """
+    if key not in VOLUME_METRICS:
+        return False
+    known = (metrics or {}).get("known")
+    if isinstance(known, Mapping) and key in known:
+        return not bool(known[key])
+    return False
+
+
+def metric_text(metrics: Mapping[str, Any] | None, key: str) -> str:
+    """Число для экрана и отчёта — или прочерк, если метрики нет в выгрузке."""
+    if metric_missing(metrics, key):
+        return NO_METRIC_VALUE
+    return format_int((metrics or {}).get(key, 0))
+
+
+def metrics_comparable(
+    current: Mapping[str, Any] | None, previous: Mapping[str, Any] | None, key: str
+) -> bool:
+    """Сравнивать ли метрику: она есть в обоих периодах.
+
+    Иначе «охват −100 %» — это пропавшая из выгрузки колонка, а не событие.
+    """
+    return not metric_missing(current, key) and not metric_missing(previous, key)
 
 
 # Аудитория — свойство площадки, а не сообщения: у поста и десяти комментариев
@@ -411,4 +553,9 @@ def overview_metrics(messages: pd.DataFrame) -> dict[str, Any]:
             else 0
         ),
         "sentiment": sentiment_counts(messages),
+        # Какие из трёх метрик были в выгрузке: иначе ноль — не измерение, а
+        # отсутствующая колонка (metric_missing, metric_text).
+        "known": known_metrics(messages)
+        if total_messages
+        else {metric: True for metric in VOLUME_METRICS},
     }

@@ -24,10 +24,18 @@ from metric_cards_ui import (
 )
 from services.dashboard_config import COMPARISON_CHART_BLOCKS, DEFAULT_DASHBOARD_VIEW_SETTINGS
 from services.metrics_compute import (
+    METRIC_TITLES,
+    NO_METRIC_REASON,
+    NO_METRIC_VALUE,
     NO_SENTIMENT_LABEL,
     NO_SENTIMENT_REASON,
     PERIOD_MARKUP_COLUMN,
+    VOLUME_METRICS,
     format_int,
+    metric_missing,
+    metric_partly_known,
+    metric_text,
+    metrics_comparable,
     overview_metrics,
     percent_text,
     sentiment_unmarked,
@@ -131,6 +139,65 @@ def _tone_cards(
         )
         for label, key in TONE_CARDS
     ]
+
+
+VOLUME_CARDS = [
+    ("Сообщений", "messages"),
+    ("Аудитория", "audience"),
+    ("Охват", "reach"),
+    ("Вовлеченность", "engagement"),
+]
+
+
+def _volume_cards(
+    metrics: dict[str, Any], previous: dict[str, Any] | None = None
+) -> list[dict[str, Any]]:
+    """Четыре карточки объёма с изменением к прошлому периоду.
+
+    Метрики нет в выгрузке — прочерк с причиной, а не «0». Изменение
+    показывается, только если метрика есть в обоих периодах: иначе «−100 %»
+    — это пропавшая колонка, а не событие.
+    """
+    cards = []
+    for label, key in VOLUME_CARDS:
+        if metric_missing(metrics, key):
+            cards.append(metric_card(label, NO_METRIC_VALUE, help_text=NO_METRIC_REASON[key]))
+            continue
+        delta = None
+        if previous and (key == "messages" or metrics_comparable(metrics, previous, key)):
+            delta = metric_delta(metrics.get(key, 0), previous.get(key, 0))
+        cards.append(metric_card(label, format_int(metrics.get(key, 0)), delta=delta))
+    return cards
+
+
+def _metric_notes(
+    messages: pd.DataFrame | None,
+    metrics: dict[str, Any] | None,
+    previous: dict[str, Any] | None = None,
+) -> None:
+    """Подписи под карточками: где метрика есть не везде."""
+    partly = [
+        METRIC_TITLES[key]
+        for key in VOLUME_METRICS
+        if isinstance(messages, pd.DataFrame)
+        and not metric_missing(metrics, key)
+        and metric_partly_known(messages, key)
+    ]
+    if partly:
+        st.caption(
+            f"В части выбранных периодов нет колонок: {', '.join(partly)} — "
+            "сумма посчитана по периодам, где они есть."
+        )
+    if previous:
+        lost = [
+            METRIC_TITLES[key]
+            for key in VOLUME_METRICS
+            if not metric_missing(metrics, key) and metric_missing(previous, key)
+        ]
+        if lost:
+            st.caption(
+                f"В прошлом периоде нет колонок: {', '.join(lost)} — изменение не показано."
+            )
 
 
 def _mixed_markup_note(messages: pd.DataFrame, sent: dict[str, Any] | None) -> None:
@@ -334,6 +401,9 @@ def _fill_daily_chart_gaps(
     by_date = dict(zip(dates, comparison))
     empty_metrics = overview_metrics(pd.DataFrame())
     filled: list[dict[str, Any]] = []
+    # Тихий день наследует от соседнего дня, какие метрики есть в выгрузке:
+    # иначе нулевая точка охвата появилась бы на графике выгрузки без охвата.
+    known = dict(comparison[0].get("known") or empty_metrics["known"])
     for day in full_range:
         item = by_date.get(day)
         if item is None and day not in covered_days:
@@ -341,12 +411,15 @@ def _fill_daily_chart_gaps(
         if item is None:
             item = {
                 **empty_metrics,
+                "known": dict(known),
                 "period_id": day.strftime("%Y-%m-%d"),
                 "label": day.strftime("%d.%m"),
                 "positive_share": 0.0,
                 "neutral_share": 0.0,
                 "negative_share": 0.0,
             }
+        else:
+            known = dict(item.get("known") or known)
         filled.append(item)
     return filled
 
@@ -420,12 +493,35 @@ def render_period_comparison_charts(
 
     metrics_cols = ["Сообщения", "Аудитория", "Охват", "Вовлеченность"]
 
+    # Метрика, которой нет в выгрузке точки, на графике не рисуется вовсе: ноль
+    # на линии охвата читался бы как обвал, а не как отсутствующая колонка.
+    metric_values = chart_df[["Период", "Полный период"] + metrics_cols].copy()
+    for column in metrics_cols:
+        known_column = f"{column} в выгрузке"
+        if known_column in chart_df.columns:
+            metric_values[column] = metric_values[column].where(
+                chart_df[known_column].astype(bool)
+            )
+    absent_metrics = [
+        column for column in metrics_cols if metric_values[column].isna().all()
+    ]
+    chart_metrics = [column for column in metrics_cols if column not in absent_metrics]
+
     if "Динамика основных метрик" in selected_blocks:
         st.markdown("**Динамика основных метрик**")
-        metrics_long = chart_df[["Период"] + metrics_cols].melt(
-            id_vars="Период",
-            var_name="Метрика",
-            value_name="Значение",
+        if absent_metrics:
+            st.caption(
+                f"Нет в выгрузке: {', '.join(c.lower() for c in absent_metrics)} — "
+                "на графике не показано."
+            )
+        metrics_long = (
+            metric_values[["Период", "Полный период"] + chart_metrics]
+            .melt(
+                id_vars=["Период", "Полный период"],
+                var_name="Метрика",
+                value_name="Значение",
+            )
+            .dropna(subset=["Значение"])
         )
         metrics_long["Подпись"] = metrics_long["Значение"].apply(chart_number_label)
         base_metrics = alt.Chart(metrics_long).encode(
@@ -476,12 +572,13 @@ def render_period_comparison_charts(
         elif chart_type == "Круговая диаграмма":
             pie_metric = st.selectbox(
                 "Метрика для круговой диаграммы",
-                metrics_cols,
+                chart_metrics,
                 index=0,
                 key=f"main_metrics_pie_metric_{abs(hash(tuple(chart_df['Период'].tolist())))}",
             )
             pie_df = (
-                chart_df[["Период", "Полный период", pie_metric]]
+                metric_values[["Период", "Полный период", pie_metric]]
+                .dropna(subset=[pie_metric])
                 .rename(columns={pie_metric: "Значение"})
                 .copy()
             )
@@ -736,21 +833,18 @@ def render_period_comparison_charts(
 
     if "Сравнение выбранной метрики" in selected_blocks:
         st.markdown("**Сравнение выбранной метрики по периодам**")
-        metric_map = {
-            "Сообщения": "Сообщения",
-            "Аудитория": "Аудитория",
-            "Охват": "Охват",
-            "Вовлеченность": "Вовлеченность",
-        }
+        # Метрику, которой нет ни в одной выгрузке, сравнивать не с чем.
         selected_metric = st.selectbox(
             "Метрика для сравнения",
-            list(metric_map.keys()),
+            chart_metrics,
             index=0,
             key=f"comparison_metric_{abs(hash(tuple(chart_df['Период'].tolist())))}",
         )
-        metric_col = metric_map[selected_metric]
-        bar_df = chart_df[["Период", "Полный период", metric_col]].rename(
-            columns={metric_col: "Значение"}
+        metric_col = selected_metric
+        bar_df = (
+            metric_values[["Период", "Полный период", metric_col]]
+            .dropna(subset=[metric_col])
+            .rename(columns={metric_col: "Значение"})
         )
         bar_df["Подпись"] = bar_df["Значение"].apply(chart_number_label)
         comparison_chart_type = st.selectbox(
@@ -897,23 +991,8 @@ def render_period_comparison_metrics(
     st.markdown(
         f"**{current['label']}** — к предыдущему периоду: {previous['label']}"
     )
-    volume = [
-        ("Сообщений", "messages"),
-        ("Аудитория", "audience"),
-        ("Охват", "reach"),
-        ("Вовлеченность", "engagement"),
-    ]
-    render_metric_row(
-        [
-            metric_card(
-                label,
-                format_int(current[key]),
-                delta=metric_delta(current[key], previous[key]),
-            )
-            for label, key in volume
-        ],
-        columns=4,
-    )
+    render_metric_row(_volume_cards(current, previous), columns=4)
+    _metric_notes(None, current, previous)
 
     render_metric_row(
         _tone_cards(
@@ -957,12 +1036,18 @@ def render_period_comparison_metrics(
         )
 
     if len(comparison) > 2:
+
+        def _overall(key: str) -> str:
+            if key != "messages" and not metrics_comparable(last, first, key):
+                return "нет в выгрузке"
+            return metric_delta(last[key], first[key])
+
         st.caption(
             f"Итоговая динамика от первого к последнему периоду: "
-            f"сообщения — {metric_delta(last['messages'], first['messages'])}; "
-            f"аудитория — {metric_delta(last['audience'], first['audience'])}; "
-            f"охват — {metric_delta(last['reach'], first['reach'])}; "
-            f"вовлеченность — {metric_delta(last['engagement'], first['engagement'])}."
+            f"сообщения — {_overall('messages')}; "
+            f"аудитория — {_overall('audience')}; "
+            f"охват — {_overall('reach')}; "
+            f"вовлеченность — {_overall('engagement')}."
         )
 
     return aggregate_metrics
@@ -985,9 +1070,9 @@ def render_period_metrics_line(messages: pd.DataFrame) -> dict[str, Any]:
     total = int(sentiment.get("total", 0))
     parts = [
         f"{format_int(metrics.get('messages', 0))} сообщений",
-        f"аудитория {format_int(metrics.get('audience', 0))}",
-        f"охват {format_int(metrics.get('reach', 0))}",
-        f"вовлечённость {format_int(metrics.get('engagement', 0))}",
+        f"аудитория {metric_text(metrics, 'audience')}",
+        f"охват {metric_text(metrics, 'reach')}",
+        f"вовлечённость {metric_text(metrics, 'engagement')}",
     ]
     if total and sentiment_unmarked(sentiment):
         parts.append(NO_SENTIMENT_LABEL)
@@ -1042,24 +1127,8 @@ def render_project_intro(
     previous = previous_metrics or {}
     prev_sent = (previous.get("sentiment") or {}) if previous else {}
 
-    def _delta(key: str) -> str | None:
-        if not previous:
-            return None
-        return metric_delta(metrics.get(key, 0), previous.get(key, 0))
-
-    volume_cards = [
-        ("Сообщений", "messages"),
-        ("Аудитория", "audience"),
-        ("Охват", "reach"),
-        ("Вовлеченность", "engagement"),
-    ]
-    render_metric_row(
-        [
-            metric_card(label, format_int(metrics.get(key, 0)), delta=_delta(key))
-            for label, key in volume_cards
-        ],
-        columns=4,
-    )
+    render_metric_row(_volume_cards(metrics, previous or None), columns=4)
+    _metric_notes(messages, metrics, previous or None)
 
     render_metric_row(_tone_cards(sent, prev_sent if previous else None), columns=3)
     _previous_unmarked_note(sent, prev_sent if previous else None)

@@ -27,7 +27,10 @@ from .dashboard_config import (
 from .cached_store import download_storage_file
 from .metrics_compute import (
     NO_SENTIMENT_REASON,
+    VOLUME_METRICS,
     format_int,
+    metric_missing,
+    metric_text,
     no_sentiment_line,
     percent_text,
     sentiment_unmarked,
@@ -248,6 +251,8 @@ def summary_export_payload(
         "audience": int(metrics.get("audience", 0) or 0),
         "reach": int(metrics.get("reach", 0) or 0),
         "engagement": int(metrics.get("engagement", 0) or 0),
+        # Каких метрик нет в выгрузке: вместо нуля отчёт печатает прочерк.
+        "known": {key: not metric_missing(metrics, key) for key in VOLUME_METRICS},
         "positive": int(sent.get("positive", 0) or 0),
         "neutral": int(sent.get("neutral", 0) or 0),
         "negative": int(sent.get("negative", 0) or 0),
@@ -363,10 +368,10 @@ def _draw_metrics_section(ax, payload, comparison, accent, top: float) -> float:
     противоречащих друг другу карточек в отчёте.
     """
     metric_cards = [
-        ("Сообщения", payload.get("messages", 0), ""),
-        ("Аудитория", payload.get("audience", 0), ""),
-        ("Охват", payload.get("reach", 0), ""),
-        ("Вовлеченность", payload.get("engagement", 0), ""),
+        ("Сообщения", format_int(payload.get("messages", 0)), ""),
+        ("Аудитория", metric_text(payload, "audience"), ""),
+        ("Охват", metric_text(payload, "reach"), ""),
+        ("Вовлеченность", metric_text(payload, "engagement"), ""),
     ]
 
     xs = [0.060, 0.525]
@@ -379,7 +384,7 @@ def _draw_metrics_section(ax, payload, comparison, accent, top: float) -> float:
             0.405,
             0.095,
             title,
-            format_int(value),
+            value,
             f"к пред. периоду: {subtitle}" if subtitle else "",
             accent_color=accent,
         )
@@ -409,15 +414,22 @@ def _export_sentiment(
     )
 
 
+def _docx_metric(payload: dict[str, Any], key: str) -> str:
+    """Метрика в тексте Word: «нет в выгрузке» читается лучше голого прочерка."""
+    if metric_missing(payload, key):
+        return "нет в выгрузке"
+    return format_int(payload.get(key, 0))
+
+
 def _pdf_metric_cards(payload: dict[str, Any]) -> tuple[list[tuple[str, str, str]], str]:
     """Карточки «Сообщения/Аудитория/Охват/Вовлеченность» для PDF — то же
     правило, что у _draw_metrics_section (PNG): итог по всей выбранной
     области, никогда по последней точке comparison_sequence."""
     cards = [
         ("Сообщения", format_int(payload.get("messages", 0)), ""),
-        ("Аудитория", format_int(payload.get("audience", 0)), ""),
-        ("Охват", format_int(payload.get("reach", 0)), ""),
-        ("Вовлеченность", format_int(payload.get("engagement", 0)), ""),
+        ("Аудитория", metric_text(payload, "audience"), ""),
+        ("Охват", metric_text(payload, "reach"), ""),
+        ("Вовлеченность", metric_text(payload, "engagement"), ""),
     ]
     return cards, ""
 
@@ -934,9 +946,9 @@ def generate_summary_docx(payload: dict[str, Any]) -> bytes:
         if "metrics" in sections:
             doc.add_paragraph(
                 f"Сообщений — {format_int(payload.get('messages', 0))}; "
-                f"аудитория — {format_int(payload.get('audience', 0))}; "
-                f"охват — {format_int(payload.get('reach', 0))}; "
-                f"вовлеченность — {format_int(payload.get('engagement', 0))}."
+                f"аудитория — {_docx_metric(payload, 'audience')}; "
+                f"охват — {_docx_metric(payload, 'reach')}; "
+                f"вовлеченность — {_docx_metric(payload, 'engagement')}."
             )
         if "sentiment" in sections and not payload.get("sentiment_markup", True):
             doc.add_paragraph(no_sentiment_line("Тональность"))

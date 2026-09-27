@@ -49,6 +49,35 @@ def is_brand_analytics_dataframe(df: pd.DataFrame) -> bool:
     return False
 
 
+# Колонки выгрузки, из которых берутся аудитория, охват и вовлечённость. Один
+# список и для разбора, и для признака «колонка в выгрузке была»
+# (metrics_in_source): разошедшиеся списки дали бы прочерк при живых числах.
+SOURCE_METRIC_ALIASES = {
+    "audience": ("Аудитория", "Audience", "audience"),
+    "reach": ("Просмотры", "Просмотров", "Охват", "Views", "views", "Reach", "reach"),
+    "engagement": ("Вовлечённость", "Вовлеченность", "Engagement", "engagement"),
+}
+
+
+def metrics_in_source(raw: pd.DataFrame) -> str:
+    """Какие из трёх метрик выгрузка действительно содержит: «audience|reach».
+
+    При разборе пустая ячейка становится нулём, и после него «колонки не было»
+    не отличить от «везде ноль». Поэтому признак снимается с исходной таблицы:
+    метрика есть, если хотя бы в одной ячейке её колонок есть цифра. Колонка
+    из одних нулей — законный ноль, а не отсутствие.
+    """
+    present = []
+    for metric, aliases in SOURCE_METRIC_ALIASES.items():
+        for column in aliases:
+            if column in raw.columns and bool(
+                raw[column].fillna("").astype(str).str.contains(r"\d", regex=True).any()
+            ):
+                present.append(metric)
+                break
+    return "|".join(present)
+
+
 def normalize_messages(
     raw: pd.DataFrame, tag_cols: list[str]
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -323,13 +352,9 @@ def normalize_messages(
         return pd.to_numeric(cleaned, errors="coerce").fillna(0).astype(int)
 
     df["duplicate_count"] = as_int("Количество дублей", "Дублей", "Duplicates")
-    df["audience"] = as_int("Аудитория", "Audience", "audience")
-    df["views"] = as_int(
-        "Просмотры", "Просмотров", "Охват", "Views", "views", "Reach", "reach"
-    )
-    df["engagement"] = as_int(
-        "Вовлечённость", "Вовлеченность", "Engagement", "engagement"
-    )
+    df["audience"] = as_int(*SOURCE_METRIC_ALIASES["audience"])
+    df["views"] = as_int(*SOURCE_METRIC_ALIASES["reach"])
+    df["engagement"] = as_int(*SOURCE_METRIC_ALIASES["engagement"])
     # Составляющие вовлечённости нужны метрикам ER и ERR: если выгрузка отдаёт
     # их отдельно, реакции считаются точнее, чем по сводной колонке.
     df["likes"] = as_int("Лайки", "Likes", "likes")

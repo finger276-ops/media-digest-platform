@@ -26,6 +26,10 @@ from .ai_provider import AIConfig, AIError, complete, estimate_tokens, load_ai_c
 from .brand_metrics import METRIC_TITLES
 from .metrics_compute import (
     has_sentiment_markup,
+    known_metrics,
+    metric_known,
+    metric_missing,
+    metrics_comparable,
     no_sentiment_line,
     numeric_series,
     overview_metrics,
@@ -113,12 +117,14 @@ def _tags_block(messages: pd.DataFrame) -> str:
     # «негатив 0» у каждого тега без разметки тональности модель прочитала бы
     # как «по тегам негатива нет».
     marked = has_sentiment_markup(messages)
+    # «охват 0» у каждого тега при выгрузке без просмотров — то же ложное
+    # измерение, что и «негатив 0» без разметки.
+    reach_known = metric_known(messages, "reach")
     lines = []
     for _, row in stats.iterrows():
-        piece = (
-            f"- {row.get('Тег')}: {_fmt_int(row.get('Сообщений'))} сообщ., "
-            f"охват {_fmt_int(row.get('Охват'))}"
-        )
+        piece = f"- {row.get('Тег')}: {_fmt_int(row.get('Сообщений'))} сообщ."
+        if reach_known:
+            piece += f", охват {_fmt_int(row.get('Охват'))}"
         if marked:
             piece += f", негатив {_fmt_int(row.get('Негатив', 0))}"
         lines.append(piece)
@@ -164,11 +170,20 @@ def metrics_block(messages: pd.DataFrame, metrics: dict[str, Any] | None) -> str
             f"нейтрал {_fmt_int(sentiment.get('neutral'))} ({_share(sentiment.get('neutral'), total)}), "
             f"негатив {_fmt_int(sentiment.get('negative'))} ({_share(sentiment.get('negative'), total)})"
         )
+    if "known" not in base and isinstance(messages, pd.DataFrame) and not messages.empty:
+        base["known"] = known_metrics(messages)
+
+    def _volume(label: str, key: str) -> str:
+        # Модель прочитала бы «охват 0» как «публикации никто не видел».
+        if metric_missing(base, key):
+            return f"{label}: нет данных — в выгрузке нет этой колонки"
+        return f"{label}: {_fmt_int(base.get(key))}"
+
     lines = [
         f"Сообщений: {_fmt_int(total)}",
-        f"Суммарная аудитория площадок: {_fmt_int(base.get('audience'))}",
-        f"Суммарный охват: {_fmt_int(base.get('reach'))}",
-        f"Суммарная вовлечённость: {_fmt_int(base.get('engagement'))}",
+        _volume("Суммарная аудитория площадок", "audience"),
+        _volume("Суммарный охват", "reach"),
+        _volume("Суммарная вовлечённость", "engagement"),
         tone,
     ]
     return "Метрики периода:\n" + "\n".join(lines)
@@ -191,6 +206,10 @@ def comparison_block(metrics: dict[str, Any] | None) -> str:
             return 0.0
 
     def _delta(field: str, label: str) -> str | None:
+        # Метрики нет в выгрузке одного из периодов — «было 5 000, стало 0» не
+        # изменение, а пропавшая колонка.
+        if not metrics_comparable(current, previous, field):
+            return None
         was, now = _value(previous, field), _value(current, field)
         if was == 0 and now == 0:
             return None

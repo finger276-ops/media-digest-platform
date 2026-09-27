@@ -60,7 +60,12 @@ from services.tag_parsing import (
     tag_set_from_series,
 )
 from services.microtopics import regex_any, classify_microtopic
-from services.message_normalize import is_brand_analytics_dataframe, normalize_messages
+from services.message_normalize import (
+    is_brand_analytics_dataframe,
+    metrics_in_source,
+    normalize_messages,
+)
+from services.metrics_compute import SOURCE_METRICS_COLUMN
 from services.discussion_build import (
     topic_bucket_for,
     should_start_new_discussion,
@@ -149,6 +154,10 @@ def build_processed_tables(
     is_brand_analytics = is_brand_analytics_dataframe(raw)
 
     messages, message_tags = normalize_messages(raw, tag_cols)
+    # Какие метрики были в выгрузке: без этого пустая колонка «Просмотры»
+    # неотличима от нулевого охвата (services.metrics_compute.metric_known).
+    source_metrics = metrics_in_source(raw)
+    messages[SOURCE_METRICS_COLUMN] = source_metrics
 
     if is_brand_analytics:
         # Сюжетами Brand Analytics размечена примерно четверть сообщений;
@@ -263,6 +272,7 @@ def build_processed_tables(
         "rows_discussions": int(len(discussions)),
         "rows_events": int(len(events)),
         "tag_columns": tag_cols,
+        "metrics_in_source": [m for m in source_metrics.split("|") if m],
         "window_minutes": window_minutes,
         "cluster_method": cluster_method_used,
         "event_source": (

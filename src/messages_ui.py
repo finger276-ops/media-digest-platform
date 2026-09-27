@@ -18,7 +18,12 @@ from services.event_filter_state import (
 )
 from services.formatting import fmt_date
 from services.message_compute import message_link_column, message_text_column
-from services.metrics_compute import format_int, numeric_series
+from services.metrics_compute import (
+    NO_METRIC_VALUE,
+    PERIOD_METRIC_COLUMNS,
+    format_int,
+    numeric_series,
+)
 from services.story_recovery import is_residual_title
 
 
@@ -56,10 +61,15 @@ def render_message_list(
         link = str(row.get(link_col, "") or "").strip() if link_col else ""
 
         meta_parts = [part for part in [date_text, source, author, sentiment] if part]
+        # Признак выгрузки-периода: колонки нет — прочерк, а не «охват: 0».
+        def _value(key: str, value: int) -> str:
+            known = row.get(PERIOD_METRIC_COLUMNS[key], True)
+            return format_int(value) if known is None or pd.isna(known) or bool(known) else NO_METRIC_VALUE
+
         metrics_parts = [
-            f"аудитория: {format_int(audience)}",
-            f"охват: {format_int(reach)}",
-            f"вовлеченность: {format_int(engagement)}",
+            f"аудитория: {_value('audience', audience)}",
+            f"охват: {_value('reach', reach)}",
+            f"вовлеченность: {_value('engagement', engagement)}",
         ]
 
         st.markdown("---")

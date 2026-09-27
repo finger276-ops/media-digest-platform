@@ -172,3 +172,6 @@ jobs:
 
       - name: Теги для показа — только из выгрузки (без рубрик платформы)
         run: python tests/test_display_tags.py
+
+      - name: Прочерк вместо нуля (аудитории, охвата, вовлечённости нет в выгрузке)
+        run: python tests/test_metric_availability.py
