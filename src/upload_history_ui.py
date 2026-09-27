@@ -34,7 +34,6 @@ from services.project_settings import (
     with_story_build,
 )
 from services.roles import can_change_project_data, can_see_technical
-from noise_filter_ui import render_noise_filter_block
 from tag_hierarchy_ui import render_tag_hierarchy_block
 
 
@@ -336,7 +335,6 @@ def render_upload_page(
         # данные выгрузки: аналитик проверяет здесь, что колонки файла поняты.
         preview_cols = [c for c in canonical.columns if not str(c).startswith("source_")]
         st.dataframe(canonical[preview_cols].head(20), width="stretch")
-    render_noise_filter_block(canonical)
 
     with st.spinner("Собираю сообщения, обсуждения и инфоповоды..."):
         try:

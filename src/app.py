@@ -54,7 +54,6 @@ from services.event_titles import (
     preview_merge_levels,
 )
 from services.ingest import IngestError, process_canonical, read_canonical_bytes
-from noise_filter_ui import render_noise_filter_block
 from ingest_admin_ui import render_ingest_admin_page
 from brand_metrics_ui import render_brand_metrics_page
 from ai_summary_ui import RERUN_AFTER_RENDER_KEY, render_saved_ai_text
