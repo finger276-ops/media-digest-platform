@@ -1040,10 +1040,14 @@ def render_events(
     read_only: bool = False,
 ) -> None:
     st.subheader("Инфоповоды")
-    render_assembly_notice(messages)
     # can_edit решает, показывать ли блоки правки; read_only — разрешать ли
     # запись. В демо первое остаётся истиной, второе нет.
     can_edit = role_rank(role) >= role_rank("editor")
+    # «Требуют проверки аналитика» и откуда собраны сообщения — рабочие
+    # заметки аналитика. Заказчику, в том числе в клиентском предпросмотре,
+    # они говорят только то, что список ещё никто не проверял.
+    if can_edit:
+        render_assembly_notice(messages)
     can_write = can_edit and not read_only
     demo_help = DEMO_MESSAGE if read_only else None
 
@@ -1075,9 +1079,12 @@ def render_events(
         st.info("Инфоповоды не найдены.")
         return
 
-    render_title_merge_report(
-        project_id, events_agg, can_edit, manual_state, read_only=read_only
-    )
+    # Какие заголовки платформа склеила — проверка её решений, то есть работа
+    # аналитика. Заказчик видит уже итог.
+    if can_edit:
+        render_title_merge_report(
+            project_id, events_agg, can_edit, manual_state, read_only=read_only
+        )
 
     word = st.text_input(
         "Фильтр по слову в сообщениях",

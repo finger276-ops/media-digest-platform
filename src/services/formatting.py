@@ -8,6 +8,8 @@ from typing import Any
 
 import pandas as pd
 
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{1,2}-\d{1,2}")
+
 
 def fmt_date(value: Any) -> str:
     if value is None:
@@ -19,7 +21,11 @@ def fmt_date(value: Any) -> str:
         # pd.isna на массиве или несравнимом объекте — значит, это не NaN.
         pass
     try:
-        ts = pd.to_datetime(value, errors="coerce", dayfirst=True)
+        # «День первым» — для русских дат вида 05.04.2026. ISO-строку
+        # (2026-04-05, как её отдаёт база) pandas 3 с dayfirst=True читает
+        # как 4 мая, поэтому её разбираем без этого флага.
+        dayfirst = not (isinstance(value, str) and _ISO_DATE_RE.match(value.strip()))
+        ts = pd.to_datetime(value, errors="coerce", dayfirst=dayfirst)
         if pd.isna(ts):
             return ""
         return ts.strftime("%d.%m.%Y")
@@ -86,3 +92,31 @@ def period_picker_label(row: pd.Series, fallback: str = "") -> str:
     if name:
         return f"{name} · {date_part}" if date_part else name
     return date_part or fallback
+
+
+# Внутренние коды платформы — в базе и в коде; человеку показывается подпись.
+# Один словарь на всю платформу: раньше подписи форматов были скопированы в
+# три страницы, а там, где их не было, аналитик видел «mediologia_excel».
+SOURCE_SYSTEM_LABELS = {
+    "auto": "Автоопределение",
+    "mediologia": "Медиалогия CSV",
+    "mediologia_excel": "Медиалогия Excel",
+    "brand_analytics": "Brand Analytics",
+    "generic": "Универсальный CSV/Excel",
+}
+
+STATUS_TITLES = {
+    "active": "Активен",
+    "hidden": "Скрыт",
+    "archived": "В архиве",
+}
+
+
+def source_system_title(value: Any) -> str:
+    code = str(value or "").strip()
+    return SOURCE_SYSTEM_LABELS.get(code.lower(), code)
+
+
+def status_title(value: Any) -> str:
+    code = str(value or "").strip() or "active"
+    return STATUS_TITLES.get(code.lower(), code)

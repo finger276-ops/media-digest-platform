@@ -19,6 +19,7 @@ from services.event_filter_state import (
 from services.formatting import fmt_date
 from services.message_compute import message_link_column, message_text_column
 from services.metrics_compute import format_int, numeric_series
+from services.story_recovery import is_residual_title
 
 
 def _value_from_row(row: pd.Series, *columns: str) -> str:
@@ -64,7 +65,9 @@ def render_message_list(
         st.markdown("---")
         if meta_parts:
             st.caption(" · ".join(meta_parts))
-        if event_title:
+        # «Без сюжета» — служебная корзина платформы, а не инфоповод: строка
+        # «Инфоповод: Без сюжета» читателю ничего не сообщает.
+        if event_title and not is_residual_title(event_title):
             st.markdown(f"**Инфоповод:** {event_title}")
         if tags:
             st.caption(f"Теги: {tags}")

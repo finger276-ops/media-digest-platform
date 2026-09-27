@@ -77,6 +77,25 @@ def is_platform_owner() -> bool:
     return bool(st.session_state.get("platform_is_admin"))
 
 
+AI_ERROR_GENERIC = (
+    "Не удалось получить текст от модели. Попробуйте ещё раз чуть позже; если "
+    "ошибка повторится — сообщите владельцу платформы."
+)
+
+
+def ai_error_text(exc: AIError, *, owner: bool) -> str:
+    """Что сказать о неудачной генерации.
+
+    Лимиты (не поместилось, квота, частота) объяснены по-человечески и с тем,
+    что делать, — их видят все. Остальное — сбой соединения, сертификат,
+    таймаут, ответ не в том формате — про настройку сервиса: текст с
+    AI_TIMEOUT или адресом сервиса полезен владельцу, остальным — общий.
+    """
+    if owner or exc.kind:
+        return str(exc)
+    return AI_ERROR_GENERIC
+
+
 def render_certificate_helper() -> None:
     """Собрать сертификат НУЦ Минцифры без терминала и без коммита в репозиторий.
 
@@ -200,12 +219,19 @@ def load_ai_text(
 
 
 def render_saved_ai_text(
-    project_id: str, kind: str, period_ids: list[str], *, heading: str = ""
+    project_id: str,
+    kind: str,
+    period_ids: list[str],
+    *,
+    heading: str = "",
+    show_model: bool = False,
 ) -> bool:
     """Показать сохранённый текст модели в профильном разделе.
 
     Возвращает True, если что-то показано, — вызывающий код может решить, нужен
-    ли ему собственный заполнитель.
+    ли ему собственный заполнитель. Провайдер и модель (show_model) — для
+    владельца платформы: заказчику «yandex · yandexgpt/latest» ничего не
+    говорит.
     """
     payload = load_ai_text(project_id, kind, period_ids)
     if not payload:
@@ -214,18 +240,24 @@ def render_saved_ai_text(
         if heading:
             st.markdown(f"**{heading}**")
         st.markdown(str(payload.get("text") or "").replace("\n", "  \n"))
-        st.caption(_origin_caption(payload))
+        st.caption(_origin_caption(payload, show_model=show_model))
     return True
 
 
-def _origin_caption(payload: dict[str, Any]) -> str:
-    provider = str(payload.get("provider") or "")
-    model = str(payload.get("model") or "")
-    created = str(payload.get("created_at") or "")[:16].replace("T", " ")
-    parts = ["Текст сгенерирован моделью и проверен аналитиком"]
-    tail = " · ".join(x for x in (provider, model, created) if x)
-    if tail:
-        parts.append(tail)
+def _origin_caption(payload: dict[str, Any], *, show_model: bool = False) -> str:
+    parts = ["Текст подготовлен с помощью ИИ и проверен аналитиком"]
+    # created_at — ISO-строка; fmt_date разбирает даты «день первым» и
+    # превратила бы 2026-04-05 в 4 мая.
+    stamp = pd.to_datetime(payload.get("created_at"), errors="coerce", utc=True)
+    created = "" if pd.isna(stamp) else stamp.strftime("%d.%m.%Y")
+    if created:
+        parts.append(created)
+    if show_model:
+        parts.extend(
+            x
+            for x in (str(payload.get("provider") or ""), str(payload.get("model") or ""))
+            if x
+        )
     return " · ".join(parts)
 
 
@@ -289,7 +321,10 @@ def render_ai_summary_panel(
             "Платформа считает цифры сама, модель их только интерпретирует: "
             "в промпт уходит готовая карточка данных, а не выгрузка."
         )
-        st.caption(describe_config(config))
+        # Провайдер, модель, адрес сервиса и состояние сертификата — для
+        # владельца, который это настраивает.
+        if owner:
+            st.caption(describe_config(config))
 
         # Доступ настраивается независимо от ключей: владелец может открыть его
         # редакторам заранее, а ключи добавить позже — и наоборот.
@@ -541,7 +576,7 @@ def _run_generation(
         except AIError as exc:
             st.session_state[_notice_key(project_id)] = {
                 "ok": False,
-                "text": str(exc),
+                "text": ai_error_text(exc, owner=is_platform_owner()),
                 "detail": exc.detail,
             }
             return

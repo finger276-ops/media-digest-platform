@@ -54,6 +54,7 @@ from services.project_settings import (
     category_brands_from_project_settings,
 )
 from services.chart_style import LINE_INTERPOLATE, PERIOD_AXIS, fixed_color_scale
+from services.formatting import SOURCE_SYSTEM_LABELS, source_system_title
 
 METRIC_ORDER = ["BPI", "NSS", "SES", "TVS", "SOV", "ReachScore", "ER", "ERR"]
 
@@ -61,13 +62,6 @@ METRIC_ORDER = ["BPI", "NSS", "SES", "TVS", "SOV", "ReachScore", "ER", "ERR"]
 # цвет BPI не меняется в зависимости от того, что ещё отмечено в multiselect.
 METRIC_COLOR_SCALE = fixed_color_scale(METRIC_ORDER)
 
-SOURCE_SYSTEM_OPTIONS = {
-    "auto": "Автоопределение",
-    "brand_analytics": "Brand Analytics",
-    "mediologia": "Медиалогия CSV",
-    "mediologia_excel": "Медиалогия Excel",
-    "generic": "Универсальный CSV/Excel",
-}
 
 
 def format_metric(card: dict[str, Any]) -> str:
@@ -873,8 +867,8 @@ def render_category_upload(
     )
     source_system = st.selectbox(
         "Формат выгрузки",
-        list(SOURCE_SYSTEM_OPTIONS.keys()),
-        format_func=lambda key: SOURCE_SYSTEM_OPTIONS[key],
+        list(SOURCE_SYSTEM_LABELS),
+        format_func=source_system_title,
         key="category_source_system",
     )
     uploaded = st.file_uploader(

@@ -31,6 +31,7 @@ import platform_store as store
 from import_adapters import SourceFileError, read_source_table
 from io_utils import read_table
 from preprocess import run_preprocess_from_dataframe
+from .formatting import SOURCE_SYSTEM_LABELS
 from .project_settings import (
     project_settings_from_row,
     story_build_settings_from_project_settings,
@@ -46,13 +47,9 @@ GENERATED_TABLES = [
 
 SUPPORTED_SUFFIXES = {".csv", ".txt", ".xlsx", ".xls", ".xlsm"}
 
-SOURCE_SYSTEMS = {
-    "auto",
-    "mediologia",
-    "mediologia_excel",
-    "brand_analytics",
-    "generic",
-}
+# Коды форматов — ключи общего словаря подписей: новый формат добавляется в
+# одном месте и сразу получает человеческое название во всех выпадающих списках.
+SOURCE_SYSTEMS = set(SOURCE_SYSTEM_LABELS)
 
 DEFAULT_ALGORITHM_PARAMS: dict[str, float] = {
     "similarity_threshold": 0.30,

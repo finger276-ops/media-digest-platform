@@ -29,7 +29,8 @@ def dashboard_view_mode_for_session(
     role: str, settings: dict[str, Any], *, key: str = "dashboard_view_mode"
 ) -> str:
     if role_rank(role) < role_rank("editor"):
-        st.sidebar.caption("Вид дашборда: клиентский")
+        # Зрителю выбирать нечего, и подпись «Вид дашборда: клиентский» ему
+        # ничего не говорит: другого вида он не видел.
         return "client"
     # Для того, кто работает с проектом, вид по умолчанию — аналитический.
     # Раньше здесь стоял «клиентский», и это было безобидно ровно потому, что

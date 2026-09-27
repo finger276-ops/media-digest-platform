@@ -23,6 +23,8 @@ from typing import Any
 
 import pandas as pd
 
+from .formatting import source_system_title
+
 # Колонки, которые незачем показывать как непонятые: платформа добавляет их
 # сама либо использует не как данные. «Обработано» — маркер начала тегов: по
 # нему платформа находит колонки-теги, а само значение ей не нужно.
@@ -114,7 +116,7 @@ def summarize_import(report: dict[str, Any]) -> str:
         parts.append(f"{unknown} не распознано")
     system = report.get("detected_system")
     if system:
-        parts.append(f"формат: {system}")
+        parts.append(f"формат: {source_system_title(system)}")
     return ", ".join(parts)
 
 

@@ -146,7 +146,10 @@ check("успешная задача помечена done", done["status"] == "
 check("в задаче записан period_id", bool(done.get("period_id")))
 check("в результате есть статистика", done.get("result", {}).get("messages") == 40)
 check("задача с пропавшим файлом — error", failed["status"] == "error", failed["status"])
-check("текст ошибки понятный", "Storage" in str(failed.get("error_message")), str(failed.get("error_message"))[:80])
+check("текст ошибки понятный", "не найден в хранилище" in str(failed.get("error_message")), str(failed.get("error_message"))[:80])
+# Текст задачи читает аналитик заказчика: путь в хранилище (в нём ID проекта)
+# остаётся в логе воркера.
+check("путь в хранилище в тексте не светится", "inbox/" not in str(failed.get("error_message")), str(failed.get("error_message"))[:120])
 
 print("4. Повторный запуск не создает дублей")
 before = len(SAVED_PERIODS)

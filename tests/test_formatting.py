@@ -19,7 +19,11 @@ period_picker_label - единая точка, которая решает: ав
   date_part) -> тест "дата не дублируется для автосгенерированного имени"
   красный (снова "24.04-30.04 · 24.04-30.04");
 - в fmt_date_short не резать год (вернуть fmt_date как есть) -> тест "без
-  года" красный.
+  года" красный;
+- в fmt_date вернуть dayfirst=True для любых строк -> тест "ISO-дата с днём
+  до 12 не превращается в другой месяц" красный (2026-04-05 -> 04.05.2026);
+- в status_title / source_system_title вернуть код как есть -> тесты
+  "статус по-русски" и "формат по-русски" красные.
 """
 
 import os
@@ -37,10 +41,13 @@ os.environ.setdefault("SUPABASE_SERVICE_ROLE_KEY", "test-key")
 import pandas as pd  # noqa: E402
 
 from services.formatting import (  # noqa: E402
+    fmt_date,
     fmt_date_short,
     fmt_period_short,
     looks_like_date_range,
     period_picker_label,
+    source_system_title,
+    status_title,
 )
 
 failures = []
@@ -106,6 +113,48 @@ check(
     "совсем без данных - запасное значение (period_id), не пустая подпись",
     period_picker_label(empty_row, fallback="p1") == "p1",
     period_picker_label(empty_row, fallback="p1"),
+)
+
+print("4. fmt_date: ISO-дата из базы не меняет день с месяцем местами")
+# pandas 3 с dayfirst=True читает «2026-04-05» как 4 мая. Дни до 12 — ровно
+# те, на которых это незаметно в тестах с 24-м и 30-м числом.
+for raw in ("2026-04-05", "2026-04-05T10:11:12+00:00", "2026-04-05 10:11:12"):
+    check(
+        f"ISO-дата с днём до 12 не превращается в другой месяц: {raw}",
+        fmt_date(raw) == "05.04.2026",
+        fmt_date(raw),
+    )
+check("русская дата читается днём вперёд", fmt_date("05.04.2026") == "05.04.2026", fmt_date("05.04.2026"))
+check(
+    "Timestamp как был",
+    fmt_date(pd.Timestamp("2026-04-05")) == "05.04.2026",
+    fmt_date(pd.Timestamp("2026-04-05")),
+)
+check(
+    "короткая дата из ISO тоже верная",
+    fmt_date_short("2026-04-05") == "05.04",
+    fmt_date_short("2026-04-05"),
+)
+
+print("5. Внутренние коды платформы показываются по-русски")
+check("статус по-русски: active", status_title("active") == "Активен", status_title("active"))
+check("статус по-русски: hidden", status_title("hidden") == "Скрыт", status_title("hidden"))
+check("статус по-русски: archived", status_title("archived") == "В архиве", status_title("archived"))
+check("пустой статус — активен, как и в базе", status_title(None) == "Активен", status_title(None))
+check(
+    "формат по-русски: mediologia_excel",
+    source_system_title("mediologia_excel") == "Медиалогия Excel",
+    source_system_title("mediologia_excel"),
+)
+check(
+    "формат по-русски: brand_analytics",
+    source_system_title("brand_analytics") == "Brand Analytics",
+    source_system_title("brand_analytics"),
+)
+check(
+    "незнакомый код не теряется",
+    source_system_title("new_system") == "new_system",
+    source_system_title("new_system"),
 )
 
 print()

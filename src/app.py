@@ -260,6 +260,10 @@ def is_platform_admin() -> bool:
             st.session_state["platform_is_admin"] = False
             st.rerun()
         return True
+    # Клиенту, который уже вошёл кодом проекта, форма владельца ни к чему:
+    # владелец входит с пустой сессии, после «Сменить проект / выйти».
+    if st.session_state.get("platform_project_id"):
+        return False
     with st.sidebar.expander("Вход владельца платформы", expanded=False):
         password = st.text_input(
             "Пароль владельца", type="password", key="platform_admin_password"
@@ -370,9 +374,11 @@ def _as_fragment(func):
 
 
 @_as_fragment
-def _section_tags(messages: pd.DataFrame, project_id: str) -> None:
-    render_tag_statistics(messages, project_id=project_id)
-    render_tier_analytics_block(messages, project_id=project_id)
+def _section_tags(
+    messages: pd.DataFrame, project_id: str, analyst_view: bool = False
+) -> None:
+    render_tag_statistics(messages, project_id=project_id, analyst_view=analyst_view)
+    render_tier_analytics_block(messages, project_id, analyst_view=analyst_view)
 
 
 @_as_fragment
@@ -563,10 +569,11 @@ def _main() -> None:
         st.sidebar.checkbox(
             "Диагностика скорости", value=False, key="platform_perf_debug"
         )
-    st.sidebar.caption(f"{APP_TITLE} · {APP_VERSION}")
+        # Номер версии нужен тому, кто выкатывает платформу, а не заказчику.
+        st.sidebar.caption(f"{APP_TITLE} · {APP_VERSION}")
 
-    # Технические подробности ошибки — только владельцу и аналитику, и не в
-    # демо: см. can_see_error_details.
+    # Технические подробности ошибки — только владельцу платформы: см.
+    # can_see_error_details.
     show_error_details = can_see_error_details(
         role, is_admin=is_admin, read_only=demo_read_only
     )
@@ -671,6 +678,10 @@ def _main() -> None:
     # предпросмотра нельзя было бы выйти.
     client_preview = hide_technical and role_rank(role) >= role_rank("editor")
     content_role = "viewer" if client_preview else role
+    # Подписи «для аналитика» — откуда взяты теги, что проверить перед
+    # отправкой заказчику — видит тот, кто работает с проектом, и не видит
+    # заказчик, в том числе в клиентском предпросмотре.
+    analyst_view = role_rank(content_role) >= role_rank("editor")
     # Демо и клиентский предпросмотр запрещают правку по-разному, и это
     # намеренно. Предпросмотр показывает кабинет заказчика, поэтому прячет
     # аналитические блоки целиком. Демо наоборот — оставляет их на виду и
@@ -945,6 +956,7 @@ def _main() -> None:
                 AI_KIND_RISKS,
                 selected_period_ids,
                 heading="Риски периода",
+                show_model=is_admin and not client_preview,
             )
             render_client_insights(
                 enriched_messages,
@@ -953,6 +965,7 @@ def _main() -> None:
                 selected_period_ids,
                 profile=project_profile,
                 granularity_narrowed=granularity_narrowed,
+                analyst_view=analyst_view,
             )
         elif page == "Индексы бренда":
             _section_brand_metrics(
@@ -970,9 +983,10 @@ def _main() -> None:
                 AI_KIND_BRAND,
                 selected_period_ids,
                 heading="Что говорят индексы",
+                show_model=is_admin and not client_preview,
             )
         elif page == "Теги":
-            _section_tags(enriched_messages, project_id)
+            _section_tags(enriched_messages, project_id, analyst_view)
         elif page == "Инфоповоды":
             _section_events(
                 project_id,

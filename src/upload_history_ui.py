@@ -19,7 +19,13 @@ from services.cached_store import (
     update_period_metadata,
     update_project,
 )
-from services.formatting import fmt_period, period_picker_label
+from services.formatting import (
+    SOURCE_SYSTEM_LABELS,
+    STATUS_TITLES,
+    fmt_period,
+    period_picker_label,
+    status_title,
+)
 from services.import_report import normalization_lines, summarize_import
 from services.ingest import IngestError, process_canonical, read_canonical_bytes
 from services.metrics_compute import format_int
@@ -27,7 +33,7 @@ from services.project_settings import (
     story_build_settings_from_project_settings,
     with_story_build,
 )
-from services.roles import can_change_project_data
+from services.roles import can_change_project_data, can_see_technical
 from noise_filter_ui import render_noise_filter_block
 from tag_hierarchy_ui import render_tag_hierarchy_block
 
@@ -292,14 +298,8 @@ def render_upload_page(
             date_to = st.date_input("Дата окончания", value=None, format="DD.MM.YYYY")
         source_system = st.selectbox(
             "Источник",
-            ["auto", "mediologia", "mediologia_excel", "brand_analytics", "generic"],
-            format_func=lambda x: {
-                "auto": "Автоопределение",
-                "mediologia": "Медиалогия CSV",
-                "mediologia_excel": "Медиалогия Excel",
-                "brand_analytics": "Brand Analytics",
-                "generic": "Универсальный CSV/Excel",
-            }.get(x, x),
+            list(SOURCE_SYSTEM_LABELS),
+            format_func=lambda x: SOURCE_SYSTEM_LABELS.get(x, x),
         )
         uploaded = st.file_uploader(
             "CSV или Excel", type=["csv", "xlsx", "xls", "xlsm"]
@@ -332,7 +332,10 @@ def render_upload_page(
     st.success(f"Файл прочитан: {len(canonical):,} строк".replace(",", " "))
     render_import_report(import_report)
     with st.expander("Предпросмотр распознанных колонок", expanded=False):
-        st.dataframe(canonical.head(20), width="stretch")
+        # Служебные колонки платформы (source_system, source_file…) — не
+        # данные выгрузки: аналитик проверяет здесь, что колонки файла поняты.
+        preview_cols = [c for c in canonical.columns if not str(c).startswith("source_")]
+        st.dataframe(canonical[preview_cols].head(20), width="stretch")
     render_noise_filter_block(canonical)
 
     with st.spinner("Собираю сообщения, обсуждения и инфоповоды..."):
@@ -360,9 +363,11 @@ def render_upload_page(
 
     if result.get("storage_error"):
         st.warning(
-            "Обработанные данные сохранены в БД, но сырой файл не удалось положить "
-            f"в Storage: {result['storage_error']}"
+            "Данные периода сохранены, но копию исходного файла сохранить не "
+            "удалось. На аналитику это не влияет."
         )
+        if can_see_technical(role):
+            st.caption(f"Хранилище: {result['storage_error']}")
     st.success(
         f"Период «{result['period_name']}» сохранен: сообщений {result['messages']}, "
         f"инфоповодов {result['events']}."
@@ -385,13 +390,13 @@ def render_period_history(project_id: str, role: str, *, read_only: bool) -> Non
         return
     view = periods.copy()
     view["Период"] = view.apply(fmt_period, axis=1)
-    show = view[
-        [
-            c
-            for c in ["period_name", "Период", "source_filename", "status", "period_id"]
-            if c in view.columns
-        ]
-    ].rename(
+    if "status" in view.columns:
+        view["status"] = view["status"].map(status_title)
+    # Внутренний ID периода нужен владельцу платформы — для поддержки и логов.
+    columns = ["period_name", "Период", "source_filename", "status"]
+    if can_see_technical(role):
+        columns.append("period_id")
+    show = view[[c for c in columns if c in view.columns]].rename(
         columns={
             "period_name": "Название",
             "source_filename": "Файл",
@@ -439,17 +444,17 @@ def render_period_history(project_id: str, role: str, *, read_only: bool) -> Non
             value=str(row.get("source_filename") or ""),
             key=f"filename_{period_id}",
         )
+        status_options = list(STATUS_TITLES)
+        current_status = str(row.get("status") or "active")
         status = st.selectbox(
             "Статус",
-            ["active", "hidden", "archived"],
+            status_options,
             index=(
-                ["active", "hidden", "archived"].index(
-                    str(row.get("status") or "active")
-                )
-                if str(row.get("status") or "active")
-                in ["active", "hidden", "archived"]
+                status_options.index(current_status)
+                if current_status in status_options
                 else 0
             ),
+            format_func=status_title,
             key=f"status_{period_id}",
         )
         comment = st.text_area(
@@ -487,7 +492,8 @@ def render_period_history(project_id: str, role: str, *, read_only: bool) -> Non
 
         with st.expander("Удалить выгрузку без восстановления", expanded=False):
             st.warning(
-                "Удаление выгрузки удалит период и все обработанные таблицы этого периода из platform_table_rows. "
+                "Удаление выгрузки удалит период и все его обработанные данные: "
+                "сообщения, обсуждения и инфоповоды. "
                 "Также будут удалены ручные правки, которые явно ссылаются на этот период. "
                 "Другие проекты и другие периоды не затрагиваются."
             )
@@ -495,10 +501,10 @@ def render_period_history(project_id: str, role: str, *, read_only: bool) -> Non
                 row.get("manifest") if isinstance(row.get("manifest"), dict) else {}
             )
             storage_path = str((manifest or {}).get("storage_path") or "").strip()
-            if storage_path:
-                st.caption(f"Исходный файл в Storage: {storage_path}")
+            if storage_path and can_see_technical(role):
+                st.caption(f"Исходный файл в хранилище: {storage_path}")
             delete_storage = st.checkbox(
-                "Удалить исходный файл из Supabase Storage, если он был сохранен",
+                "Удалить и копию исходного файла, если она сохранена",
                 value=True,
                 key=f"delete_storage_{period_id}",
             )
@@ -536,10 +542,19 @@ def render_period_history(project_id: str, role: str, *, read_only: bool) -> Non
                     else False
                 )
                 mode = str(result.get("mode") or "") if isinstance(result, dict) else ""
-                for warning in (
+                warnings = (
                     (result.get("warnings") or []) if isinstance(result, dict) else []
-                ):
-                    st.warning(str(warning))
+                )
+                # Предупреждения хранилища несут текст ответа базы — это для
+                # владельца платформы. Аналитику хватает итога ниже.
+                if can_see_technical(role):
+                    for warning in warnings:
+                        st.warning(str(warning))
+                elif warnings and mode == "hard":
+                    st.warning(
+                        "Выгрузка удалена, но часть связанных записей очистить "
+                        "не удалось. На аналитику это не влияет."
+                    )
                 if (
                     delete_storage
                     and storage_path
@@ -547,16 +562,18 @@ def render_period_history(project_id: str, role: str, *, read_only: bool) -> Non
                     and mode != "soft_fallback"
                 ):
                     st.warning(
-                        "Выгрузка удалена из базы, но исходный файл в Storage удалить не удалось или он уже отсутствовал."
+                        "Выгрузка удалена, но копию исходного файла удалить не "
+                        "удалось или её уже не было."
                     )
                 if mode == "soft_fallback":
                     st.warning(
-                        "Физическое удаление не завершилось, поэтому период скрыт из интерфейса. Для полной очистки можно повторить удаление позже или выполнить очистку в Supabase."
+                        "Удаление не завершилось, поэтому период скрыт. Для полной "
+                        "очистки повторите удаление позже."
                     )
                 elif mode == "failed":
                     st.error(
                         "Удалить не получилось: период остался без изменений. "
-                        "Подробности — в предупреждениях выше; попробуйте позже."
+                        "Попробуйте позже."
                     )
                 else:
                     st.success(

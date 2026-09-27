@@ -80,6 +80,14 @@ class Query:
 
     def execute(self):
         rows = self.db.setdefault(self.table, [])
+        if self.op in ("insert", "upsert") and isinstance(self.payload, list):
+            # PostgREST принимает пачку строк одним запросом — так пишет
+            # настоящая загрузка выгрузки (platform_table_rows).
+            out = []
+            for item in self.payload:
+                one = Query(self.db, self.table, self.op, item, on_conflict=self.on_conflict)
+                out.extend(one.execute().data)
+            return Result(out)
         if self.op == "select":
             found = [dict(r) for r in rows if self._match(r)]
             if self._order:

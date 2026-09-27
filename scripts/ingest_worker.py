@@ -123,8 +123,12 @@ def process_task(task: dict[str, Any], work_dir: str) -> dict[str, Any]:
 
     file_bytes = store.download_storage_file(storage_path)
     if not file_bytes:
+        # Текст уходит в очередь и его читает аналитик; путь в хранилище —
+        # в логе воркера рядом с task_id.
+        LOG.error("Задача %s: нет файла %s", task.get("task_id"), storage_path)
         raise IngestError(
-            f"Файл не найден в Supabase Storage по пути «{storage_path}»."
+            "Файл выгрузки не найден в хранилище: его удалили или он не "
+            "долетел. Загрузите файл вручную на странице «Загрузка файла»."
         )
 
     expected_hash = str(task.get("file_sha256") or "").strip()

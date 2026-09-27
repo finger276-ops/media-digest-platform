@@ -34,7 +34,7 @@ from services.dashboard_config import (
     DEFAULT_DASHBOARD_VIEW_SETTINGS,
     REPORT_SECTION_OPTIONS,
 )
-from services.formatting import fmt_date
+from services.formatting import STATUS_TITLES, fmt_date, status_title
 from services.metrics_compute import format_int
 from services.roles import role_rank, role_title
 from services.project_settings import (
@@ -217,7 +217,13 @@ def render_project_manager(
                 except AccessCodeError as exc:
                     st.error(str(exc))
                 else:
-                    st.success(f"Проект создан: {project_id}")
+                    # Внутренний ID нужен владельцу платформы; аналитику
+                    # достаточно названия.
+                    st.success(
+                        f"Проект создан: {project_id}"
+                        if is_admin
+                        else f"Проект «{name.strip()}» создан."
+                    )
                     if not is_admin:
                         # Аналитик сидит в проекте, в который вошёл кодом. Новый
                         # проект откроется только своим кодом — сказать об этом
@@ -237,20 +243,12 @@ def render_project_manager(
     for col in ["created_at", "updated_at"]:
         if col in view.columns:
             view[col] = view[col].apply(fmt_date)
-    show = view[
-        [
-            c
-            for c in [
-                "project_name",
-                "description",
-                "status",
-                "created_at",
-                "updated_at",
-                "project_id",
-            ]
-            if c in view.columns
-        ]
-    ].rename(
+    if "status" in view.columns:
+        view["status"] = view["status"].map(status_title)
+    columns = ["project_name", "description", "status", "created_at", "updated_at"]
+    if is_admin:
+        columns.append("project_id")
+    show = view[[c for c in columns if c in view.columns]].rename(
         columns={
             "project_name": "Проект",
             "description": "Описание",
@@ -282,17 +280,17 @@ def render_project_manager(
                 value=str(row.get("description") or ""),
                 key=f"edit_project_description_{project_id}",
             )
+            status_options = list(STATUS_TITLES)
+            current_status = str(row.get("status") or "active")
             new_status = st.selectbox(
                 "Статус",
-                ["active", "hidden", "archived"],
+                status_options,
                 index=(
-                    ["active", "hidden", "archived"].index(
-                        str(row.get("status") or "active")
-                    )
-                    if str(row.get("status") or "active")
-                    in ["active", "hidden", "archived"]
+                    status_options.index(current_status)
+                    if current_status in status_options
                     else 0
                 ),
+                format_func=status_title,
                 key=f"edit_project_status_{project_id}",
             )
             current_settings = project_settings_from_row(row)

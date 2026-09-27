@@ -24,7 +24,11 @@ from services.metrics_compute import (
     percent_text,
     sentiment_unmarked,
 )
-from services.tag_compute import build_tag_statistics, split_pipe_values
+from services.tag_compute import (
+    build_tag_statistics,
+    is_brand_analytics_messages,
+    split_pipe_values,
+)
 
 
 def messages_with_tag(messages: pd.DataFrame, tag: str) -> pd.DataFrame:
@@ -232,7 +236,10 @@ def render_selected_tag_detail(
 
 
 def render_tag_statistics(
-    messages: pd.DataFrame, *, project_id: str | None = None
+    messages: pd.DataFrame,
+    *,
+    project_id: str | None = None,
+    analyst_view: bool = False,
 ) -> None:
     stats = build_tag_statistics(messages)
     if stats.empty:
@@ -252,8 +259,16 @@ def render_tag_statistics(
         display["Доля негатива"] = "—"
     else:
         display["Доля негатива"] = display["Доля негатива"].astype(str) + "%"
+    # Откуда взялись теги — пояснение для аналитика, и только про выгрузки
+    # Brand Analytics: на Медиалогии колонок «после Обработано» нет вовсе.
+    source_note = (
+        "Теги берутся из системных колонок Brand Analytics после «Обработано». "
+        if analyst_view and is_brand_analytics_messages(messages)
+        else ""
+    )
     st.caption(
-        "Теги берутся из системных колонок Brand Analytics после «Обработано». Аудитория, охват и вовлеченность суммируются по сообщениям с выбранным тегом."
+        source_note
+        + "Аудитория, охват и вовлеченность суммируются по сообщениям с выбранным тегом."
     )
     if unmarked:
         st.caption(NO_SENTIMENT_REASON)

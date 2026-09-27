@@ -126,9 +126,16 @@ _COUNT_COLUMNS = {
 
 
 def render_tier_analytics_block(
-    messages: pd.DataFrame, project_id: str | None = None
+    messages: pd.DataFrame,
+    project_id: str | None = None,
+    *,
+    analyst_view: bool = False,
 ) -> None:
-    """Блок иерархической аналитики в разделе «Теги»."""
+    """Блок иерархической аналитики в разделе «Теги».
+
+    Подсказка «загрузите систему тегов» — аналитику: заказчик на страницу
+    загрузки не попадает, и совет сделать то, чего он не может, ему ни к чему.
+    """
     try:
         if not project_id:
             return
@@ -137,10 +144,11 @@ def render_tier_analytics_block(
         except Exception:
             hierarchy = None
         if hierarchy is None:
-            st.caption(
-                "💡 Для аналитики по уровням загрузите систему тегов проекта "
-                "(экран «Загрузка» → «Система тегов проекта»)."
-            )
+            if analyst_view:
+                st.caption(
+                    "💡 Для аналитики по уровням загрузите систему тегов проекта "
+                    "(экран «Загрузка» → «Система тегов проекта»)."
+                )
             return
 
         table, coverage = compute_tier_aggregates(hierarchy, messages)

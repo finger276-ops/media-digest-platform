@@ -166,3 +166,6 @@ jobs:
 
       - name: Права на страницах (каждая закрывает сама, а не через меню)
         run: python tests/test_page_access.py
+
+      - name: Технические тексты видит только владелец (версия, коды, ID, трассировки)
+        run: python tests/test_client_texts.py

@@ -105,9 +105,9 @@ def render_summary_export_buttons(
         branding=branding,
         sections=selected_sections,
     )
-    st.caption(
-        f"Брендирование: {payload.get('client_name') or project_name}; акцентный цвет {payload.get('accent_color')}."
-    )
+    # Код цвета (#2563eb) — техническая деталь: цвет задаётся и виден в
+    # настройках проекта, а здесь достаточно сказать, чьё оформление у отчёта.
+    st.caption(f"Оформление отчёта: {payload.get('client_name') or project_name}.")
     if "sentiment" in (payload.get("sections") or []):
         if not payload.get("sentiment_markup", True):
             st.caption(

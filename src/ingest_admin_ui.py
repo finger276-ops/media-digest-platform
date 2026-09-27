@@ -20,16 +20,10 @@ import platform_store as store
 from metric_cards_ui import metric_card, render_metric_row
 from services import ingest_queue as queue
 from services.cached_store import clear_platform_caches
+from services.formatting import SOURCE_SYSTEM_LABELS, source_system_title
 from services.ingest import IngestError, file_sha256, ingest_file_bytes
 from services.roles import can_change_project_data
 
-SOURCE_SYSTEM_LABELS = {
-    "auto": "Автоопределение",
-    "mediologia": "Медиалогия CSV",
-    "mediologia_excel": "Медиалогия Excel",
-    "brand_analytics": "Brand Analytics",
-    "generic": "Универсальный CSV/Excel",
-}
 
 STATUS_ICONS = {
     queue.STATUS_PENDING: "🕐",
@@ -49,7 +43,7 @@ def _fmt_dt(value: Any) -> str:
     return parsed.tz_convert("Europe/Moscow").strftime("%d.%m.%Y %H:%M")
 
 
-def _tasks_view(tasks: pd.DataFrame) -> pd.DataFrame:
+def _tasks_view(tasks: pd.DataFrame, *, is_admin: bool = False) -> pd.DataFrame:
     if tasks.empty:
         return pd.DataFrame()
 
@@ -71,7 +65,10 @@ def _tasks_view(tasks: pd.DataFrame) -> pd.DataFrame:
             "Получено": column("created_at").map(_fmt_dt),
             "Обработано": column("finished_at").map(_fmt_dt),
             "Попытки": column("attempts", 0),
-            "Комментарий": column("error_message").fillna("").astype(str).str.slice(0, 160),
+            "Комментарий": column("error_message")
+            .fillna("")
+            .map(lambda text: _task_error_text(text, is_admin=is_admin))
+            .str.slice(0, 160),
             "task_id": column("task_id"),
         }
     )
@@ -84,7 +81,10 @@ def _process_task_in_ui(task: dict[str, Any], work_dir: str) -> dict[str, Any]:
     filename = str(task.get("original_filename") or "upload.xlsx")
     file_bytes = store.download_storage_file(storage_path)
     if not file_bytes:
-        raise IngestError(f"Файл не найден в Storage: {storage_path}")
+        raise IngestError(
+            "Файл выгрузки не найден в хранилище: его удалили или он не "
+            "долетел. Загрузите файл вручную на странице «Загрузка файла»."
+        )
     return ingest_file_bytes(
         file_bytes,
         project_id=project_id,
@@ -161,6 +161,22 @@ def _run_queue_now(
         st.info("Новых задач в очереди нет.")
 
 
+def _task_error_text(message: Any, *, is_admin: bool) -> str:
+    """Текст ошибки задачи для того, кто смотрит очередь.
+
+    Понятные ошибки (битый файл, незаведённый ключ) пишутся в очередь как есть
+    и годятся всем. Технический сбой сохраняется вместе с трассировкой — её
+    видит только владелец платформы: пути и адреса аналитику ни к чему.
+    """
+    text = str(message or "")
+    if is_admin or "Traceback (most recent call last)" not in text:
+        return text
+    return (
+        "Технический сбой при обработке. Нажмите «Повторить обработку»; если "
+        "ошибка повторится — сообщите владельцу платформы."
+    )
+
+
 def _days_word(n: int) -> str:
     # После «больше»: больше 1 дня, 21 дня, но 8 дней, 11 дней.
     return "дня" if n % 10 == 1 and n % 100 != 11 else "дней"
@@ -182,13 +198,13 @@ def _freshness_warning(row: dict[str, Any]) -> str:
     if row["state"] == queue.FRESH_NEVER:
         return (
             f"«{row['title']}»: источник настроен больше {limit} {_days_word(limit)} "
-            "назад, а ни одного файла так и не пришло. Проверьте, что n8n включён "
-            f"и отправляет файлы с ключом «{row['source_key']}»."
+            "назад, а ни одного файла так и не пришло. Проверьте, что пересылка "
+            f"писем включена и отправляет файлы с ключом «{row['source_key']}»."
         )
     return (
         f"«{row['title']}»: новых файлов нет больше {limit} {_days_word(limit)}, "
         f"последний пришёл {_fmt_dt(row['last_at'])}. Проверьте, пришло ли письмо "
-        f"на почту и сработал ли n8n (ключ источника «{row['source_key']}»)."
+        f"на почту и сработала ли пересылка (ключ источника «{row['source_key']}»)."
     )
 
 
@@ -202,7 +218,7 @@ def render_ingest_freshness_block(project_id: str) -> None:
     st.subheader("Поступление файлов")
     st.caption(
         "Платформа видит только те файлы, которые до неё дошли. Если письмо с "
-        "выгрузкой не пришло или n8n его не забрал, задача просто не появится — "
+        "выгрузкой не пришло или пересылка его не забрала, задача просто не появится — "
         "и сообщения об ошибке не будет. Поэтому здесь видно, когда от каждого "
         "источника приходил последний файл."
     )
@@ -296,8 +312,8 @@ def render_ingest_queue_block(project_id: str, work_dir: str, *, is_admin: bool)
 
     if tasks.empty:
         st.info(
-            "Очередь пуста. Как только n8n положит файл в Supabase Storage и создаст "
-            "задачу, она появится здесь."
+            "Очередь пуста. Задача появится здесь, как только придёт письмо "
+            "с выгрузкой."
         )
     else:
         counts = tasks["status"].value_counts().to_dict()
@@ -310,7 +326,7 @@ def render_ingest_queue_block(project_id: str, work_dir: str, *, is_admin: bool)
         )
 
         st.dataframe(
-            _tasks_view(tasks).drop(columns=["task_id"]),
+            _tasks_view(tasks, is_admin=is_admin).drop(columns=["task_id"]),
             width="stretch",
             hide_index=True,
         )
@@ -344,7 +360,9 @@ def render_ingest_queue_block(project_id: str, work_dir: str, *, is_admin: bool)
         if not selected.empty:
             st.text_area(
                 "Текст ошибки",
-                value=str(selected.iloc[0].get("error_message") or ""),
+                value=_task_error_text(
+                    selected.iloc[0].get("error_message"), is_admin=is_admin
+                ),
                 height=140,
                 disabled=True,
             )
@@ -364,7 +382,7 @@ def render_ingest_queue_block(project_id: str, work_dir: str, *, is_admin: bool)
 def render_ingest_sources_block(project_id: str, project_name: str) -> None:
     st.subheader("Источники автозагрузки")
     st.caption(
-        "Ключ источника — то, что n8n присылает вместе с файлом: название отчета "
+        "Ключ источника — метка, с которой приходит файл: название отчета "
         "Brand Analytics, адрес отправителя или имя папки. По ключу платформа "
         "понимает, в какой проект класть выгрузку."
     )
@@ -386,7 +404,7 @@ def render_ingest_sources_block(project_id: str, project_name: str) -> None:
                 "Ключ": sources["source_key"],
                 "Название": sources.get("title", ""),
                 "Формат": sources.get("source_system", "auto").map(
-                    lambda s: SOURCE_SYSTEM_LABELS.get(s, s)
+                    source_system_title
                 ),
                 "Активен": sources.get("is_active", True).map(
                     lambda v: "да" if v else "нет"
@@ -400,13 +418,13 @@ def render_ingest_sources_block(project_id: str, project_name: str) -> None:
         source_key = st.text_input(
             "Ключ источника",
             placeholder="brand-analytics-weekly",
-            help="Латиницей, без пробелов. Именно это значение n8n передает в поле source_key.",
+            help="Латиницей, без пробелов. Должен совпадать с ключом в настройке пересылки писем.",
         )
         title = st.text_input("Описание", placeholder="Еженедельный отчет Brand Analytics")
         source_system = st.selectbox(
             "Формат выгрузки",
-            list(SOURCE_SYSTEM_LABELS.keys()),
-            format_func=lambda s: SOURCE_SYSTEM_LABELS.get(s, s),
+            list(SOURCE_SYSTEM_LABELS),
+            format_func=source_system_title,
         )
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -519,9 +537,8 @@ def render_ingest_admin_page(
         )
         return
     st.caption(
-        "Выгрузки Brand Analytics приходят сюда автоматически: n8n забирает файл "
-        "из почты, кладет его в хранилище и ставит задачу, платформа обрабатывает "
-        "ее тем же алгоритмом, что и ручную загрузку."
+        "Выгрузки Brand Analytics приходят сюда автоматически из почты, и "
+        "платформа обрабатывает их тем же алгоритмом, что и ручную загрузку."
     )
     # Первым — молчание источников: очередь его не покажет, а заметить сбой
     # доставки важнее, чем разобрать уже пришедшие файлы.
@@ -530,4 +547,7 @@ def render_ingest_admin_page(
     render_ingest_queue_block(project_id, work_dir, is_admin=is_admin)
     st.divider()
     render_ingest_sources_block(project_id, project_name)
-    render_n8n_hint_block(project_id)
+    # Настройка n8n — адреса базы, служебный ключ, имена таблиц. Это делает
+    # владелец платформы; аналитику заказчика там нечего настраивать.
+    if is_admin:
+        render_n8n_hint_block(project_id)

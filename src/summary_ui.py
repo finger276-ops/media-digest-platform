@@ -179,7 +179,7 @@ def render_period_summary(
     summary_text = str((manual or {}).get("summary") or "").strip() or auto_summary
     st.markdown(summary_text.replace("\n", "  \n"))
     if str((manual or {}).get("source") or "") == "ai":
-        st.caption("Текст сгенерирован моделью и сохранён владельцем платформы.")
+        st.caption("Текст подготовлен с помощью ИИ.")
 
     # По умолчанию генерация доступна только владельцу платформы: она тратит
     # деньги и отправляет данные проекта внешнему сервису. Владелец может

@@ -258,11 +258,15 @@ def render_client_insights(
     *,
     profile: str = "",
     granularity_narrowed: bool = False,
+    analyst_view: bool = False,
 ) -> None:
     st.subheader("Клиентский обзор")
-    st.caption(
-        "Сводный слой для презентации заказчику: риски, ключевые сигналы и изменения между периодами."
-    )
+    # Пояснение «для презентации заказчику» — аналитику; сам заказчик видит
+    # блок без подписи о том, кому он предназначен.
+    if analyst_view:
+        st.caption(
+            "Сводный слой для презентации заказчику: риски, ключевые сигналы и изменения между периодами."
+        )
 
     metrics = overview_metrics(messages)
     sent = metrics.get("sentiment", {}) or {}
