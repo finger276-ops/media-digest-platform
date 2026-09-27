@@ -206,8 +206,9 @@ def render_period_summary(
 
     with st.expander("Выгрузить саммари", expanded=False):
         st.caption(
-            "Можно скачать Word, PDF или отдельную PNG-инфографику — набор блоков "
-            "настраивается ниже, PNG сам перестраивается под выбор."
+            "Можно скачать Word, PDF, PowerPoint или отдельную PNG-инфографику — "
+            "набор блоков настраивается ниже. В PowerPoint диаграммы редактируются: "
+            "цвета и подписи можно поменять прямо в презентации."
         )
         render_summary_export_buttons(
             project_name,

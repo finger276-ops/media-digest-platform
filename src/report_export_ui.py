@@ -28,6 +28,7 @@ from services.report_export import (
     safe_export_filename,
     summary_export_payload,
 )
+from services.report_pptx import generate_summary_pptx
 
 
 def _export_failed(format_name: str, exc: BaseException) -> None:
@@ -68,7 +69,7 @@ def render_summary_export_buttons(
         format_func=lambda s: REPORT_SECTION_OPTIONS.get(s, s),
         key=f"{key_prefix}_sections",
         help=(
-            "Какие блоки собрать в Word/PDF/PNG — можно оставить только то, "
+            "Какие блоки собрать в Word/PDF/PNG/PowerPoint — можно оставить только то, "
             "что нужно для этой выгрузки. PNG-инфографика сама перестраивается "
             "под выбранный набор, без пустых мест."
         ),
@@ -120,7 +121,7 @@ def render_summary_export_buttons(
                 "В последнем периоде нет разметки тональности — в PNG и PDF в блоке "
                 "«Тональность» будет пометка вместо диаграммы."
             )
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
         try:
             st.download_button(
@@ -157,3 +158,15 @@ def render_summary_export_buttons(
             )
         except Exception as exc:  # noqa: BLE001 — остальные форматы должны работать
             _export_failed("PNG", exc)
+    with c4:
+        try:
+            st.download_button(
+                "Скачать PowerPoint",
+                data=generate_summary_pptx(payload),
+                file_name=safe_export_filename(project_name, period_label, "pptx"),
+                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                width="stretch",
+                key=f"{key_prefix}_pptx",
+            )
+        except Exception as exc:  # noqa: BLE001 — остальные форматы должны работать
+            _export_failed("PowerPoint", exc)
