@@ -20,7 +20,7 @@ from services.cached_store import cache_version, load_generated_tables
 from services.event_enrichment import enrich_messages
 from services.manual_moderation import apply_manual_overrides
 from services.metrics_compute import prepare_dashboard_messages
-from services.tag_compute import clean_brand_analytics_tags
+from services.tag_compute import clean_display_tags
 
 
 def prepare_period_data(
@@ -32,9 +32,9 @@ def prepare_period_data(
     )
     enriched = enrich_messages(messages, event_discussions, discussion_messages, events)
     events, enriched, manual_state = apply_manual_overrides(project_id, events, enriched)
-    # Brand Analytics: в блоке тегов остаются только системные колонки после
-    # «Обработано», без legacy-меток старых алгоритмов.
-    enriched = clean_brand_analytics_tags(enriched)
+    # Теги для показа — только из выгрузки: рубрики платформы и автотеги
+    # прежних версий отсекаются здесь, при чтении (clean_display_tags).
+    enriched = clean_display_tags(enriched)
     enriched = prepare_dashboard_messages(enriched)
     return events, enriched, manual_state
 

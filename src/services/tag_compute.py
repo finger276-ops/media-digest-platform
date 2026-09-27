@@ -6,39 +6,37 @@ import pandas as pd
 import streamlit as st
 
 from .metrics_compute import audience_by_group, numeric_series, sentiment_masks
+from .tag_parsing import PLATFORM_RUBRIC_TAG_KEYS
 
-AUTO_GENERATED_TAGS_TO_HIDE = {
-    "коэффициент",
-    "законы и налоги",
-    "яндекс",
-    "wb такси",
-    "фастен",
-    "приложение и сбои",
-    "яндекс про",
-    "забастовка",
-    "аэропорты",
-    "детские кресла",
-    "карты и навигация",
-    "проблемы, жалобы и негативный опыт",
-    "цены, стоимость и условия",
-    "качество продукта или услуги",
-    "наличие, поставки и логистика",
-    "монтаж, применение и эксплуатация",
-    "документы, сертификаты и требования",
-    "безопасность и пожарные свойства",
-    "безопасность и риски",
-    "экология и энергоэффективность",
-    "конкуренты и сравнение на рынке",
-    "поддержка и клиентский сервис",
-    "общие обсуждения",
-    "прочие обсуждения",
-    "без тега",
-}
+# Автотеги прежних версий платформы — словарь одного заказчика (такси). В
+# старых периодах Brand Analytics они могли остаться в колонке tags. Скрываются,
+# только если выгрузка их не объявляла: у другого заказчика «Аэропорты» может
+# быть настоящим тегом, и прятать его молча нельзя.
+LEGACY_AUTO_TAG_KEYS = frozenset(
+    {
+        "коэффициент",
+        "законы и налоги",
+        "яндекс",
+        "wb такси",
+        "фастен",
+        "приложение и сбои",
+        "яндекс про",
+        "забастовка",
+        "аэропорты",
+        "детские кресла",
+        "карты и навигация",
+    }
+)
 
 
 def split_pipe_values(value: Any) -> list[str]:
-    """Split platform pipe-separated tags into clean unique labels."""
-    raw = str(value or "").replace(";", "|").replace(",", "|")
+    """Split platform pipe-separated tags into clean unique labels.
+
+    Теги хранятся через «|». Запятая — часть названия, а не разделитель:
+    раньше «Проблемы, жалобы и негативный опыт» показывалась клиенту как два
+    тега, «Проблемы» и «жалобы и негативный опыт».
+    """
+    raw = str(value or "").replace(";", "|")
     result: list[str] = []
     seen: set[str] = set()
     for item in raw.split("|"):
@@ -66,10 +64,8 @@ def declared_ba_tag_set(messages: pd.DataFrame) -> set[str]:
         return set()
     tags: set[str] = set()
     for raw in messages["source_tag_columns"].dropna().astype(str).unique().tolist():
-        for item in str(raw or "").replace(";", "|").replace(",", "|").split("|"):
-            label = " ".join(str(item or "").split()).strip()
-            if label:
-                tags.add(normalize_tag_key(label))
+        for label in split_pipe_values(raw):
+            tags.add(normalize_tag_key(label))
     return tags
 
 
@@ -83,33 +79,48 @@ def is_brand_analytics_messages(messages: pd.DataFrame) -> bool:
     return bool(declared_ba_tag_set(messages))
 
 
-def clean_brand_analytics_tags(messages: pd.DataFrame) -> pd.DataFrame:
-    """Keep only real Brand Analytics tags from columns after `Обработано`."""
+def clean_display_tags(messages: pd.DataFrame) -> pd.DataFrame:
+    """Теги сообщений для показа — только то, что пришло из выгрузки.
+
+    Платформа сама дописывает к тегам рубрики («Цены, стоимость и условия»,
+    «Монтаж, применение и эксплуатация», «Прочие обсуждения»…) — они писались
+    под одного заказчика и другим выглядели чужим списком. При загрузке они
+    остаются (на них опирается сборка сюжетов), а здесь, при чтении, уходят —
+    поэтому и уже загруженные периоды чистятся без перезагрузки.
+
+    Тег, который выгрузка объявила сама (колонки Brand Analytics после
+    «Обработано»), остаётся всегда, даже если совпал с рубрикой. На Brand
+    Analytics с объявленными колонками показываются только они.
+    """
     if messages is None or messages.empty or "tags" not in messages.columns:
         return messages
-    if not is_brand_analytics_messages(messages):
-        return messages
 
-    allowed = declared_ba_tag_set(messages)
-    out = messages.copy()
+    declared = declared_ba_tag_set(messages)
+    brand_analytics = is_brand_analytics_messages(messages)
 
-    def filter_tags(value: Any) -> str:
+    def filter_tags(value: str) -> str:
         cleaned: list[str] = []
         seen: set[str] = set()
         for label in split_pipe_values(value):
             key = normalize_tag_key(label)
             if not key or key in seen:
                 continue
-            if key in AUTO_GENERATED_TAGS_TO_HIDE:
-                continue
-            if allowed and key not in allowed:
-                continue
+            if key not in declared:
+                if key in PLATFORM_RUBRIC_TAG_KEYS:
+                    continue
+                if brand_analytics and (declared or key in LEGACY_AUTO_TAG_KEYS):
+                    continue
             seen.add(key)
             cleaned.append(label)
         return "|".join(cleaned)
 
-    out["tags"] = out["tags"].apply(filter_tags)
-    out["tag_count"] = out["tags"].apply(lambda x: len(split_pipe_values(x)))
+    out = messages.copy()
+    raw = out["tags"].fillna("").astype(str)
+    # Наборов тегов на порядки меньше, чем сообщений.
+    mapping = {value: filter_tags(value) for value in raw.unique().tolist()}
+    out["tags"] = raw.map(mapping)
+    counts = {value: len(split_pipe_values(value)) for value in mapping.values()}
+    out["tag_count"] = out["tags"].map(counts)
     return out
 
 

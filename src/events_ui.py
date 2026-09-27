@@ -59,6 +59,7 @@ from services.story_recovery import (
     ORIGIN_SOURCE,
 )
 from services.tag_compute import split_pipe_values
+from services.tag_parsing import PLATFORM_RUBRIC_TAG_KEYS
 from messages_ui import render_message_list
 
 
@@ -546,6 +547,10 @@ def _event_tags_text(selected: pd.Series, event_messages: pd.DataFrame) -> str:
     clean: list[str] = []
     for value in values:
         key = value.strip().lower().replace("ё", "е")
+        # main_tags инфоповода хранят и рубрики платформы — клиенту их не
+        # показываем, как и в тегах сообщений.
+        if key in PLATFORM_RUBRIC_TAG_KEYS:
+            continue
         if value.strip() and key not in seen:
             seen.add(key)
             clean.append(value.strip())

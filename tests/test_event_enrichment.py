@@ -5,6 +5,12 @@
 сюжетам может не быть таблицы discussion/event-связей, и тогда событие
 подбирается по совпадению исходной темы сообщения с event_title/
 source_main_topic инфоповода.
+
+Мутационные проверки (что ломает какой тест):
+- pick_event_description снова собирает описание из рубрик -> «без ручного
+  описания — пусто, а не рубрики» краснеет;
+- в aggregate_events не отсекать PLATFORM_RUBRIC_TAG_KEYS -> «в тегах
+  инфоповода рубрик платформы нет» краснеет.
 """
 
 import sys
@@ -19,7 +25,6 @@ import pandas as pd  # noqa: E402
 
 from services.event_enrichment import (  # noqa: E402
     aggregate_events,
-    build_event_description,
     enrich_messages,
     pick_event_description,
 )
@@ -159,23 +164,18 @@ check(
     not zavod_row.empty and abs(float(zavod_row.iloc[0]["negative_share"]) - 1 / 8) < 1e-6,
 )
 
-print("5. build_event_description: авто-описание по ключевым словам")
-group_negative = pd.DataFrame(
-    [{"event_summary": "Клиенты жалуются на брак и дефекты партии", "main_tags": "Жалобы"}]
-)
-desc = build_event_description(group_negative)
+print("5. Автоописание рубриками больше не пишется")
+# Без ручного описания платформа собирала «В теме обсуждались: проблемы, жалобы
+# и негативный опыт; …» — рубриками, подобранными под одного заказчика. Оно
+# попадало клиенту в таблицу и карточку, а в форме правки подставлялось в поле.
+group_auto = pd.DataFrame([{"event_summary": "Клиенты жалуются на брак и дефекты партии", "main_tags": "Жалобы"}])
 check(
-    "негативная тема размечена как жалобы/проблемы",
-    "проблемы, жалобы" in desc,
-    desc,
-)
-group_empty = pd.DataFrame([{"event_summary": "", "main_tags": ""}])
-check(
-    "пустая тема не падает и не выдумывает сигналы",
-    build_event_description(group_empty) == "В теме обсуждались связанные сообщения выбранного периода.",
+    "без ручного описания — пусто, а не рубрики",
+    pick_event_description(group_auto) == "",
+    pick_event_description(group_auto),
 )
 
-print("6. pick_event_description: ручное описание важнее автоматического")
+print("6. pick_event_description: ручное описание аналитика показывается")
 group_manual = pd.DataFrame(
     [{"display_description": "Ручное описание аналитика", "event_summary": "жалобы на брак", "main_tags": ""}]
 )
@@ -183,10 +183,22 @@ check(
     "ручное описание используется, если есть",
     pick_event_description(group_manual) == "Ручное описание аналитика",
 )
-group_auto = pd.DataFrame([{"event_summary": "жалобы на брак", "main_tags": ""}])
+tagged = aggregate_events(
+    pd.DataFrame(
+        [
+            {
+                "event_id": "t1",
+                "event_title": "Новый тариф",
+                "main_tags": "Тарифы|Цены, стоимость и условия|Прочие обсуждения",
+                "message_count": 3,
+            }
+        ]
+    )
+)
 check(
-    "без ручного описания используется автоматическое",
-    "проблемы, жалобы" in pick_event_description(group_auto),
+    "в тегах инфоповода рубрик платформы нет, свои теги на месте",
+    tagged.iloc[0]["tags"] == "Тарифы",
+    str(tagged.iloc[0]["tags"]),
 )
 
 print("7. Остаточная корзина не попадает в верх рейтинга")

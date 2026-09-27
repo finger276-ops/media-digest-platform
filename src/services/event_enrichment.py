@@ -12,6 +12,7 @@ import pandas as pd
 
 from .event_titles import normalize_event_title
 from .story_recovery import is_residual_title
+from .tag_parsing import PLATFORM_RUBRIC_TAG_KEYS
 
 
 def enrich_messages(
@@ -135,102 +136,15 @@ def enrich_messages(
     return out
 
 
-def build_event_description(group: pd.DataFrame) -> str:
-    """Build a neutral, source-agnostic event description."""
-    text = " ".join(
-        group.get("event_summary", pd.Series(dtype=str)).fillna("").astype(str).tolist()
-    )
-    tags = " | ".join(
-        sorted(
-            set(
-                "|".join(
-                    group.get("main_tags", pd.Series(dtype=str)).fillna("").astype(str)
-                ).split("|")
-            )
-            - {""}
-        )
-    )
-    low = f"{text} {tags}".lower().replace("ё", "е")
-    patterns = [
-        (
-            "проблемы, жалобы и негативный опыт",
-            [
-                "жалоб",
-                "проблем",
-                "негатив",
-                "ошиб",
-                "не работает",
-                "плохо",
-                "брак",
-                "дефект",
-            ],
-        ),
-        (
-            "цены, стоимость и условия",
-            ["цен", "стоим", "скид", "акци", "тариф", "услов", "дорого", "дешев"],
-        ),
-        (
-            "качество продукта или услуги",
-            ["качеств", "материал", "характерист", "свойств", "надежн", "эффектив"],
-        ),
-        (
-            "наличие, поставки и логистика",
-            ["достав", "налич", "склад", "постав", "логист", "срок", "отгруз"],
-        ),
-        (
-            "монтаж, применение и эксплуатация",
-            [
-                "монтаж",
-                "установ",
-                "примен",
-                "использ",
-                "эксплуатац",
-                "строител",
-                "утепл",
-                "изоляц",
-            ],
-        ),
-        (
-            "документы, сертификаты и требования",
-            [
-                "сертифик",
-                "документ",
-                "декларац",
-                "гост",
-                "снип",
-                "требован",
-                "стандарт",
-            ],
-        ),
-        (
-            "безопасность и риски",
-            ["безопас", "пожар", "огне", "горюч", "опасн", "токсич"],
-        ),
-        (
-            "экология и энергоэффективность",
-            ["эколог", "энергоэфф", "энергосбереж", "устойчив", "переработ"],
-        ),
-        ("конкуренты и сравнение", ["конкур", "аналог", "сравнен", "рынок", "бренд"]),
-        (
-            "клиентский сервис и поддержка",
-            ["поддерж", "сервис", "менеджер", "дилер", "магазин", "клиент"],
-        ),
-    ]
-    signals = []
-    for label, keys in patterns:
-        if any(k in low for k in keys):
-            signals.append(label)
-    if signals:
-        return "В теме обсуждались: " + "; ".join(signals[:5]) + "."
-    return (
-        f"В теме обсуждались: {tags}."
-        if tags
-        else "В теме обсуждались связанные сообщения выбранного периода."
-    )
-
-
 def pick_event_description(group: pd.DataFrame) -> str:
-    """Return manual description if present; otherwise build an automatic one."""
+    """Описание инфоповода — только то, что написал аналитик.
+
+    Раньше без ручного описания платформа собирала своё: «В теме обсуждались:
+    цены, стоимость и условия; качество продукта…» — рубриками, подобранными
+    под одного заказчика. Оно попадало в таблицу и карточку, а в форме правки
+    подставлялось в поле и после «Сохранить» становилось «ручным». Пустое поле
+    честнее: карточка инфоповода и так пишет, сколько в нём сообщений.
+    """
     for col in ["display_description", "manual_description", "event_description"]:
         if col in group.columns:
             vals = [
@@ -238,7 +152,7 @@ def pick_event_description(group: pd.DataFrame) -> str:
             ]
             if vals:
                 return vals[0]
-    return build_event_description(group)
+    return ""
 
 
 def _numbers(group: pd.DataFrame, column: str) -> pd.Series:
@@ -285,9 +199,12 @@ def aggregate_events(events: pd.DataFrame) -> pd.DataFrame:
             "title_variants": variants,
             "merged_titles": max(0, len(variants) - 1),
             "description": pick_event_description(group),
+            # Рубрики платформы в теги инфоповода не идут — как и в теги
+            # сообщений (services.tag_compute.clean_display_tags).
             "tags": " | ".join(
                 sorted(
-                    set(
+                    tag
+                    for tag in set(
                         "|".join(
                             group.get("main_tags", pd.Series(dtype=str))
                             .fillna("")
@@ -295,6 +212,8 @@ def aggregate_events(events: pd.DataFrame) -> pd.DataFrame:
                         ).split("|")
                     )
                     - {""}
+                    if tag.strip().lower().replace("ё", "е")
+                    not in PLATFORM_RUBRIC_TAG_KEYS
                 )
             ),
             "start_date": _dates(group, "start_date").min(),

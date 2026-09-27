@@ -309,6 +309,40 @@ def row_tags(
     return tags
 
 
+# Рубрики, которые платформа сама дописывает к тегам сообщения на выгрузках
+# не из Brand Analytics. Сборка сюжетов на них опирается, поэтому при загрузке
+# они остаются; показываются клиенту только теги из выгрузки — фильтр при
+# чтении, services.tag_compute.clean_display_tags.
+MICROTOPIC_DISPLAY_TAGS = {
+    "issue_problem": ["Проблемы, жалобы и негативный опыт"],
+    "price_terms": ["Цены, стоимость и условия"],
+    "product_quality": ["Качество продукта или услуги"],
+    "availability_supply": ["Наличие, поставки и логистика"],
+    "installation_usage": ["Монтаж, применение и эксплуатация"],
+    "documents_certificates": ["Документы, сертификаты и требования"],
+    "safety_fire": ["Безопасность и пожарные свойства"],
+    "sustainability_energy": ["Экология и энергоэффективность"],
+    "competitors_market": ["Конкуренты и сравнение на рынке"],
+    "customer_service": ["Поддержка и клиентский сервис"],
+    "general": ["Общие обсуждения"],
+}
+FALLBACK_DISPLAY_TAG = "Прочие обсуждения"
+# Заглушка для сообщения Brand Analytics без тегов (message_normalize).
+NO_TAG_LABEL = "Без тега"
+
+
+def _tag_key(label: str) -> str:
+    return str(label or "").strip().lower().replace("ё", "е")
+
+
+# Всё, что платформа пишет в теги сама, — для фильтра при показе. Сюда же
+# «Безопасность и риски»: так рубрика называлась в прежних версиях.
+PLATFORM_RUBRIC_TAG_KEYS = frozenset(
+    [_tag_key(tag) for tags in MICROTOPIC_DISPLAY_TAGS.values() for tag in tags]
+    + [_tag_key(FALLBACK_DISPLAY_TAG), _tag_key(NO_TAG_LABEL), "безопасность и риски"]
+)
+
+
 def infer_display_tags(text: str, microtopic: str, source_tags: list[str]) -> list[str]:
     """Build display tags without binding the platform to taxi-only dictionaries."""
     tags: list[str] = []
@@ -322,26 +356,13 @@ def infer_display_tags(text: str, microtopic: str, source_tags: list[str]) -> li
         if len(tags) >= 6:
             break
 
-    micro_map = {
-        "issue_problem": ["Проблемы, жалобы и негативный опыт"],
-        "price_terms": ["Цены, стоимость и условия"],
-        "product_quality": ["Качество продукта или услуги"],
-        "availability_supply": ["Наличие, поставки и логистика"],
-        "installation_usage": ["Монтаж, применение и эксплуатация"],
-        "documents_certificates": ["Документы, сертификаты и требования"],
-        "safety_fire": ["Безопасность и пожарные свойства"],
-        "sustainability_energy": ["Экология и энергоэффективность"],
-        "competitors_market": ["Конкуренты и сравнение на рынке"],
-        "customer_service": ["Поддержка и клиентский сервис"],
-        "general": ["Общие обсуждения"],
-    }
-    for tag in micro_map.get(str(microtopic or "other"), []):
+    for tag in MICROTOPIC_DISPLAY_TAGS.get(str(microtopic or "other"), []):
         key = tag.lower().replace("ё", "е")
         if key not in seen:
             tags.append(tag)
             seen.add(key)
     if not tags:
-        tags.append("Прочие обсуждения")
+        tags.append(FALLBACK_DISPLAY_TAG)
     return tags
 
 

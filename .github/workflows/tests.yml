@@ -169,3 +169,6 @@ jobs:
 
       - name: Технические тексты видит только владелец (версия, коды, ID, трассировки)
         run: python tests/test_client_texts.py
+
+      - name: Теги для показа — только из выгрузки (без рубрик платформы)
+        run: python tests/test_display_tags.py
