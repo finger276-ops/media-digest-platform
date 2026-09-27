@@ -203,3 +203,53 @@ def build_tag_statistics_compute(messages: pd.DataFrame) -> pd.DataFrame:
 @st.cache_data(show_spinner=False, max_entries=6, ttl=600)
 def build_tag_statistics(messages: pd.DataFrame) -> pd.DataFrame:
     return build_tag_statistics_compute(messages)
+
+
+def _message_tag_keys(messages: pd.DataFrame) -> pd.Series:
+    """Ключи тегов каждого сообщения (без регистра и «ё»)."""
+    raw = messages["tags"].fillna("").astype(str)
+    # Наборов тегов на порядки меньше, чем сообщений.
+    mapping = {
+        value: frozenset(normalize_tag_key(label) for label in split_pipe_values(value))
+        for value in raw.unique().tolist()
+    }
+    return raw.map(mapping)
+
+
+def tag_options(messages: pd.DataFrame) -> list[tuple[str, int]]:
+    """Теги выборки и число сообщений с каждым — самые частые первыми.
+
+    «Технониколь» и «ТехноНИКОЛЬ» — один тег: подпись — самое частое написание.
+    """
+    if messages is None or messages.empty or "tags" not in messages.columns:
+        return []
+    raw = messages["tags"].fillna("").astype(str)
+    labels = raw.apply(split_pipe_values).explode().dropna().astype(str)
+    labels = labels[labels != ""]
+    if labels.empty:
+        return []
+    frame = pd.DataFrame({"label": labels.values, "key": labels.map(normalize_tag_key).values})
+    counts = frame.groupby("key").size()
+    names = frame.groupby("key")["label"].agg(lambda s: s.value_counts().index[0])
+    order = sorted(counts.index, key=lambda key: (-int(counts[key]), names[key].lower()))
+    return [(str(names[key]), int(counts[key])) for key in order]
+
+
+def filter_messages_by_tags(
+    messages: pd.DataFrame, tags: list[str], *, match_all: bool = False
+) -> pd.DataFrame:
+    """Сообщения с выбранными тегами: с любым из них или со всеми сразу.
+
+    Пустой выбор — фильтра нет, возвращается вся выборка.
+    """
+    keys = {normalize_tag_key(tag) for tag in tags or [] if normalize_tag_key(tag)}
+    if not keys or messages is None or messages.empty:
+        return messages
+    if "tags" not in messages.columns:
+        return messages.iloc[0:0]
+    message_keys = _message_tag_keys(messages)
+    if match_all:
+        mask = message_keys.map(lambda found: keys <= found)
+    else:
+        mask = message_keys.map(lambda found: bool(keys & found))
+    return messages[mask.astype(bool).to_numpy()]

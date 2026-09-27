@@ -193,3 +193,6 @@ jobs:
 
       - name: Журнал правок (кто, когда, что; сбой журнала не ломает правку)
         run: python tests/test_audit_log.py
+
+      - name: Раздел «Сообщения» (фильтр по тегам, разбивка по типу сообщения)
+        run: python tests/test_messages_filters.py

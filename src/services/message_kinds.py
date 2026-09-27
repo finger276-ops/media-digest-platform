@@ -139,3 +139,48 @@ def kind_counts(messages: pd.DataFrame) -> dict[str, int]:
     )
     counts = kinds.value_counts()
     return {kind: int(counts.get(kind, 0)) for kind in KIND_ORDER}
+
+
+NO_MESSAGE_TYPE_LABEL = "Тип не указан"
+
+
+def message_type_labels(messages: pd.DataFrame) -> pd.Series:
+    """Тип сообщения так, как его назвала выгрузка: «Пост», «Комментарий», «Репост».
+
+    Это колонка «Тип сообщения» как есть, а не природа сообщения из
+    classify_kinds: там отзыв на маркетплейсе — «Отзыв», хотя выгрузка
+    называет его комментарием, а заказчик сверяет цифры с выгрузкой.
+    """
+    if messages is None or len(messages) == 0:
+        return pd.Series(dtype="object")
+    for column in _MESSAGE_TYPE_COLUMNS:
+        if column in messages.columns:
+            values = messages[column].fillna("").astype(str).str.strip()
+            values = values.where(~values.str.lower().isin({"nan", "none", "null", "nat"}), "")
+            break
+    else:
+        values = pd.Series([""] * len(messages), index=messages.index, dtype="object")
+    # «пост» и «Пост» — один тип: подпись с заглавной буквы.
+    values = values.map(lambda value: value[:1].upper() + value[1:] if value else "")
+    return values.where(values != "", NO_MESSAGE_TYPE_LABEL)
+
+
+def message_type_counts(messages: pd.DataFrame) -> list[tuple[str, int]]:
+    """Сколько сообщений каждого типа — самые частые первыми.
+
+    Выгрузка без типа сообщения даёт пустой список: разбивку показывать не из чего,
+    а «Тип не указан: 100%» читателю ничего не сообщает.
+    """
+    labels = message_type_labels(messages)
+    if labels.empty or (labels == NO_MESSAGE_TYPE_LABEL).all():
+        return []
+    keys = labels.str.lower().str.replace("ё", "е", regex=False)
+    frame = pd.DataFrame({"label": labels.values, "key": keys.values})
+    counts = frame.groupby("key").size()
+    names = frame.groupby("key")["label"].agg(lambda s: s.value_counts().index[0])
+    # «Тип не указан» — в конце, какой бы большой ни была доля.
+    order = sorted(
+        counts.index,
+        key=lambda key: (names[key] == NO_MESSAGE_TYPE_LABEL, -int(counts[key]), names[key].lower()),
+    )
+    return [(str(names[key]), int(counts[key])) for key in order]

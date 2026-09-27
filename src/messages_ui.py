@@ -3,7 +3,10 @@
 
 Если в разделе «Инфоповоды» выбран инфоповод, обе вкладки сужаются до его
 сообщений (фильтр из services.event_filter_state); сбросить его можно
-кнопкой прямо в этом блоке.
+кнопкой прямо в этом блоке. Фильтр по тегам сужает обе вкладки так же:
+выбран тег «Технониколь» — показаны только сообщения с этим тегом.
+Над лентой — сколько среди отобранных постов, комментариев и репостов
+(колонка «Тип сообщения» выгрузки).
 """
 
 from __future__ import annotations
@@ -16,15 +19,23 @@ from services.event_filter_state import (
     filter_messages_by_selected_event,
     get_selected_event_filter,
 )
+from metric_cards_ui import metric_card, render_metric_row
 from services.formatting import fmt_date
+from services.message_kinds import message_type_counts
 from services.message_compute import message_link_column, message_text_column
 from services.metrics_compute import (
     NO_METRIC_VALUE,
     PERIOD_METRIC_COLUMNS,
     format_int,
     numeric_series,
+    percent_text,
 )
 from services.story_recovery import is_residual_title
+from services.tag_compute import filter_messages_by_tags, normalize_tag_key, tag_options
+
+MATCH_ANY = "С любым из тегов"
+MATCH_ALL = "Со всеми тегами сразу"
+TYPE_CARDS = 4
 
 
 def _value_from_row(row: pd.Series, *columns: str) -> str:
@@ -87,6 +98,76 @@ def render_message_list(
             st.markdown(f"[Открыть сообщение]({link})")
 
 
+def _tag_filter(work: pd.DataFrame, project_id: str | None) -> tuple[list[str], bool]:
+    """Выбор тегов над лентой. Возвращает (выбранные теги, нужны ли все сразу)."""
+    options = tag_options(work)
+    if not options:
+        return [], False
+    counts = dict(options)
+    key = f"messages_tag_filter_{project_id or 'global'}"
+    if key in st.session_state:
+        # Другой период или инфоповод: тег, которого в выборке нет, снимается,
+        # а тот же тег в другом написании остаётся выбранным.
+        by_key = {normalize_tag_key(tag): tag for tag in counts}
+        kept = dict.fromkeys(normalize_tag_key(tag) for tag in st.session_state[key] or [])
+        st.session_state[key] = [by_key[k] for k in kept if k in by_key]
+    selected = st.multiselect(
+        "Теги",
+        list(counts),
+        key=key,
+        format_func=lambda tag: f"{tag} · {format_int(counts.get(tag, 0))}",
+        placeholder="Все теги",
+        help="Показать только сообщения с выбранными тегами. Число — сколько "
+        "сообщений с тегом в выборке.",
+    )
+    match_all = False
+    if len(selected) > 1:
+        match_all = (
+            st.radio(
+                "Сообщения",
+                [MATCH_ANY, MATCH_ALL],
+                horizontal=True,
+                key=f"messages_tag_match_{project_id or 'global'}",
+            )
+            == MATCH_ALL
+        )
+    return list(selected), match_all
+
+
+def _render_message_types(work: pd.DataFrame) -> None:
+    """Сколько среди сообщений выборки постов, комментариев, репостов."""
+    counts = message_type_counts(work)
+    if not counts:
+        st.caption("Разбивки по типу сообщения нет: в выгрузке не указан тип сообщения.")
+        return
+    total = int(len(work))
+    if len(counts) > TYPE_CARDS:
+        rest = counts[TYPE_CARDS - 1:]
+        counts = counts[: TYPE_CARDS - 1] + [("Другие типы", sum(count for _, count in rest))]
+        rest_help = "Остальные типы: " + ", ".join(label for label, _ in rest) + "."
+    else:
+        rest_help = ""
+    st.caption("Тип сообщения")
+    render_metric_row(
+        [
+            metric_card(
+                label,
+                f"{format_int(count)} · {percent_text(count, total)}",
+                help_text=rest_help if label == "Другие типы" else "",
+            )
+            for label, count in counts
+        ],
+        columns=TYPE_CARDS,
+    )
+
+
+def _tag_scope(tags: list[str], match_all: bool) -> str:
+    names = ", ".join(f"«{tag}»" for tag in tags)
+    if len(tags) == 1:
+        return f"с тегом {names}"
+    return f"со всеми тегами {names}" if match_all else f"с любым из тегов {names}"
+
+
 def render_messages_block(
     messages: pd.DataFrame, *, project_id: str | None = None
 ) -> None:
@@ -135,6 +216,16 @@ def render_messages_block(
                 "По выбранному инфоповоду сообщения не найдены. Возможно, данные были пересобраны или связи инфоповодов изменились."
             )
             return
+    selected_tags, match_all = _tag_filter(work, project_id)
+    if selected_tags:
+        work = filter_messages_by_tags(work, selected_tags, match_all=match_all)
+        if work.empty:
+            st.info(
+                f"Сообщений {_tag_scope(selected_tags, match_all)} нет. Уберите лишний тег "
+                f"или выберите «{MATCH_ANY}»."
+            )
+            return
+    _render_message_types(work)
     text_col = message_text_column(work)
     link_col = message_link_column(work)
     work["_audience"] = numeric_series(work, ["audience", "Аудитория"]).astype(int)
@@ -147,8 +238,12 @@ def render_messages_block(
 
     if mode == "Ключевые сообщения":
         scope = "выбранного инфоповода" if event_filter else "всей выборки"
+        if selected_tags:
+            scope = f"сообщений {_tag_scope(selected_tags, match_all)}" + (
+                " в выбранном инфоповоде" if event_filter else ""
+            )
         st.caption(
-            f"Показаны 15 сообщений с максимальной вовлеченностью для {scope}. Если вовлеченность равна 0, дополнительными критериями выступают охват и аудитория."
+            f"Показаны {min(15, len(work))} сообщений с максимальной вовлеченностью для {scope}. Если вовлеченность равна 0, дополнительными критериями выступают охват и аудитория."
         )
         view = (
             work.sort_values(["_engagement", "_reach", "_audience"], ascending=False)
