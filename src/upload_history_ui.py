@@ -8,6 +8,8 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+from error_ui import show_error, show_error_details
+
 from typing import Any
 
 from services.cached_store import (
@@ -246,7 +248,7 @@ def render_story_build_settings(
                     st.success("Пороги сохранены.")
                     st.rerun()
                 except Exception as exc:  # noqa: BLE001 — ошибка видна пользователю
-                    st.warning(f"Не удалось сохранить: {exc}")
+                    show_error("Не удалось сохранить пороги.", exc, warning=True)
 
 
 def render_upload_page(
@@ -325,7 +327,7 @@ def render_upload_page(
                 "Проверьте, что файл содержит лист/таблицу с сообщениями: дата, текст/сообщение, url/ссылка, источник или автор. "
                 "Если в Excel несколько листов, платформа автоматически ищет лист «Сообщения» и пропускает пустые листы."
             )
-            st.exception(exc)
+            show_error_details(exc)
             return
     st.success(f"Файл прочитан: {len(canonical):,} строк".replace(",", " "))
     render_import_report(import_report)
@@ -353,7 +355,7 @@ def render_upload_page(
                 extra_manifest={"ingest": {"mode": "manual", "role": role}},
             )
         except IngestError as exc:
-            st.error(str(exc))
+            show_error(str(exc), exc)
             return
 
     if result.get("storage_error"):
@@ -514,9 +516,8 @@ def render_period_history(project_id: str, role: str, *, read_only: bool) -> Non
                         delete_storage=delete_storage,
                         cleanup_manual=True,
                     )
-                except Exception as exc:
-                    st.error("Не удалось удалить выгрузку.")
-                    st.exception(exc)
+                except Exception as exc:  # noqa: BLE001 — удаление не роняет страницу
+                    show_error("Не удалось удалить выгрузку.", exc)
                     return
 
                 manual_count = (

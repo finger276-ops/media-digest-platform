@@ -15,6 +15,7 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
+from error_ui import error_details_allowed, show_error
 import platform_store as store
 from metric_cards_ui import metric_card, render_metric_row
 from services import ingest_queue as queue
@@ -144,7 +145,7 @@ def _run_queue_now(
             continue
         except Exception as exc:  # noqa: BLE001
             queue.mark_error(task_id, f"{exc}\n{traceback.format_exc(limit=3)}", retry=True)
-            st.error(f"{label}: техническая ошибка — {exc}")
+            show_error(f"{label}: не удалось обработать, задача вернётся в очередь.", exc)
             failed += 1
             continue
         result["elapsed_sec"] = round(time.monotonic() - started, 1)
@@ -215,8 +216,7 @@ def render_ingest_freshness_block(project_id: str) -> None:
             )
             rows = queue.source_freshness(sources, arrivals)
     except Exception as exc:  # noqa: BLE001 — остальной раздел должен работать
-        st.warning("Не удалось проверить, когда приходили файлы.")
-        st.caption(f"Техническая ошибка: {exc}")
+        show_error("Не удалось проверить, когда приходили файлы.", exc, warning=True)
         return
 
     if not rows:
@@ -286,11 +286,12 @@ def render_ingest_queue_block(project_id: str, work_dir: str, *, is_admin: bool)
             if not orphan.empty:
                 tasks = pd.concat([tasks, orphan], ignore_index=True)
     except Exception as exc:  # noqa: BLE001
-        st.warning(
-            "Не удалось прочитать очередь автозагрузки. Проверьте, что выполнен "
-            "скрипт sql/platform_ingest_schema.sql в Supabase."
-        )
-        st.caption(f"Техническая ошибка: {exc}")
+        show_error("Не удалось прочитать очередь автозагрузки.", exc, warning=True)
+        if error_details_allowed():
+            st.caption(
+                "Проверьте, что в Supabase выполнена миграция "
+                "sql/migrations/0004_platform_ingest_schema.sql."
+            )
         return
 
     if tasks.empty:
@@ -371,8 +372,12 @@ def render_ingest_sources_block(project_id: str, project_name: str) -> None:
     try:
         sources = queue.list_sources(project_id=project_id)
     except Exception as exc:  # noqa: BLE001
-        st.warning("Таблица источников недоступна. Выполните sql/platform_ingest_schema.sql.")
-        st.caption(f"Техническая ошибка: {exc}")
+        show_error("Список источников сейчас недоступен.", exc, warning=True)
+        if error_details_allowed():
+            st.caption(
+                "Проверьте, что в Supabase выполнена миграция "
+                "sql/migrations/0004_platform_ingest_schema.sql."
+            )
         return
 
     if not sources.empty:
@@ -445,8 +450,10 @@ def render_ingest_sources_block(project_id: str, project_name: str) -> None:
                 )
                 st.success(f"Источник «{source_key.strip()}» сохранен.")
                 st.rerun()
+            except queue.SourceKeyTaken as exc:
+                st.error(str(exc))
             except Exception as exc:  # noqa: BLE001
-                st.error(f"Не удалось сохранить источник: {exc}")
+                show_error("Не удалось сохранить источник.", exc)
 
     if not sources.empty:
         with st.expander("Удалить источник", expanded=False):

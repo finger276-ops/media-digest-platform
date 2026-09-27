@@ -28,8 +28,10 @@
   -> не ловится: без показанного блока взять значение неоткуда, поэтому это
   стережёт «сохранение аналитиком не трогает демо»;
 - _visible_orphans без фильтра -> «аналитику не видны задачи беты» краснеет;
-- can_see_error_details без read_only -> «демо-аналитику трейсбеков нет»
+- can_see_error_details снова разрешает аналитику -> «аналитику не видны»
   краснеет;
+- убрать общую границу вокруг main() -> «сбой вне разделов — без
+  трейсбека» краснеет;
 - убрать проверку project_row.empty в render_project_access -> «скрытый проект
   закрывается в открытой вкладке» краснеет;
 - вернуть права по умолчанию is_admin=True -> «без аргументов прав нет»
@@ -203,9 +205,9 @@ check(
     str(infos(default)),
 )
 
-print("7. Трейсбеки — только владельцу и аналитику, не в демо")
+print("7. Трейсбеки — только владельцу: аналитик тоже клиент")
 check("владельцу трейсбеки видны", can_see_error_details("owner", is_admin=True, read_only=False))
-check("аналитику видны", can_see_error_details("editor", is_admin=False, read_only=False))
+check("аналитику не видны", not can_see_error_details("editor", is_admin=False, read_only=False))
 check("демо-аналитику трейсбеков нет", not can_see_error_details("editor", is_admin=False, read_only=True))
 check("пользователю нет", not can_see_error_details("viewer", is_admin=False, read_only=False))
 
@@ -228,6 +230,29 @@ side = [str(b.label) for b in opened.sidebar.button if b.label]
 check("разделов записи не осталось", "Загрузка файла" not in side and "Автозагрузка" not in side, str(side))
 alive = app_as("alpha", "editor")
 check("действующий проект по-прежнему открыт", alive.session_state["platform_project_id"] == "alpha")
+
+print("9. Сбой вне разделов — вежливое сообщение, без трейсбека")
+# Список периодов читается до всех разделов, вне их границ. Раньше его сбой
+# показывал любому зрителю трейсбек Streamlit с адресом базы.
+real_table = CLIENT.table
+
+
+def failing_table(name):
+    if name == "platform_periods":
+        raise RuntimeError("postgrest: connection refused 10.0.0.5:5432")
+    return real_table(name)
+
+
+CLIENT.table = failing_table
+try:
+    broken = app_as("alpha", "viewer")
+finally:
+    CLIENT.table = real_table
+check("сбой вне разделов — без трейсбека", not broken.exception, str(broken.exception))
+shown = [str(e.value) for e in broken.error] + [str(c.value) for c in broken.caption]
+check("показано вежливое сообщение", any("Не удалось открыть страницу" in t for t in shown), str(shown))
+check("адреса базы на экране нет", not any("10.0.0.5" in t for t in shown))
+check("пользователю подробностей нет", not any("Подробности ошибки" in str(e.label) for e in broken.expander))
 
 print()
 if failures:

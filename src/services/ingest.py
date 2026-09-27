@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import hashlib
 import os
 import tempfile
@@ -26,7 +28,7 @@ from typing import Any
 import pandas as pd
 
 import platform_store as store
-from import_adapters import read_source_table
+from import_adapters import SourceFileError, read_source_table
 from io_utils import read_table
 from preprocess import run_preprocess_from_dataframe
 from .project_settings import (
@@ -58,6 +60,8 @@ DEFAULT_ALGORITHM_PARAMS: dict[str, float] = {
     "event_window_hours": 16.0,
 }
 
+
+LOGGER = logging.getLogger("platform.ingest")
 
 class IngestError(RuntimeError):
     """Ошибка обработки выгрузки с понятным для аналитика текстом."""
@@ -133,11 +137,18 @@ def read_canonical_bytes(
             source_system=normalize_source_system(source_system),
             report=report,
         )
+    except SourceFileError as exc:
+        # Разбор сам объяснил, что не так с файлом («внутри веб-страница,
+        # сохраните как .xlsx») — этот текст написан для человека.
+        raise IngestError(f"Не удалось прочитать файл выгрузки. {exc}") from exc
     except Exception as exc:  # noqa: BLE001 - пробрасываем понятный текст выше
+        # Текст сырого исключения в сообщение не идёт: его читает аналитик
+        # заказчика, и в очереди автозагрузки тоже. Исходная ошибка остаётся в
+        # цепочке (from exc) — её видит владелец в подробностях и в логах.
+        LOGGER.warning("Не удалось прочитать файл выгрузки %s: %s", filename, exc)
         raise IngestError(
             "Не удалось прочитать файл выгрузки. Проверьте, что в нем есть таблица "
-            "сообщений с датой, текстом и ссылкой/источником. "
-            f"Техническая ошибка: {exc}"
+            "сообщений с датой, текстом и ссылкой/источником."
         ) from exc
     finally:
         if tmp_path:

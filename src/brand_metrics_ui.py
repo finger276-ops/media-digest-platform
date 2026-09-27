@@ -16,6 +16,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
+from error_ui import error_details_allowed, show_error
 from services import category_store
 from services.brand_metrics import (
     BPI_AVAILABLE_METRICS,
@@ -637,7 +638,7 @@ def render_brand_map_settings(
                     st.success("Разметка сохранена.")
                     st.rerun()
                 except Exception as exc:  # noqa: BLE001
-                    st.warning(f"Не удалось сохранить: {exc}")
+                    show_error("Не удалось сохранить разметку брендов.", exc, warning=True)
 
         if brand_map["own"] and not brand_map["competitors"]:
             st.caption(
@@ -806,11 +807,12 @@ def render_category_upload(
     try:
         saved = category_store.load_benchmarks(project_id, period_ids)
     except Exception as exc:  # noqa: BLE001
-        st.warning(
-            "Таблица категорийных бенчмарков недоступна. Выполните в Supabase "
-            "миграцию sql/migrations/0005_platform_brand_metrics_schema.sql."
-        )
-        st.caption(f"Техническая ошибка: {exc}")
+        show_error("Выгрузка по категории сейчас недоступна.", exc, warning=True)
+        if error_details_allowed():
+            st.caption(
+                "Проверьте, что в Supabase выполнена миграция "
+                "sql/migrations/0005_platform_brand_metrics_schema.sql."
+            )
         return
 
     if saved:
@@ -974,7 +976,7 @@ def render_category_upload(
                 messages_total=int(len(table)),
             )
         except Exception as exc:  # noqa: BLE001
-            st.error(f"Не удалось сохранить: {exc}")
+            show_error("Не удалось сохранить данные категории.", exc)
             return
         st.success("Данные категории сохранены — SOV и ReachScore посчитаются.")
         st.rerun()

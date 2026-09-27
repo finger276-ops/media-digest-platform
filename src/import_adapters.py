@@ -40,6 +40,17 @@ LOGGER = logging.getLogger("platform.import_adapters")
 _EXCEL_SIGNATURES = (b"PK\x03\x04", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1")
 
 
+class SourceFileError(ValueError):
+    """Файл выгрузки не прочитан — и текст объясняет человеку, что сделать.
+
+    Отличается от любой другой ошибки чтения тем, что её текст можно показать
+    клиенту: он написан для людей. Сырые исключения pandas и openpyxl — нет:
+    их видит только владелец (src/error_ui.py), а в сообщение для человека
+    они не попадают (services/ingest.py). Наследник ValueError — старые
+    except ValueError работают как раньше.
+    """
+
+
 def _non_excel_content(path: Path) -> str | None:
     """Что лежит в файле с расширением Excel, если это не книга Excel.
 
@@ -97,7 +108,7 @@ def _repair_xlsx_styles(path: Path) -> Path:
     will be raised by the caller.
     """
     if path.suffix.lower() not in {".xlsx", ".xlsm"}:
-        raise ValueError(
+        raise SourceFileError(
             "Автовосстановление стилей поддерживается только для .xlsx/.xlsm файлов."
         )
 
@@ -154,7 +165,7 @@ def _open_excel_file_resilient(path: Path) -> Iterator[pd.ExcelFile]:
         except Exception as exc:
             content = _non_excel_content(path)
             if content:
-                raise ValueError(
+                raise SourceFileError(
                     f"Файл назван как Excel, но внутри {content}. Откройте его в "
                     "Excel или LibreOffice и сохраните как .xlsx или .csv."
                 ) from exc
@@ -168,7 +179,7 @@ def _open_excel_file_resilient(path: Path) -> Iterator[pd.ExcelFile]:
                 xls = pd.ExcelFile(repaired)
             except Exception as repair_exc:
                 if _excel_error_mentions_styles(exc):
-                    raise ValueError(
+                    raise SourceFileError(
                         "Excel-файл не удалось прочитать из-за поврежденных стилей книги. "
                         "Попробуйте открыть файл в Excel/LibreOffice и сохранить заново как .xlsx или .csv. "
                         "Если это выгрузка Brand Analytics, лучше сохранить лист «Сообщения» отдельным CSV."
@@ -538,7 +549,7 @@ def _read_excel_sheets(
     """
     sheets = xls.sheet_names
     if not sheets:
-        raise ValueError("В Excel-файле не найдено листов.")
+        raise SourceFileError("В Excel-файле не найдено листов.")
 
     def safe_preview(sheet):
         try:
@@ -608,7 +619,7 @@ def _read_excel_sheets(
             best_score = score
 
     if selected_sheet is None:
-        raise ValueError(
+        raise SourceFileError(
             "Не удалось найти непустой лист с таблицей сообщений. "
             "Проверьте, что в Excel есть лист с колонками: дата, текст/сообщение, url/ссылка, автор или источник."
         )
@@ -622,7 +633,7 @@ def _read_excel_sheets(
     )
     df = _clean_dataframe(df)
     if df.empty:
-        raise ValueError(f"На листе Excel «{selected_sheet}» не найдено данных.")
+        raise SourceFileError(f"На листе Excel «{selected_sheet}» не найдено данных.")
     return df
 
 

@@ -16,6 +16,8 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
+from error_ui import show_error
+from services.observability import report_failure
 from services.dashboard_config import REPORT_SECTION_OPTIONS
 from services.project_settings import report_sections_from_project_settings
 from services.report_export import (
@@ -26,6 +28,21 @@ from services.report_export import (
     safe_export_filename,
     summary_export_payload,
 )
+
+
+def _export_failed(format_name: str, exc: BaseException) -> None:
+    """Выгрузка не собралась: владельцу — событие и подробности, остальным — фраза.
+
+    Раньше здесь показывался текст исключения как есть: клиент читал
+    «добавьте python-docx в requirements.txt» или «задайте PLATFORM_PDF_FONT_PATH».
+    """
+    report_failure(f"выгрузка отчёта {format_name}", exc)
+    show_error(
+        f"Не удалось подготовить {format_name}. Попробуйте другой формат или "
+        "повторите позже.",
+        exc,
+        warning=True,
+    )
 
 
 def render_summary_export_buttons(
@@ -76,7 +93,7 @@ def render_summary_export_buttons(
                 clear_platform_caches(project_id)
                 st.success("Сохранено как выбор по умолчанию для проекта.")
             except Exception as exc:  # noqa: BLE001 — сохранение не должно ронять выгрузку
-                st.warning(f"Не удалось сохранить: {exc}")
+                show_error("Не удалось сохранить выбор разделов.", exc, warning=True)
 
     payload = summary_export_payload(
         project_name,
@@ -114,8 +131,8 @@ def render_summary_export_buttons(
                 width="stretch",
                 key=f"{key_prefix}_docx",
             )
-        except Exception as exc:
-            st.warning(str(exc))
+        except Exception as exc:  # noqa: BLE001 — остальные форматы должны работать
+            _export_failed("Word", exc)
     with c2:
         try:
             st.download_button(
@@ -126,8 +143,8 @@ def render_summary_export_buttons(
                 width="stretch",
                 key=f"{key_prefix}_pdf",
             )
-        except Exception as exc:
-            st.warning(str(exc))
+        except Exception as exc:  # noqa: BLE001 — остальные форматы должны работать
+            _export_failed("PDF", exc)
     with c3:
         try:
             st.download_button(
@@ -138,5 +155,5 @@ def render_summary_export_buttons(
                 width="stretch",
                 key=f"{key_prefix}_png",
             )
-        except Exception as exc:
-            st.warning(str(exc))
+        except Exception as exc:  # noqa: BLE001 — остальные форматы должны работать
+            _export_failed("PNG", exc)

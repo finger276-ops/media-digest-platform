@@ -21,6 +21,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from error_ui import show_error
 from import_adapters import _open_excel_file_resilient
 from services.tag_hierarchy import (
     TagHierarchyError,
@@ -109,8 +110,12 @@ def render_tag_hierarchy_block(project_id: str) -> None:
             # --- чтение и парсинг ---
             try:
                 df = _normalize_columns(_read_structure_file(structure_file))
-            except Exception as exc:
-                st.error(f"Не удалось прочитать файл: {exc}")
+            except Exception as exc:  # noqa: BLE001 — файл принёс человек
+                show_error(
+                    "Не удалось прочитать файл структуры. Нужен CSV или Excel с "
+                    "колонками tag, tier и parent.",
+                    exc,
+                )
                 return
 
             missing = [c for c in ("tag", "tier", "parent") if c not in df.columns]
@@ -140,8 +145,8 @@ def render_tag_hierarchy_block(project_id: str) -> None:
                 except TagHierarchyError as exc:
                     st.error(f"Структура не прошла проверку: {exc}")
                     return
-                except Exception as exc:
-                    st.error(f"Не удалось сохранить структуру: {exc}")
+                except Exception as exc:  # noqa: BLE001 — сохранение не роняет страницу
+                    show_error("Не удалось сохранить структуру.", exc)
                     return
                 st.success(
                     f"Структура сохранена: {len(saved.by_tag)} тегов, "

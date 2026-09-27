@@ -6,6 +6,11 @@
 должны проходить сквозь границу насквозь. Если заменить except Exception на
 except BaseException, перестанет работать каждая кнопка в приложении, а
 внешне всё будет выглядеть исправным — этот тест ловит такую правку.
+
+Раздел 6 — фрагменты. Исключение, вышедшее из st.fragment, Streamlit сам
+показывает трейсбеком любому зрителю, поэтому фрагмент ловит свою ошибку
+внутри (app._as_fragment). Мутация: убрать try/except из guarded в
+_as_fragment -> «трейсбека Streamlit на странице нет» краснеет.
 """
 
 import os
@@ -131,6 +136,33 @@ check(
     "граница не приняла остановку за ошибку",
     not at.error,
     str([e.value for e in at.error]),
+)
+
+print("6. Раздел-фрагмент ловит свою ошибку сам — без трейсбека Streamlit")
+# Исключение, вышедшее из st.fragment, Streamlit показывает своим трейсбеком
+# (с путями и текстом ошибки) любому зрителю и только потом отдаёт наружу.
+# «Теги», «Сообщения», «Инфоповоды» и «Индексы бренда» — фрагменты.
+at = run("fragment_crash", boundary_details=False)
+check("трейсбека Streamlit на странице нет", not at.exception, str(at.exception))
+errors = [str(e.value) for e in at.error]
+check("вежливое сообщение с именем раздела", any("Инфоповоды" in t for t in errors), str(errors))
+check("текста ошибки на странице нет", not any("колонка пропала" in t for t in errors + texts(at)))
+check("скрипт дошёл до конца", "скрипт дошёл до конца" in texts(at), str(texts(at)))
+at = run("fragment_crash", boundary_details=True)
+check(
+    "владельцу подробности во фрагменте тоже видны",
+    any("Подробности ошибки" in str(e.label) for e in at.expander),
+    str([e.label for e in at.expander]),
+)
+at = run("fragment_click", boundary_details=False)
+check("фрагмент отрисован", "фрагмент отрисован" in texts(at), str(texts(at)))
+at.button(key="fragment_button").click().run()
+check("падение после клика — без трейсбека", not at.exception, str(at.exception))
+errors = [str(e.value) for e in at.error]
+check("и с вежливым сообщением", any("Инфоповоды" in t for t in errors), str(errors))
+check(
+    "адрес базы из ошибки не показан",
+    not any("10.0.0.5" in t for t in errors + texts(at) + [str(c.value) for c in at.caption]),
 )
 
 print()

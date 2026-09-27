@@ -18,6 +18,7 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
+from error_ui import show_error
 import platform_store as store
 from services import category_store
 from services.ai_provider import (
@@ -513,7 +514,7 @@ def _spend_demo_run(project_id: str) -> str:
     except Exception as exc:  # noqa: BLE001
         # Сбой базы не должен отнимать у человека генерацию: несписанный
         # запуск — меньшее зло, чем упавший раздел.
-        st.warning(f"Не удалось обновить счётчик запусков: {exc}")
+        show_error("Не удалось обновить счётчик запусков.", exc, warning=True)
         return DEMO_NOT_COUNTED
     return DEMO_SPENT
 

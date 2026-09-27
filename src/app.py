@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import logging
 import os
 import uuid
@@ -15,6 +16,7 @@ import pandas as pd
 import streamlit as st
 import altair as alt
 
+from error_ui import set_error_details_allowed, show_error, show_error_details
 from metric_cards_ui import inject_metric_css
 from services.cached_store import (
     supabase_configured,
@@ -310,23 +312,31 @@ def render_section_safely(title: str, render, *args, _details: bool = False, **k
     Параметр назван с подчёркиванием, чтобы не столкнуться с именами аргументов
     самих разделов, которые уезжают дальше через **kwargs.
     """
+    if getattr(render, "_guarded_fragment", False):
+        # Фрагмент ловит свои ошибки сам (см. _as_fragment): при перерисовке
+        # одного фрагмента эта граница уже не участвует.
+        kwargs = {**kwargs, "_section_title": title, "_section_details": _details}
     try:
         render(*args, **kwargs)
         return True
     except Exception as exc:  # noqa: BLE001 — это и есть граница отказа
-        LOGGER.exception("Раздел «%s» не отрисовался", title)
-        # Заказчик видит вежливое сообщение, а владелец платформы — событие
-        # в настроенном канале (Sentry или вебхук). Без настройки — только лог.
-        report_failure(f"раздел «{title}»", exc)
-        st.error(f"Не удалось отобразить раздел «{title}».")
-        st.caption(
-            "Остальные разделы продолжают работать. Попробуйте обновить "
-            "страницу, выбрать другой период или вернуться сюда позже."
-        )
-        if _details:
-            with st.expander("Подробности ошибки", expanded=False):
-                st.exception(exc)
+        _render_section_failure(title, exc, _details)
         return False
+
+
+def _render_section_failure(title: str, exc: BaseException, details: bool) -> None:
+    LOGGER.error("Раздел «%s» не отрисовался", title, exc_info=exc)
+    # Заказчик видит вежливое сообщение, а владелец платформы — событие
+    # в настроенном канале (Sentry или вебхук). Без настройки — только лог.
+    report_failure(f"раздел «{title}»", exc)
+    st.error(f"Не удалось отобразить раздел «{title}».")
+    st.caption(
+        "Остальные разделы продолжают работать. Попробуйте обновить "
+        "страницу, выбрать другой период или вернуться сюда позже."
+    )
+    if details:
+        with st.expander("Подробности ошибки", expanded=False):
+            st.exception(exc)
 
 
 def _as_fragment(func):
@@ -335,9 +345,28 @@ def _as_fragment(func):
     Внутри фрагмента перерисовывается только он сам: пагинация ленты, выбор
     тега или инфоповода больше не заставляют приложение заново собирать данные
     всего проекта.
+
+    Ошибку фрагмент ловит сам, внутри. Исключение, вышедшее из фрагмента,
+    Streamlit показывает своим трейсбеком — с путями к файлам и текстом
+    ошибки — любому, кто смотрит страницу, и только потом отдаёт наружу; а при
+    перерисовке одного фрагмента (клик по тегу, листание ленты) внешней
+    границы render_section_safely нет вовсе. Название раздела и то, можно ли
+    показывать подробности, приходят от render_section_safely и сохраняются в
+    аргументах фрагмента для его собственных перерисовок.
     """
+
+    @functools.wraps(func)
+    def guarded(*args, _section_title: str = "", _section_details: bool = False, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except Exception as exc:  # noqa: BLE001 — граница отказа внутри фрагмента
+            _render_section_failure(_section_title or "раздел", exc, _section_details)
+            return None
+
     fragment = getattr(st, "fragment", None)
-    return fragment(func) if callable(fragment) else func
+    wrapped = fragment(guarded) if callable(fragment) else guarded
+    wrapped._guarded_fragment = True
+    return wrapped
 
 
 @_as_fragment
@@ -393,6 +422,26 @@ def _section_brand_metrics(
 
 
 def main() -> None:
+    """Точка входа с общей границей отказа.
+
+    Всё, что падает вне разделов — вход, список периодов, выбор дат, — иначе
+    показывал бы трейсбек Streamlit любому, кто открыл страницу. Подробности
+    видит только владелец платформы (error_ui).
+    """
+    try:
+        _main()
+    except Exception as exc:  # noqa: BLE001 — верхняя граница отказа
+        LOGGER.error("Страница не отрисовалась", exc_info=exc)
+        report_failure("страница платформы", exc)
+        st.error("Не удалось открыть страницу платформы.")
+        st.caption(
+            "Попробуйте обновить страницу через минуту. Если ошибка "
+            "повторяется — напишите владельцу платформы."
+        )
+        show_error_details(exc)
+
+
+def _main() -> None:
     args = parse_args()
     reset_perf_events()
     st.set_page_config(page_title=APP_TITLE, layout="wide")
@@ -521,6 +570,7 @@ def main() -> None:
     show_error_details = can_see_error_details(
         role, is_admin=is_admin, read_only=demo_read_only
     )
+    set_error_details_allowed(show_error_details)
 
     # --- страницы, которым не нужны данные периодов ---
     if page in ("Проекты", "Настройки проекта"):
@@ -731,8 +781,8 @@ def main() -> None:
                             clear_platform_caches(project_id)
                             st.success("Сохранено для проекта.")
                             st.rerun()
-                        except Exception as exc:
-                            st.warning(f"Не удалось сохранить: {exc}")
+                        except Exception as exc:  # noqa: BLE001 — сохранение не роняет страницу
+                            show_error("Не удалось сохранить настройки вида.", exc, warning=True)
 
     if demo_read_only:
         st.info(

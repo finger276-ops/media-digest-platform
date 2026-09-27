@@ -3,3 +3,10 @@ headless = true
 
 [browser]
 gatherUsageStats = false
+
+[client]
+# Необработанное исключение Streamlit показывает общим сообщением, без текста
+# и трейсбека: в них пути к файлам и адреса базы. Это страховка поверх границ
+# отказа в src/app.py; подробности владельцу выводятся явно (src/error_ui.py),
+# st.exception эту настройку не учитывает.
+showErrorDetails = "none"

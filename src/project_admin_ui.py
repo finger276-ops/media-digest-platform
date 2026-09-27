@@ -13,6 +13,7 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+from error_ui import show_error
 from platform_store import AccessCodeError, access_code_problem
 from services.cached_store import (
     create_project,
@@ -605,8 +606,8 @@ def render_project_manager(
                             or report_logo_file.type
                             or ""
                         )
-                    except Exception as exc:
-                        st.error(f"Не удалось загрузить логотип в Storage: {exc}")
+                    except Exception as exc:  # noqa: BLE001 — сохранение останавливается
+                        show_error("Не удалось загрузить логотип.", exc)
                         st.stop()
 
                 updated_settings["report_branding"] = {

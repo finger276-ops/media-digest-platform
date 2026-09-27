@@ -22,7 +22,7 @@ os.environ.setdefault("SUPABASE_SERVICE_ROLE_KEY", "test-key")
 
 import streamlit as st  # noqa: E402
 
-from app import render_section_safely  # noqa: E402
+from app import _as_fragment, render_section_safely  # noqa: E402
 
 
 def _ok() -> None:
@@ -49,11 +49,28 @@ def _stopping() -> None:
     st.write("строка после stop")
 
 
+@_as_fragment
+def _fragment_crashing() -> None:
+    """Раздел-фрагмент, как «Теги» или «Инфоповоды», падающий сразу."""
+    st.write("фрагмент до падения")
+    raise KeyError("колонка пропала")
+
+
+@_as_fragment
+def _fragment_crashing_on_click() -> None:
+    """Фрагмент, падающий на своей перерисовке — после клика внутри него."""
+    st.write("фрагмент отрисован")
+    if st.button("Действие во фрагменте", key="fragment_button"):
+        raise RuntimeError("postgrest: connection refused 10.0.0.5:5432")
+
+
 SECTIONS = {
     "ok": _ok,
     "crash": _crashing,
     "rerun": _rerunning,
     "stop": _stopping,
+    "fragment_crash": _fragment_crashing,
+    "fragment_click": _fragment_crashing_on_click,
 }
 
 mode = str(st.session_state.get("boundary_mode", "ok"))
