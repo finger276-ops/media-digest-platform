@@ -178,3 +178,6 @@ jobs:
 
       - name: Пересборка периода из исходного файла (правки, метаданные, сбой записи)
         run: python tests/test_period_rebuild.py
+
+      - name: Раздел «Источники» (площадки, авторы, новые площадки)
+        run: python tests/test_sources.py

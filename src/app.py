@@ -113,6 +113,7 @@ from services.event_filter_state import (
 )
 from messages_ui import render_messages_block, render_message_list
 from reviews_ui import render_reviews
+from sources_ui import render_sources_page
 from tags_ui import render_tag_statistics
 from client_insights_ui import render_client_insights
 from project_admin_ui import render_project_access, render_project_manager
@@ -383,6 +384,18 @@ def _section_tags(
 @_as_fragment
 def _section_messages(messages: pd.DataFrame, project_id: str) -> None:
     render_messages_block(messages, project_id=project_id)
+
+
+@_as_fragment
+def _section_sources(
+    messages: pd.DataFrame, periods: pd.DataFrame, period_ids: list[str], project_id: str
+) -> None:
+    render_sources_page(
+        messages,
+        periods,
+        period_ids,
+        load_period_messages=lambda period_id: cached_period_messages(project_id, [period_id]),
+    )
 
 
 @_as_fragment
@@ -1001,6 +1014,8 @@ def _main() -> None:
             )
         elif page == "Отзывы":
             render_reviews(enriched_messages)
+        elif page == "Источники":
+            _section_sources(enriched_messages, periods, selected_period_ids, project_id)
         elif page == "Сообщения":
             _section_messages(enriched_messages, project_id)
         elif page == "Динамика":
