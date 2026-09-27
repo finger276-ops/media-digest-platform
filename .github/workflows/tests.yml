@@ -187,3 +187,6 @@ jobs:
 
       - name: Сравнение двух произвольных периодов (А/Б)
         run: python tests/test_ab_compare.py
+
+      - name: Резервные копии (полный круг, проект, хранение, блок владельца)
+        run: python tests/test_backup.py

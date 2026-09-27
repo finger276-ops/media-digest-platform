@@ -115,6 +115,7 @@ from messages_ui import render_messages_block, render_message_list
 from reviews_ui import render_reviews
 from sources_ui import render_sources_page
 from ab_compare_ui import render_ab_comparison
+from backups_ui import render_backups_block
 from tags_ui import render_tag_statistics
 from client_insights_ui import render_client_insights
 from project_admin_ui import render_project_access, render_project_manager
@@ -603,6 +604,11 @@ def _main() -> None:
             current_project_id=project_id,
             _details=show_error_details,
         )
+        if page == "Проекты" and is_admin:
+            st.divider()
+            render_section_safely(
+                "Резервные копии", render_backups_block, _details=show_error_details
+            )
         return
     if page == "Сессии":
         render_section_safely(

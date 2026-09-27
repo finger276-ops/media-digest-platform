@@ -174,6 +174,16 @@ class FakeBucket:
             self.files.pop(str(path), None)
         return []
 
+    def list(self, path: str = "", options=None):
+        """Файлы папки, как отдаёт Supabase Storage: имя и размер."""
+        prefix = str(path or "").strip("/")
+        prefix = f"{prefix}/" if prefix else ""
+        entries = []
+        for key, data in self.files.items():
+            if key.startswith(prefix) and "/" not in key[len(prefix):]:
+                entries.append({"name": key[len(prefix):], "metadata": {"size": len(data)}})
+        return entries
+
     def get_public_url(self, path: str) -> str:
         return f"https://test.storage/{path}"
 

@@ -1,0 +1,50 @@
+name: Резервная копия
+
+# Каждую ночь: снимок всех таблиц платформы (scripts/backup_platform.py).
+# Копия кладётся в хранилище Supabase (последние 14) и сохраняется артефактом
+# этого запуска — вторая копия вне Supabase на случай, если потеряется сам
+# проект Supabase. Артефакт хранится 7 дней. Восстановление — docs/BACKUPS.md.
+
+on:
+  schedule:
+    # 03:17 UTC (06:17 МСК) — ночью, не в ровный час: в начале часа GitHub
+    # запускает больше всего задач и чаще задерживает расписание.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: platform-backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Забрать код
+        uses: actions/checkout@v4
+
+      - name: Поставить Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-worker.txt
+
+      - name: Установить зависимости
+        run: pip install -r requirements-worker.txt
+
+      - name: Сделать копию
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_STORAGE_BUCKET: ${{ secrets.SUPABASE_STORAGE_BUCKET }}
+        run: python scripts/backup_platform.py backup --out platform-backup.zip --keep 14
+
+      - name: Сохранить копию вне Supabase
+        uses: actions/upload-artifact@v4
+        with:
+          name: platform-backup-${{ github.run_id }}
+          path: platform-backup.zip
+          retention-days: 7
+          if-no-files-found: error
