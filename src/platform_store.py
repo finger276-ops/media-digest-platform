@@ -1160,6 +1160,22 @@ def get_manual(project_id: str, row_key: str) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def get_manual_row(project_id: str, row_key: str) -> dict[str, Any] | None:
+    """Строка правки целиком — таблица и payload; для журнала правок."""
+    data = (
+        get_supabase_client()
+        .table("platform_manual_rows")
+        .select("table_name,payload")
+        .eq("project_id", project_id)
+        .eq("row_key", row_key)
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    return data[0] if data else None
+
+
 def delete_manual(project_id: str, row_key: str) -> None:
     get_supabase_client().table("platform_manual_rows").delete().eq(
         "project_id", project_id

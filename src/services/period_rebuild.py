@@ -34,6 +34,7 @@ import pandas as pd
 
 import platform_store as store
 
+from .audit_log import audit_reason
 from .cached_store import clear_platform_caches, delete_manual, save_manual
 from .ingest import IngestError, build_period_tables, read_canonical_bytes
 
@@ -320,7 +321,8 @@ def rebuild_period(
         uploaded_at=_iso(period.get("uploaded_at")),
         keep_old_rows_until_written=True,
     )
-    apply_manual_plan(project_id, period_id, plan, stamp=stamp)
+    with audit_reason("Пересборка периода"):
+        apply_manual_plan(project_id, period_id, plan, stamp=stamp)
     clear_platform_caches(project_id)
 
     return {

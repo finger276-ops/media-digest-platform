@@ -116,6 +116,7 @@ from reviews_ui import render_reviews
 from sources_ui import render_sources_page
 from ab_compare_ui import render_ab_comparison
 from backups_ui import render_backups_block
+from audit_ui import render_audit_page
 from tags_ui import render_tag_statistics
 from client_insights_ui import render_client_insights
 from project_admin_ui import render_project_access, render_project_manager
@@ -541,7 +542,7 @@ def _main() -> None:
                 )
             )
     if is_admin:
-        groups.append(("Платформа", ["Проекты", "Сессии"]))
+        groups.append(("Платформа", ["Проекты", "Сессии", "Журнал"]))
 
     if not groups:
         st.info("Выберите проект или войдите как владелец платформы.")
@@ -614,6 +615,15 @@ def _main() -> None:
         render_section_safely(
             "Сессии",
             render_session_presence_page,
+            is_admin=is_admin,
+            _details=show_error_details,
+        )
+        return
+    if page == "Журнал":
+        render_section_safely(
+            "Журнал",
+            render_audit_page,
+            projects,
             is_admin=is_admin,
             _details=show_error_details,
         )

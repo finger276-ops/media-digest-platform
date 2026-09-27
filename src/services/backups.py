@@ -43,10 +43,15 @@ BACKUP_TABLES: dict[str, str] = {
     "platform_ingest_sources": "source_key",
     "platform_ingest_queue": "task_id",
     "platform_category_benchmarks": "project_id,period_id",
+    "platform_audit_log": "",
 }
 # Суррогатные ключи, которые база выдаёт сама: при восстановлении их не
 # передаём, строка находится по уникальному ключу.
-SERIAL_COLUMNS = {"platform_project_members": ("id",)}
+SERIAL_COLUMNS = {"platform_project_members": ("id",), "platform_audit_log": ("id",)}
+# У журнала правок нет естественного ключа: повторное восстановление
+# задвоило бы записи. Поэтому он восстанавливается, только если в базе (для
+# проекта — у этого проекта) журнал пуст.
+INSERT_ONLY_IF_EMPTY = {"platform_audit_log"}
 BACKUP_PREFIX = "backups"
 DEFAULT_KEEP = 14
 FORMAT_VERSION = 1
@@ -198,9 +203,23 @@ def restore_archive(
             rows = [row for row in rows if _row_in_project(table, row, project_id)]
         drop = SERIAL_COLUMNS.get(table, ())
         rows = [{k: v for k, v in row.items() if k not in drop} for row in rows]
+        if table in INSERT_ONLY_IF_EMPTY and rows and _has_rows(client, table, project_id):
+            counts[table] = 0
+            continue
         counts[table] = len(rows)
         if dry_run or not rows:
             continue
         for start in range(0, len(rows), batch_size):
-            client.table(table).upsert(rows[start : start + batch_size], on_conflict=conflict).execute()
+            batch = rows[start : start + batch_size]
+            if conflict:
+                client.table(table).upsert(batch, on_conflict=conflict).execute()
+            else:
+                client.table(table).insert(batch).execute()
     return counts
+
+
+def _has_rows(client: Any, table: str, project_id: str | None) -> bool:
+    query = client.table(table).select("project_id")
+    if project_id:
+        query = query.eq("project_id", project_id)
+    return bool(query.limit(1).execute().data)

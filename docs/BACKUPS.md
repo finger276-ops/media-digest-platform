@@ -10,7 +10,7 @@
 Таблицы `platform_projects`, `platform_periods`, `platform_table_rows`,
 `platform_manual_rows`, `platform_project_members`, `platform_tag_hierarchies`,
 `platform_ingest_sources`, `platform_ingest_queue`,
-`platform_category_benchmarks`. Таблица, которой нет в базе (миграция не
+`platform_category_benchmarks`, `platform_audit_log` (журнал правок). Таблица, которой нет в базе (миграция не
 накачена), пропускается и записывается в манифест копии.
 
 Не копируются: присутствие в сессиях (`platform_sessions`) — это живые отметки
@@ -60,6 +60,10 @@ python scripts/backup_platform.py restore \
 # восстановить всё из файла (например, скачанного артефакта GitHub)
 python scripts/backup_platform.py restore --file platform-backup.zip
 ```
+
+Журнал правок восстанавливается, только если в базе (при `--project` — у
+этого проекта) он пуст: у записей журнала нет естественного ключа, и повторное
+восстановление задвоило бы их.
 
 Без `--yes` скрипт показывает, сколько строк запишет, и спрашивает
 подтверждение. После восстановления откройте платформу заново: кеш страниц

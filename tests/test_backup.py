@@ -20,7 +20,9 @@
 - restore_archive пишет при dry_run -> «пробный прогон ничего не пишет»
   краснеет;
 - render_backups_block без проверки давности -> «копии больше двух суток —
-  предупреждение» краснеет.
+  предупреждение» краснеет;
+- журнал правок восстанавливается и в непустую таблицу -> «журнал правок не
+  задваивается при повторном восстановлении» краснеет.
 """
 
 import json
@@ -88,6 +90,11 @@ def seed():
     CLIENT.db["platform_ingest_sources"] = [{"source_key": "weekly", "project_id": "a", "title": "Отчёт"}]
     CLIENT.db["platform_ingest_queue"] = [{"task_id": "t1", "project_id": "a", "status": "done"}]
     CLIENT.db["platform_category_benchmarks"] = [{"project_id": "b", "period_id": "b1", "benchmarks": {"sov": 0.3}}]
+    CLIENT.db["platform_audit_log"] = [
+        {"id": 3, "project_id": "a", "created_at": "2026-09-01T00:00:00+00:00", "actor_role": "editor",
+         "actor_session": "abc", "action": "save", "table_name": "event_edits", "row_key": "event_edit::a1__e_1",
+         "summary": "Правка инфоповода", "before": None, "after": {"title": "Ручное"}},
+    ]
 
 
 def snapshot(tables=None):
@@ -114,10 +121,11 @@ counts = backups.restore_archive(CLIENT, CLIENT.files[result["path"]])
 after = snapshot()
 members = CLIENT.db["platform_project_members"]
 check("id участника база выдаёт сама", members and "id" not in members[0], str(members))
-before["platform_project_members"] = sorted(
-    json.dumps({k: v for k, v in json.loads(r).items() if k != "id"}, sort_keys=True, ensure_ascii=False)
-    for r in before["platform_project_members"]
-)
+for serial_table in ("platform_project_members", "platform_audit_log"):
+    before[serial_table] = sorted(
+        json.dumps({k: v for k, v in json.loads(r).items() if k != "id"}, sort_keys=True, ensure_ascii=False)
+        for r in before[serial_table]
+    )
 check("база та же до строки", after == before, str({t: (len(before[t]), len(after[t])) for t in before if before[t] != after[t]}))
 check("сводка по таблицам", counts["platform_table_rows"] == 900 and counts["platform_projects"] == 2, str(counts))
 
@@ -135,6 +143,11 @@ check("восстановлен только проект А", sum(r["project_id
       and CLIENT.db["platform_table_rows"][0]["payload"]["text_clean"] == "изменено после копии",
       str(CLIENT.db["platform_table_rows"][0]["payload"]))
 check("проект А снова в списке", any(r["project_id"] == "a" for r in CLIENT.db["platform_projects"]))
+
+audit_payload = backups.make_backup(CLIENT, now=NOW + timedelta(minutes=2), upload=False)["bytes"]
+again = backups.restore_archive(CLIENT, audit_payload)
+check("журнал правок не задваивается при повторном восстановлении",
+      len(CLIENT.db["platform_audit_log"]) == 1 and again["platform_audit_log"] == 0, str(again.get("platform_audit_log")))
 
 print("4. Хранятся только последние копии")
 seed()

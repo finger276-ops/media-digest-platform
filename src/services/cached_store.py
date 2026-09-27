@@ -11,6 +11,7 @@ except Exception:  # pragma: no cover
     st = None  # type: ignore
 
 import platform_store as store
+from services import audit_log
 from services.perf import perf_block
 
 # Pure re-exports that do not need Streamlit caching.
@@ -289,7 +290,9 @@ def save_manual(
     expected_updated_at: Any = store.UNCHECKED_VERSION,
 ) -> str:
     # При конфликте версий store бросает ManualEditConflict до записи: база
-    # не менялась, поэтому и кеш не сбрасывается — bump не выполняется.
+    # не менялась, поэтому и кеш не сбрасывается — bump не выполняется, и в
+    # журнал правок ничего не пишется.
+    before = _manual_before(project_id, row_key)
     with perf_block("store.save_manual", project_id=project_id, table_name=table_name):
         written = store.save_manual(
             project_id,
@@ -299,7 +302,23 @@ def save_manual(
             expected_updated_at=expected_updated_at,
         )
     bump_cache(project_id, namespaces=("manual", "data"))
+    audit_log.record(
+        project_id,
+        "save",
+        table_name,
+        row_key,
+        before=(before or {}).get("payload"),
+        after=payload,
+    )
     return written
+
+
+def _manual_before(project_id: str, row_key: str) -> dict[str, Any] | None:
+    """Прежняя строка правки — для «было → стало» в журнале."""
+    try:
+        return store.get_manual_row(project_id, row_key)
+    except Exception:  # noqa: BLE001 — без «было» журнал всё равно запишет «стало»
+        return None
 
 
 def get_manual_version(
@@ -321,6 +340,15 @@ def get_manual_version(
 
 
 def delete_manual(project_id: str, row_key: str) -> None:
+    before = _manual_before(project_id, row_key)
     with perf_block("store.delete_manual", project_id=project_id):
         store.delete_manual(project_id, row_key)
     bump_cache(project_id, namespaces=("manual", "data"))
+    if before is not None:
+        audit_log.record(
+            project_id,
+            "delete",
+            str(before.get("table_name") or ""),
+            row_key,
+            before=before.get("payload"),
+        )
