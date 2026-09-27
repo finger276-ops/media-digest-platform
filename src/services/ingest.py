@@ -200,6 +200,41 @@ def build_period_name(date_from: str, date_to: str, fallback: str = "") -> str:
     return fallback or datetime.now().strftime("Выгрузка %d.%m.%Y %H:%M")
 
 
+def build_period_tables(
+    canonical: pd.DataFrame,
+    *,
+    project_id: str,
+    source_filename: str,
+    params: dict[str, Any] | None,
+    output_dir: str | Path,
+) -> tuple[dict[str, Any], dict[str, pd.DataFrame], dict[str, float]]:
+    """Прогнать конвейер над канонической таблицей, ничего не сохраняя.
+
+    Общий шаг загрузки и пересборки периода (services.period_rebuild): оба
+    пути должны собирать таблицы одним и тем же кодом с одними порогами.
+    Возвращает манифест конвейера, таблицы и параметры алгоритма.
+    """
+    algo = algorithm_params(params)
+    # Пороги сборки сюжетов читаются здесь, а не раньше проверок в
+    # process_canonical: тест на пустую выгрузку ждёт IngestError без единого
+    # обращения к Supabase.
+    story = story_build_params(project_id)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    manifest = run_preprocess_from_dataframe(
+        canonical,
+        output=output_dir,
+        source_file=source_filename,
+        similarity_threshold=algo["similarity_threshold"],
+        event_gap_hours=algo["event_gap_hours"],
+        event_window_hours=algo["event_window_hours"],
+        story_similarity=story["similarity"],
+        story_min_authors=story["min_authors"],
+        story_min_messages=story["min_messages"],
+    )
+    return dict(manifest or {}), read_generated_tables(output_dir), algo
+
+
 def process_canonical(
     canonical: pd.DataFrame,
     *,
@@ -227,30 +262,19 @@ def process_canonical(
     if not project_id:
         raise IngestError("Не указан проект для загрузки выгрузки.")
 
-    algo = algorithm_params(params)
-    # Пороги сборки сюжетов читаются здесь, а не раньше проверок выше: тест
-    # на пустую выгрузку ждёт IngestError без единого обращения к Supabase.
-    story = story_build_params(project_id)
     date_from_text = _as_date_text(date_from)
     date_to_text = _as_date_text(date_to)
 
     period_name = str(period_name or "").strip()
     period_id = store.make_period_id(project_id, period_name or "auto", source_filename)
     output_dir = Path(work_dir) / project_id / period_id
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    manifest = run_preprocess_from_dataframe(
+    manifest, tables, algo = build_period_tables(
         canonical,
-        output=output_dir,
-        source_file=source_filename,
-        similarity_threshold=algo["similarity_threshold"],
-        event_gap_hours=algo["event_gap_hours"],
-        event_window_hours=algo["event_window_hours"],
-        story_similarity=story["similarity"],
-        story_min_authors=story["min_authors"],
-        story_min_messages=story["min_messages"],
+        project_id=project_id,
+        source_filename=source_filename,
+        params=params,
+        output_dir=output_dir,
     )
-    tables = read_generated_tables(output_dir)
     messages = tables.get("messages", pd.DataFrame())
 
     # Даты периода: приоритет у явно заданных, иначе берем из самих сообщений.
@@ -277,7 +301,6 @@ def process_canonical(
         except Exception as exc:  # noqa: BLE001 - сырой файл не критичен
             storage_error = str(exc)
 
-    manifest = dict(manifest or {})
     manifest.update(
         {
             "storage_path": storage_path,

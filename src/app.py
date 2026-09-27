@@ -620,6 +620,7 @@ def _main() -> None:
             project_id,
             role,
             read_only=demo_read_only,
+            work_dir=args.work_dir,
             _details=show_error_details,
         )
         return

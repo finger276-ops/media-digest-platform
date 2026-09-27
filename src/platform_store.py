@@ -505,7 +505,18 @@ def save_processed_tables(
     date_from: Any = None,
     date_to: Any = None,
     replace: bool = True,
+    status: str = "active",
+    uploaded_at: str | None = None,
+    keep_old_rows_until_written: bool = False,
 ) -> None:
+    """Записать период и его таблицы.
+
+    keep_old_rows_until_written — для пересборки уже работающего периода:
+    новые строки пишутся поверх, и только потом удаляются строки, которых в
+    новой сборке нет. Обрыв посреди записи оставляет период со старыми и
+    частью новых строк, а не пустым. Метаданные периода пишутся последними —
+    при обрыве они остаются прежними.
+    """
     client = get_supabase_client()
     messages = tables.get("messages", pd.DataFrame())
     auto_from, auto_to = detect_period_dates(messages)
@@ -516,25 +527,58 @@ def save_processed_tables(
         "date_from": _normalize_date_for_db(date_from) or auto_from,
         "date_to": _normalize_date_for_db(date_to) or auto_to,
         "source_filename": source_filename,
-        "status": "active",
+        "status": status or "active",
         "manifest": manifest or {},
-        "uploaded_at": now_iso(),
+        "uploaded_at": uploaded_at or now_iso(),
     }
-    client.table("platform_periods").upsert(
-        period_payload, on_conflict="period_id"
-    ).execute()
-    if replace:
-        client.table("platform_table_rows").delete().eq("project_id", project_id).eq(
-            "period_id", period_id
+    if not keep_old_rows_until_written:
+        client.table("platform_periods").upsert(
+            period_payload, on_conflict="period_id"
         ).execute()
+        if replace:
+            client.table("platform_table_rows").delete().eq(
+                "project_id", project_id
+            ).eq("period_id", period_id).execute()
+    written: set[tuple[str, str]] = set()
     for table_name in TABLES:
         records = dataframe_to_payload_records(
             tables.get(table_name, pd.DataFrame()), table_name, project_id, period_id
         )
+        written.update((table_name, record["row_id"]) for record in records)
         for batch in chunked(records):
             client.table("platform_table_rows").upsert(
                 batch, on_conflict="project_id,period_id,table_name,row_id"
             ).execute()
+    if keep_old_rows_until_written:
+        if replace:
+            _delete_stale_rows(client, project_id, period_id, written)
+        client.table("platform_periods").upsert(
+            period_payload, on_conflict="period_id"
+        ).execute()
+
+
+def _delete_stale_rows(
+    client: Client,
+    project_id: str,
+    period_id: str,
+    keep: set[tuple[str, str]],
+    *,
+    batch_size: int = 150,
+) -> int:
+    """Удалить строки периода, которых нет среди только что записанных."""
+    stale: dict[str, list[str]] = {}
+    for row in _fetch_table_row_keys_for_period(client, project_id, period_id):
+        key = (row["table_name"], row["row_id"])
+        if key not in keep:
+            stale.setdefault(row["table_name"], []).append(row["row_id"])
+    deleted = 0
+    for table_name, row_ids in stale.items():
+        for batch in chunked(row_ids, batch_size):
+            client.table("platform_table_rows").delete().eq("project_id", project_id).eq(
+                "period_id", period_id
+            ).eq("table_name", table_name).in_("row_id", list(batch)).execute()
+            deleted += len(batch)
+    return deleted
 
 
 def load_table(project_id: str, period_ids: list[str], table_name: str) -> pd.DataFrame:

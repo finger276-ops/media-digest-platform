@@ -47,7 +47,7 @@ elif page == "sessions":
 elif page == "upload":
     render_upload_page(project_id, role, work_dir, {}, read_only=read_only)
 elif page == "history":
-    render_period_history(project_id, role, read_only=read_only)
+    render_period_history(project_id, role, read_only=read_only, work_dir=work_dir)
 elif page == "manager_default":
     render_project_manager(list_projects(include_inactive=True))
 elif page == "card":

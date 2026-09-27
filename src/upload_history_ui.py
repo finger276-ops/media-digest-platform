@@ -28,6 +28,7 @@ from services.formatting import (
 )
 from services.import_report import normalization_lines, summarize_import
 from services.ingest import IngestError, process_canonical, read_canonical_bytes
+from services.period_rebuild import can_rebuild, rebuild_period
 from services.metrics_compute import format_int
 from services.project_settings import (
     story_build_settings_from_project_settings,
@@ -373,7 +374,53 @@ def render_upload_page(
     clear_platform_caches(project_id)
 
 
-def render_period_history(project_id: str, role: str, *, read_only: bool) -> None:
+def _rebuild_summary(result: dict) -> str:
+    parts = [
+        f"«{result.get('period_name') or result.get('period_id')}»: "
+        f"сообщений {format_int(result.get('messages', 0))}, "
+        f"инфоповодов {format_int(result.get('events_before', 0))} → "
+        f"{format_int(result.get('events', 0))}."
+    ]
+    moved = int(result.get("edits_moved", 0) or 0)
+    orphaned = int(result.get("edits_orphaned", 0) or 0)
+    if moved:
+        parts.append(f"Правок перенесено на новые инфоповоды: {moved}.")
+    if orphaned:
+        parts.append(
+            f"Правок без пары: {orphaned} — у их инфоповодов изменился состав "
+            "сообщений; они отложены и больше не применяются."
+        )
+    return " ".join(parts)
+
+
+def _run_rebuild(project_id: str, period_ids: list[str], work_dir: str) -> None:
+    """Пересобрать периоды по очереди; ошибка одного не останавливает остальные."""
+    progress = st.progress(0.0, text="Пересобираю…") if len(period_ids) > 1 else None
+    done, failed = [], []
+    for index, period_id in enumerate(period_ids):
+        if progress is not None:
+            progress.progress(index / len(period_ids), text=f"Пересобираю {index + 1} из {len(period_ids)}…")
+        try:
+            with st.spinner("Обрабатываю исходный файл заново…"):
+                done.append(rebuild_period(project_id, period_id, work_dir=work_dir))
+        except IngestError as exc:
+            # RebuildError и ошибки разбора файла написаны для человека.
+            failed.append((period_id, exc, str(exc)))
+        except Exception as exc:  # noqa: BLE001 — один период не роняет остальные
+            failed.append((period_id, exc, "Не удалось пересобрать период."))
+    if progress is not None:
+        progress.empty()
+    for result in done:
+        st.success(_rebuild_summary(result))
+    for period_id, exc, message in failed:
+        show_error(message if len(period_ids) == 1 else f"{period_id}: {message}", exc)
+    if done:
+        clear_platform_caches(project_id)
+
+
+def render_period_history(
+    project_id: str, role: str, *, read_only: bool, work_dir: str = "data/platform"
+) -> None:
     st.header("История периодов")
     if not can_change_project_data(role, read_only=read_only):
         st.info(
@@ -386,6 +433,29 @@ def render_period_history(project_id: str, role: str, *, read_only: bool) -> Non
     if periods.empty:
         st.info("Периодов пока нет.")
         return
+    rebuildable = [
+        str(row["period_id"]) for _, row in periods.iterrows() if can_rebuild(row)
+    ]
+    with st.expander("Пересобрать периоды текущим алгоритмом", expanded=False):
+        st.caption(
+            "Исходные файлы выгрузок хранятся на платформе. Пересборка обрабатывает "
+            "их заново текущими алгоритмами: названия инфоповодов, досчёт сюжетов, "
+            "признаки метрик. Название, даты, статус периодов и ручные правки "
+            "сохраняются; правки инфоповодов переносятся на инфоповоды с тем же "
+            "составом сообщений."
+        )
+        missing = len(periods) - len(rebuildable)
+        if missing:
+            st.caption(
+                f"Без сохранённого файла: {missing} — их можно обновить, только "
+                "загрузив файл заново."
+            )
+        if st.button(
+            f"Пересобрать все ({len(rebuildable)})",
+            key="rebuild_all_periods",
+            disabled=not rebuildable,
+        ):
+            _run_rebuild(project_id, rebuildable, work_dir)
     view = periods.copy()
     view["Период"] = view.apply(fmt_period, axis=1)
     if "status" in view.columns:
@@ -487,6 +557,22 @@ def render_period_history(project_id: str, role: str, *, read_only: bool) -> Non
                 delete_period(project_id, period_id, hard=False)
                 st.success("Период скрыт.")
                 st.rerun()
+
+        if can_rebuild(row):
+            if st.button(
+                "Пересобрать из исходного файла",
+                key=f"rebuild_period_{period_id}",
+                help=(
+                    "Обработать сохранённый файл выгрузки текущими алгоритмами. "
+                    "Название, даты, статус и ручные правки сохранятся."
+                ),
+            ):
+                _run_rebuild(project_id, [period_id], work_dir)
+        else:
+            st.caption(
+                "Исходный файл этого периода не сохранён — чтобы обновить его "
+                "текущими алгоритмами, загрузите файл заново."
+            )
 
         with st.expander("Удалить выгрузку без восстановления", expanded=False):
             st.warning(
