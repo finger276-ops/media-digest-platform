@@ -56,7 +56,7 @@ python tests/test_client_texts.py             # технические текс�
 python tests/test_display_tags.py             # теги для показа — только из выгрузки, без рубрик платформы и резки по запятой
 python tests/test_metric_availability.py      # прочерк вместо нуля: аудитории, охвата, вовлечённости нет в выгрузке
 python tests/test_period_rebuild.py           # пересборка периода: перенос правок по составу инфоповодов, метаданные, сбой записи
-python tests/test_sources.py                  # раздел «Источники»: площадки по адресу, авторы, новые площадки, прочерки
+python tests/test_sources.py                  # раздел «Источники»: площадки-домены без названий сообществ, авторы, новые площадки, прочерки
 python tests/test_report_pptx.py              # отчёт в PowerPoint: разделы, прочерки, родные диаграммы, кнопка
 python tests/test_ab_compare.py               # сравнение двух любых периодов: метрики, тональность, теги, площадки
 python tests/test_backup.py                   # резервные копии: копия → очистка → восстановление, проект, хранение 14 копий

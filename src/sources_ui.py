@@ -3,7 +3,8 @@
 
 Главный вопрос заказчика после «что пишут» — «где и кто»: какие площадки дают
 основной объём и негатив, кто пишет чаще всех, какие площадки появились
-впервые. Расчёт — services.source_stats; здесь только экран.
+впервые. Площадка — сайт или соцсеть (vk.com, telegram.org), без названий
+сообществ и каналов. Расчёт — services.source_stats; здесь только экран.
 """
 
 from __future__ import annotations
@@ -154,9 +155,8 @@ def render_sources_page(
     fresh = new_sources(current, previous) if isinstance(previous, pd.DataFrame) and not previous.empty else None
 
     total = int(len(messages))
-    top_share = (
-        int(sources.head(CHART_LIMIT)["messages"].sum()) / total if total and not sources.empty else 0.0
-    )
+    leader = sources.iloc[0] if not sources.empty else None
+    leader_share = int(leader["messages"]) / total if leader is not None and total else 0.0
     render_metric_row(
         [
             metric_card("Площадок", format_int(len(sources))),
@@ -170,11 +170,15 @@ def render_sources_page(
                 if fresh is not None
                 else metric_card("Новых площадок", "—", help_text="Нет прошлого периода для сравнения.")
             ),
-            metric_card(
-                f"Доля топ-{CHART_LIMIT} площадок",
-                f"{top_share * 100:.0f}%",
-                help_text="Сколько сообщений дают десять самых активных площадок: чем выше, тем "
-                "сильнее обсуждение сосредоточено в немногих местах.",
+            (
+                metric_card(
+                    "Главная площадка",
+                    str(leader["label"]),
+                    help_text=f"{leader_share * 100:.0f}% сообщений выборки "
+                    f"({format_int(int(leader['messages']))} из {format_int(total)}).",
+                )
+                if leader is not None
+                else metric_card("Главная площадка", "—")
             ),
         ],
         columns=4,
@@ -187,9 +191,11 @@ def render_sources_page(
         _top_chart(sources, marked)
         shown = sources.head(TABLE_LIMIT)
         st.caption(
-            "Площадка узнаётся по адресу блога или канала, а не по названию. "
-            "Аудитория — подписчики площадки; охват и вовлечённость — сумма по "
-            "сообщениям. Выберите строку, чтобы открыть сообщения площадки."
+            "Площадка — сайт или соцсеть, где опубликовано сообщение: все сообщества "
+            "и каналы ВКонтакте — это vk.com, Telegram — telegram.org. Аудитория — "
+            "сумма подписчиков сообществ площадки, каждое учтено один раз; охват и "
+            "вовлечённость — сумма по сообщениям. Выберите строку, чтобы открыть "
+            "сообщения площадки."
         )
         event = st.dataframe(
             display_table(shown, messages, kind="sources"),

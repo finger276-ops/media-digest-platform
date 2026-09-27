@@ -89,11 +89,12 @@ tags_b = period("b", 6, tags=["Тарифы"] * 1 + ["Водители"] * 2 + [
 tag_table = compare_tags(tags_a, tags_b)
 check("первым — тег с наибольшим изменением", tag_table.iloc[0]["Тег"] == "Тарифы", str(tag_table.to_dict("records")))
 check("новый тег в Б виден", "Приложение" in set(tag_table["Тег"]))
-src_a = period("a", 3, chats=["https://vk.com/old", "https://vk.com/both", "https://vk.com/both"])
-src_b = period("b", 3, chats=["https://vk.com/new", "https://vk.com/both", "https://vk.com/new"])
+# Площадка — домен: другое сообщество ВКонтакте — не новая площадка.
+src_a = period("a", 3, chats=["https://otzovik.com/reviews/taxi", "https://vk.com/club1", "https://vk.com/club1"])
+src_b = period("b", 3, chats=["https://t.me/taxi", "https://vk.com/club2", "https://t.me/taxi"])
 new, gone = compare_sources(src_a, src_b)
-check("новые площадки в Б", list(new["Площадка"]) == ["new"], str(new.to_dict("records")))
-check("пропавшие после А", list(gone["Площадка"]) == ["old"], str(gone.to_dict("records")))
+check("новые площадки в Б", list(new["Площадка"]) == ["telegram.org"], str(new.to_dict("records")))
+check("пропавшие после А", list(gone["Площадка"]) == ["otzovik.com"], str(gone.to_dict("records")))
 
 print("3. Выбор по умолчанию")
 from ab_compare_ui import default_pair  # noqa: E402

@@ -1,18 +1,27 @@
 # -*- coding: utf-8 -*-
 """Раздел «Источники»: площадки, авторы, новые площадки.
 
+Площадка — сайт или соцсеть (vk.com, telegram.org, otzovik.com). Названия
+сообществ и каналов в раздел не попадают.
+
 Мутационные проверки (что ломает какой тест):
-- source_keys по названию, а не по адресу -> «два сообщества с одним
-  названием — две площадки» и «переименованное сообщество — одна площадка»
-  краснеют;
-- аудитория площадки суммой по сообщениям -> «аудитория площадки — её
-  подписчики, а не сумма» краснеет;
+- площадки по названию сообщества, а не по домену -> «в таблице площадок нет
+  названий сообществ» и «площадки — домены» краснеют;
+- из ссылок берётся не только домен -> «профиль без адреса — не площадка»
+  краснеет;
+- без алиаса t.me -> «t.me и telegram.org — одна площадка» краснеет;
+- без снятия m. -> «мобильный адрес — та же площадка» краснеет;
+- аудитория площадки максимумом, а не суммой сообществ -> «аудитория площадки —
+  сумма её сообществ, каждое один раз» краснеет;
+- «Где пишет» по сообществам -> «где пишет автор — домены» краснеет;
 - display_table без проверки метрики -> «нет охвата в выгрузке — прочерк»
   краснеет;
 - display_table без проверки разметки -> «нет разметки — негатив прочерком»
   краснеет;
 - new_sources без вычитания прошлых площадок -> «новые площадки — только те,
   которых не было» краснеет;
+- главная площадка не первая по сообщениям -> «главная площадка — vk.com»
+  краснеет;
 - comparison_basis берёт первый выбранный период, а не последний ->
   «несколько периодов: последний с предыдущим» краснеет;
 - comparison_basis не загружает прошлый период -> «один период: сравнение с
@@ -37,11 +46,14 @@ import pandas as pd  # noqa: E402
 
 from services import metrics_compute as mc  # noqa: E402
 from services.source_stats import (  # noqa: E402
+    NO_SOURCE_LABEL,
     build_author_statistics,
     build_source_statistics,
     display_table,
     messages_of_source,
     new_sources,
+    platform_labels,
+    platform_name,
 )
 
 failures = []
@@ -54,50 +66,70 @@ def check(label, condition, detail=""):
 
 
 def msg(profile, title, author, *, period="p2", audience=1000, views=10, engagement=1, sentiment="нейтральная",
-        platform="vk.com", platform_type="Соцсети", declared="audience|reach|engagement"):
+        platform="vk.com", platform_type="Соцсети", link="", declared="audience|reach|engagement"):
     return {
         "chat_profile": profile, "chat_title": title, "platform": platform, "platform_type": platform_type,
         "author": author, "author_profile": f"https://vk.com/{author}", "audience": audience, "views": views,
-        "engagement": engagement, "sentiment": sentiment, "period_id": period,
+        "engagement": engagement, "sentiment": sentiment, "period_id": period, "message_link": link,
         mc.SOURCE_METRICS_COLUMN: declared, "text_clean": f"Сообщение от {author}",
     }
 
 
+COMMUNITIES = ("Такси города", "Такси города (архив)", "Барахолка Луганск,Алчевск,", "Подслушано", "Такси чат")
 rows = [
-    # Одно сообщество, переименованное между постами: площадка одна.
+    # Три сообщества ВКонтакте — одна площадка vk.com.
     msg("https://vk.com/club1", "Такси города", "ivan", sentiment="негативная"),
     msg("https://vk.com/club1", "Такси города (архив)", "petr"),
     msg("https://vk.com/club1", "Такси города", "ivan", audience=1200),
-    # Другое сообщество с тем же названием: другая площадка.
-    msg("https://vk.com/club2", "Такси города", "anna"),
-    # Отзовик без адреса блога: узнаётся по названию.
-    msg("", "Отзовик", "olga", platform="otzovik.com", platform_type="Отзывы", audience=0, views=0),
+    msg("https://vk.com/club2", "Барахолка Луганск,Алчевск,", "anna", audience=500),
+    # Площадка не заполнена: домен из мобильного адреса сообщества.
+    msg("https://m.vk.com/club3", "Подслушано", "olga", platform="", audience=300),
+    # Telegram под двумя адресами — одна площадка.
+    msg("https://t.me/taxi_chat", "Такси чат", "sergey", platform="", platform_type="Мессенджеры", audience=800),
+    msg("https://t.me/taxi_chat", "Такси чат", "ivan", platform="telegram.org", platform_type="Мессенджеры", audience=800),
+    # Отзыв без площадки и блога: домен из ссылки на сообщение.
+    msg("", "", "masha", platform="", platform_type="Отзывы", audience=0, views=0,
+        link="https://otzovik.com/review_1.html"),
 ]
 messages = mc.prepare_dashboard_messages(pd.DataFrame(rows))
 
-print("1. Площадки узнаются по адресу, а не по названию")
+print("1. Площадки — домены, а не сообщества")
+check("адрес → домен", platform_name("https://www.otzovik.com/review_1.html") == "otzovik.com")
+check("регистр и алиас vk.ru", platform_name("VK.RU") == "vk.com")
+check("название из колонки «Площадка» остаётся", platform_name("Одноклассники") == "Одноклассники")
+check("профиль без адреса — не площадка", platform_labels(pd.DataFrame(
+    [{"platform": "", "chat_profile": "club9", "chat_title": "Барахолка"}])).tolist() == [NO_SOURCE_LABEL])
 sources = build_source_statistics(messages)
 by_key = {row["_key"]: row for _, row in sources.iterrows()}
-check("два сообщества с одним названием — две площадки", {"https://vk.com/club1", "https://vk.com/club2"} <= set(by_key), str(list(by_key)))
-check("переименованное сообщество — одна площадка", by_key.get("https://vk.com/club1", {}).get("messages") == 3, str(sources.to_dict("records")))
-check("подпись — самое частое название", by_key["https://vk.com/club1"]["label"] == "Такси города")
-check("аудитория площадки — её подписчики, а не сумма", by_key["https://vk.com/club1"]["audience"] == 1200, str(by_key["https://vk.com/club1"]["audience"]))
-check("охват — сумма по сообщениям", by_key["https://vk.com/club1"]["reach"] == 30)
-check("авторов у площадки — уникальные", by_key["https://vk.com/club1"]["authors"] == 2)
-check("доля негатива посчитана", abs(by_key["https://vk.com/club1"]["negative_share"] - 1 / 3) < 1e-9)
-check("площадка без адреса узнаётся по названию", by_key.get("отзовик", {}).get("type") == "Отзывы", str(list(by_key)))
-check("сортировка по числу сообщений", sources.iloc[0]["_key"] == "https://vk.com/club1")
-check("сообщения площадки выбираются по ключу", len(messages_of_source(messages, "https://vk.com/club1")) == 3)
+check("площадки — домены", list(sources["label"]) == ["vk.com", "telegram.org", "otzovik.com"], str(sources["label"].tolist()))
+check("в таблице площадок нет названий сообществ",
+      not any(name in value for name in COMMUNITIES
+              for value in display_table(sources, messages, kind="sources").astype(str).values.ravel()),
+      str(display_table(sources, messages, kind="sources").to_dict("records")))
+check("мобильный адрес — та же площадка", by_key.get("vk.com", {}).get("messages") == 5, str(sources.to_dict("records")))
+check("t.me и telegram.org — одна площадка", by_key.get("telegram.org", {}).get("messages") == 2, str(list(by_key)))
+check("площадка из ссылки на сообщение", by_key.get("otzovik.com", {}).get("type") == "Отзывы", str(list(by_key)))
+check("аудитория площадки — сумма её сообществ, каждое один раз",
+      by_key["vk.com"]["audience"] == 1200 + 500 + 300 and by_key["telegram.org"]["audience"] == 800,
+      f'{by_key["vk.com"]["audience"]} / {by_key["telegram.org"]["audience"]}')
+check("охват — сумма по сообщениям", by_key["vk.com"]["reach"] == 50)
+check("авторов у площадки — уникальные", by_key["vk.com"]["authors"] == 4)
+check("доля негатива посчитана", abs(by_key["vk.com"]["negative_share"] - 1 / 5) < 1e-9)
+check("сообщения площадки выбираются по ключу", len(messages_of_source(messages, "vk.com")) == 5)
 
 print("2. Авторы")
 authors = build_author_statistics(messages)
 ivan = authors[authors["label"] == "ivan"]
-check("автор с двумя сообщениями", not ivan.empty and int(ivan.iloc[0]["messages"]) == 2, str(authors.to_dict("records")))
-check("где пишет автор", not ivan.empty and ivan.iloc[0]["places"] == "Такси города")
+check("автор с тремя сообщениями", not ivan.empty and int(ivan.iloc[0]["messages"]) == 3, str(authors.to_dict("records")))
+check("где пишет автор — домены", not ivan.empty and ivan.iloc[0]["places"] == "vk.com, telegram.org",
+      str(ivan["places"].tolist()))
+check("в таблице авторов нет названий сообществ",
+      not any(name in value for name in COMMUNITIES
+              for value in display_table(authors, messages, kind="authors").astype(str).values.ravel()))
 
 print("3. Прочерки вместо ложных нулей")
 table = display_table(sources, messages, kind="sources")
-check("охват есть — числа", table["Охват"].iloc[0] == "30", str(table.to_dict("records")))
+check("охват есть — числа", table["Охват"].iloc[0] == "50", str(table.to_dict("records")))
 no_reach = mc.prepare_dashboard_messages(pd.DataFrame([dict(r, views=0, **{mc.SOURCE_METRICS_COLUMN: "audience|engagement"}) for r in rows]))
 table_no_reach = display_table(build_source_statistics(no_reach), no_reach, kind="sources")
 check("нет охвата в выгрузке — прочерк", set(table_no_reach["Охват"]) == {"—"}, str(table_no_reach["Охват"].tolist()))
@@ -110,7 +142,9 @@ check("у авторов нет колонки аудитории площадк
 print("4. Новые площадки")
 previous = mc.prepare_dashboard_messages(pd.DataFrame([msg("https://vk.com/club1", "Такси города", "ivan", period="p1")]))
 fresh = new_sources(messages, previous)
-check("новые площадки — только те, которых не было", set(fresh["_key"]) == {"https://vk.com/club2", "отзовик"}, str(fresh["_key"].tolist()))
+check("новые площадки — только те, которых не было", set(fresh["_key"]) == {"telegram.org", "otzovik.com"},
+      str(fresh["_key"].tolist()))
+check("новое сообщество старой площадки — не новая площадка", "vk.com" not in set(fresh["_key"]))
 check("без прошлого периода — пусто, а не всё", new_sources(messages, pd.DataFrame()).empty)
 
 print("5. С чем сравнивать")
@@ -156,7 +190,8 @@ for index, row in enumerate(rows + [dict(msg("https://vk.com/club1", "Такси
     payload = dict(row)
     day = "2026-05-02" if payload["period_id"] == "p2" else "2026-04-02"
     payload.update({"message_id": f"m{index}", "date": day, "datetime": f"{day}T10:00:00",
-                    "message_link": f"https://example.com/{index}", "tags": "Тарифы", "event_title": ""})
+                    "message_link": payload["message_link"] or f"https://vk.com/wall-1_{index}",
+                    "tags": "Тарифы", "event_title": ""})
     table_rows.append({"project_id": PROJECT, "period_id": payload["period_id"], "table_name": "messages",
                        "row_id": payload["message_id"], "payload": payload})
 CLIENT.db["platform_table_rows"] = table_rows
@@ -181,11 +216,17 @@ check("раздел открылся без исключений", not at.except
 check("раздел есть в меню пользователя", "Источники" in [str(b.label) for b in at.sidebar.button])
 cards = {str(m.label): str(m.value) for m in at.metric}
 check("площадок — три", cards.get("Площадок") == "3", str(cards))
-check("авторов — четыре", cards.get("Авторов") == "4", str(cards))
+check("авторов — шесть", cards.get("Авторов") == "6", str(cards))
 check("новых площадок к апрелю — две", cards.get("Новых площадок") == "2", str(cards))
+check("главная площадка — vk.com", cards.get("Главная площадка") == "vk.com", str(cards))
 tables = [el.value for el in at.dataframe]
-check("таблица площадок на экране", any("Площадка" in t.columns for t in tables), str([list(t.columns) for t in tables]))
+platform_table = next((t for t in tables if "Площадка" in t.columns), None)
+check("таблица площадок на экране — домены", platform_table is not None
+      and list(platform_table["Площадка"]) == ["vk.com", "telegram.org", "otzovik.com"],
+      str([list(t.columns) for t in tables]))
 check("таблица авторов на экране", any("Автор" in t.columns for t in tables))
+check("на экране нет названий сообществ", not any(
+    name in value for t in tables for value in t.astype(str).values.ravel() for name in COMMUNITIES))
 
 at = open_sources(["p1"])
 cards = {str(m.label): str(m.value) for m in at.metric}
