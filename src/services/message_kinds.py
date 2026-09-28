@@ -165,6 +165,11 @@ def message_type_labels(messages: pd.DataFrame) -> pd.Series:
     return values.where(values != "", NO_MESSAGE_TYPE_LABEL)
 
 
+def message_type_key(value: object) -> str:
+    """«Пост», «пост» и «ПОСТ» — один тип."""
+    return str(value or "").strip().lower().replace("ё", "е")
+
+
 def message_type_counts(messages: pd.DataFrame) -> list[tuple[str, int]]:
     """Сколько сообщений каждого типа — самые частые первыми.
 
@@ -174,7 +179,7 @@ def message_type_counts(messages: pd.DataFrame) -> list[tuple[str, int]]:
     labels = message_type_labels(messages)
     if labels.empty or (labels == NO_MESSAGE_TYPE_LABEL).all():
         return []
-    keys = labels.str.lower().str.replace("ё", "е", regex=False)
+    keys = labels.map(message_type_key)
     frame = pd.DataFrame({"label": labels.values, "key": keys.values})
     counts = frame.groupby("key").size()
     names = frame.groupby("key")["label"].agg(lambda s: s.value_counts().index[0])
@@ -184,3 +189,15 @@ def message_type_counts(messages: pd.DataFrame) -> list[tuple[str, int]]:
         key=lambda key: (names[key] == NO_MESSAGE_TYPE_LABEL, -int(counts[key]), names[key].lower()),
     )
     return [(str(names[key]), int(counts[key])) for key in order]
+
+
+def filter_messages_by_type(messages: pd.DataFrame, types: list[str]) -> pd.DataFrame:
+    """Сообщения выбранных типов. Пустой выбор — фильтра нет.
+
+    «Тип не указан» в выборе оставляет сообщения без типа.
+    """
+    keys = {message_type_key(value) for value in types or [] if message_type_key(value)}
+    if not keys or messages is None or len(messages) == 0:
+        return messages
+    labels = message_type_labels(messages)
+    return messages[labels.map(message_type_key).isin(keys).to_numpy()]

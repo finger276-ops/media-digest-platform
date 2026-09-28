@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Раздел «Сообщения»: фильтр по тегам и разбивка по типу сообщения.
+"""Раздел «Сообщения»: фильтры по тегам и типу сообщения, разбивка по типам.
 
 Мутационные проверки (что ломает какой тест):
 - filter_messages_by_tags сравнивает с учётом регистра -> «тег находится без
@@ -15,7 +15,15 @@
 - разбивка по типам считается до фильтра тегов -> «типы — по отобранным
   сообщениям» краснеет;
 - message_type_counts без «Тип не указан» в конце -> «Тип не указан — в
-  конце» краснеет.
+  конце» краснеет;
+- фильтр типа не применяется к ленте -> «выбран тип — в ленте только его
+  сообщения» краснеет;
+- карточки считаются после фильтра типа -> «фильтр типа не меняет карточки»
+  краснеет;
+- список типов считается до фильтра тегов -> «число в списке типов — с учётом
+  тегов» краснеет;
+- выбор типов не сверяется с новой выборкой по ключу -> «тот же тип в другом
+  написании остаётся выбранным» краснеет.
 """
 
 import sys
@@ -28,7 +36,7 @@ for _p in (REPO / "src", REPO / "tests"):
 
 import pandas as pd  # noqa: E402
 
-from services.message_kinds import message_type_counts  # noqa: E402
+from services.message_kinds import filter_messages_by_type, message_type_counts  # noqa: E402
 from services.tag_compute import filter_messages_by_tags, tag_options  # noqa: E402
 
 failures = []
@@ -64,6 +72,11 @@ types = message_type_counts(pd.DataFrame({"message_type": ["Пост", "пост
 check("типы как в выгрузке, самые частые первыми", types[:3] == [("Пост", 3), ("Комментарий", 1), ("Репост", 1)], str(types))
 check("Тип не указан — в конце", types[-1] == ("Тип не указан", 2), str(types))
 check("выгрузка без типа — разбивки нет", message_type_counts(pd.DataFrame({"x": [1, 2]})) == [])
+typed = pd.DataFrame({"message_type": ["Пост", "пост", "Комментарий", "", None, "Репост"]})
+check("отбор по типу без учёта регистра", filter_messages_by_type(typed, ["ПОСТ"]).index.tolist() == [0, 1])
+check("несколько типов", filter_messages_by_type(typed, ["Пост", "Репост"]).index.tolist() == [0, 1, 5])
+check("«Тип не указан» — сообщения без типа", filter_messages_by_type(typed, ["Тип не указан"]).index.tolist() == [3, 4])
+check("пустой выбор типов — вся выборка", len(filter_messages_by_type(typed, [])) == len(typed))
 
 print("3. Раздел «Сообщения»")
 from streamlit.testing.v1 import AppTest  # noqa: E402
@@ -96,6 +109,8 @@ def messages_app():
             "datetime": f"2026-05-{1 + i % 28:02d}T10:00:00", "engagement": i, "views": 10, "audience": 100,
             "sentiment": "нейтральная", "message_link": f"https://vk.com/wall-1_{i}",
         }
+        if variant == "types_upper":
+            kind = kind.upper()
         if variant != "no_types":
             row["message_type"] = kind
         rows.append(row)
@@ -112,6 +127,16 @@ def cards(at):
 
 def tag_select(at):
     return next((m for m in at.multiselect if str(m.label) == "Теги"), None)
+
+
+def type_select(at):
+    return next((m for m in at.multiselect if str(m.label) == "Тип сообщения"), None)
+
+
+def shown_ids(at):
+    """Номера показанных сообщений: текст карточки — «Сообщение N»."""
+    return sorted(int(str(m.value).split()[-1]) for m in at.markdown
+                  if str(m.value).startswith("Сообщение ") and str(m.value).split()[-1].isdigit())
 
 
 at = AppTest.from_function(messages_app, default_timeout=60)
@@ -148,7 +173,47 @@ check("вся лента с фильтром открылась", not at.excepti
 check("найдено — только отобранные", any("Найдено сообщений: 4." in str(c.value) for c in at.caption),
       str([str(c.value) for c in at.caption if "Найдено" in str(c.value)]))
 
-print("4. Страницы и смена выборки")
+print("4. Фильтр по типу сообщения")
+at = AppTest.from_function(messages_app, default_timeout=60)
+at.run()
+kinds = type_select(at)
+check("фильтр «Тип сообщения» на месте", kinds is not None, str([str(m.label) for m in at.multiselect]))
+check("в списке типов — число сообщений", kinds is not None and kinds.format_func("Пост") == "Пост · 22",
+      kinds.format_func("Пост") if kinds is not None else "")
+kinds.select("Комментарий").run()
+check("выбран тип — в ленте только его сообщения", shown_ids(at) == list(range(8)), str(shown_ids(at)))
+check("подпись называет тип", any("с типом «Комментарий»" in str(c.value) for c in at.caption))
+check("фильтр типа не меняет карточки", cards(at) == {"Репост": "30 · 50%", "Пост": "22 · 37%", "Комментарий": "8 · 13%"},
+      str(cards(at)))
+check("над карточками — что в ленте", any("в ленте только: Комментарий" in str(c.value) for c in at.caption))
+type_select(at).set_value([]).run()
+tag_select(at).select("Технониколь").run()
+check("число в списке типов — с учётом тегов", type_select(at).format_func("Пост") == "Пост · 4",
+      type_select(at).format_func("Пост"))
+type_select(at).select("Пост").run()
+check("тег и тип вместе", shown_ids(at) == [8, 9, 10, 11], str(shown_ids(at)))
+check("подпись называет тег и тип", any("с тегом «Технониколь» и с типом «Пост»" in str(c.value) for c in at.caption))
+tag_select(at).set_value([]).run()
+type_select(at).set_value(["Репост"]).run()
+next(r for r in at.radio if str(r.label) == "Режим просмотра сообщений").set_value("Вся лента").run()
+check("вся лента по типу", any("Найдено сообщений: 30." in str(c.value) for c in at.caption),
+      str([str(c.value) for c in at.caption if "Найдено" in str(c.value)]))
+
+at = AppTest.from_function(messages_app, default_timeout=60)
+at.run()
+type_select(at).select("Комментарий").run()
+at.session_state["variant"] = "types_upper"
+at.run()
+check("тот же тип в другом написании остаётся выбранным", not at.exception
+      and list(type_select(at).value) == ["КОММЕНТАРИЙ"] and shown_ids(at) == list(range(8)),
+      str(at.exception) or str(type_select(at).value))
+
+at = AppTest.from_function(messages_app, default_timeout=60)
+at.session_state["variant"] = "no_types"
+at.run()
+check("выгрузка без типа — фильтра типа нет", not at.exception and type_select(at) is None and tag_select(at) is not None)
+
+print("5. Страницы и смена выборки")
 at = AppTest.from_function(messages_app, default_timeout=60)
 at.run()
 next(r for r in at.radio if str(r.label) == "Режим просмотра сообщений").set_value("Вся лента").run()
@@ -191,4 +256,4 @@ if failures:
     for f in failures:
         print(f"  - {f}")
     raise SystemExit(1)
-print("Фильтр по тегам и разбивка по типу сообщения работают.")
+print("Фильтры по тегам и типу сообщения и разбивка по типам работают.")

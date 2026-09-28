@@ -5,8 +5,9 @@
 сообщений (фильтр из services.event_filter_state); сбросить его можно
 кнопкой прямо в этом блоке. Фильтр по тегам сужает обе вкладки так же:
 выбран тег «Технониколь» — показаны только сообщения с этим тегом.
-Над лентой — сколько среди отобранных постов, комментариев и репостов
-(колонка «Тип сообщения» выгрузки).
+Рядом — фильтр «Тип сообщения» (колонка выгрузки: пост, комментарий,
+репост). Карточки над лентой показывают, сколько каких типов среди
+сообщений с выбранными тегами; фильтр типа сужает саму ленту.
 """
 
 from __future__ import annotations
@@ -21,7 +22,11 @@ from services.event_filter_state import (
 )
 from metric_cards_ui import metric_card, render_metric_row
 from services.formatting import fmt_date
-from services.message_kinds import message_type_counts
+from services.message_kinds import (
+    filter_messages_by_type,
+    message_type_counts,
+    message_type_key,
+)
 from services.message_compute import message_link_column, message_text_column
 from services.metrics_compute import (
     NO_METRIC_VALUE,
@@ -98,6 +103,19 @@ def render_message_list(
             st.markdown(f"[Открыть сообщение]({link})")
 
 
+def _keep_selection(key: str, options: list[str], normalize) -> None:
+    """Сверить прошлый выбор с новыми вариантами до того, как нарисован виджет.
+
+    Другой период или инфоповод: значение, которого в выборке нет, снимается,
+    а то же значение в другом написании («ТехноНИКОЛЬ») остаётся выбранным.
+    """
+    if key not in st.session_state:
+        return
+    by_key = {normalize(option): option for option in options}
+    kept = dict.fromkeys(normalize(value) for value in st.session_state[key] or [])
+    st.session_state[key] = [by_key[k] for k in kept if k in by_key]
+
+
 def _tag_filter(work: pd.DataFrame, project_id: str | None) -> tuple[list[str], bool]:
     """Выбор тегов над лентой. Возвращает (выбранные теги, нужны ли все сразу)."""
     options = tag_options(work)
@@ -105,12 +123,7 @@ def _tag_filter(work: pd.DataFrame, project_id: str | None) -> tuple[list[str], 
         return [], False
     counts = dict(options)
     key = f"messages_tag_filter_{project_id or 'global'}"
-    if key in st.session_state:
-        # Другой период или инфоповод: тег, которого в выборке нет, снимается,
-        # а тот же тег в другом написании остаётся выбранным.
-        by_key = {normalize_tag_key(tag): tag for tag in counts}
-        kept = dict.fromkeys(normalize_tag_key(tag) for tag in st.session_state[key] or [])
-        st.session_state[key] = [by_key[k] for k in kept if k in by_key]
+    _keep_selection(key, list(counts), normalize_tag_key)
     selected = st.multiselect(
         "Теги",
         list(counts),
@@ -134,7 +147,28 @@ def _tag_filter(work: pd.DataFrame, project_id: str | None) -> tuple[list[str], 
     return list(selected), match_all
 
 
-def _render_message_types(work: pd.DataFrame) -> None:
+def _type_filter(work: pd.DataFrame, project_id: str | None) -> list[str]:
+    """Выбор типов сообщения над лентой: пост, комментарий, репост."""
+    options = message_type_counts(work)
+    if not options:
+        return []
+    counts = dict(options)
+    key = f"messages_type_filter_{project_id or 'global'}"
+    _keep_selection(key, list(counts), message_type_key)
+    return list(
+        st.multiselect(
+            "Тип сообщения",
+            list(counts),
+            key=key,
+            format_func=lambda value: f"{value} · {format_int(counts.get(value, 0))}",
+            placeholder="Все типы",
+            help="Показать только сообщения выбранных типов — как в колонке «Тип "
+            "сообщения» выгрузки. Число — сколько таких сообщений с учётом тегов.",
+        )
+    )
+
+
+def _render_message_types(work: pd.DataFrame, selected_types: list[str]) -> None:
     """Сколько среди сообщений выборки постов, комментариев, репостов."""
     counts = message_type_counts(work)
     if not counts:
@@ -147,7 +181,10 @@ def _render_message_types(work: pd.DataFrame) -> None:
         rest_help = "Остальные типы: " + ", ".join(label for label, _ in rest) + "."
     else:
         rest_help = ""
-    st.caption("Тип сообщения")
+    st.caption(
+        "Сообщений по типам"
+        + (f" · в ленте только: {', '.join(selected_types)}" if selected_types else "")
+    )
     render_metric_row(
         [
             metric_card(
@@ -166,6 +203,17 @@ def _tag_scope(tags: list[str], match_all: bool) -> str:
     if len(tags) == 1:
         return f"с тегом {names}"
     return f"со всеми тегами {names}" if match_all else f"с любым из тегов {names}"
+
+
+def _feed_scope(event_filter, tags: list[str], match_all: bool, types: list[str]) -> str:
+    """Для чего показан топ: «всей выборки», «сообщений с тегом «Т» и с типом «Пост»»."""
+    if not tags and not types:
+        return "выбранного инфоповода" if event_filter else "всей выборки"
+    parts = [_tag_scope(tags, match_all)] if tags else []
+    if types:
+        names = ", ".join(f"«{value}»" for value in types)
+        parts.append(f"с типом {names}" if len(types) == 1 else f"с типами {names}")
+    return "сообщений " + " и ".join(parts) + (" в выбранном инфоповоде" if event_filter else "")
 
 
 def render_messages_block(
@@ -216,7 +264,12 @@ def render_messages_block(
                 "По выбранному инфоповоду сообщения не найдены. Возможно, данные были пересобраны или связи инфоповодов изменились."
             )
             return
-    selected_tags, match_all = _tag_filter(work, project_id)
+    # Порядок отбора: инфоповод → теги → тип. Числа в списке типов и карточки
+    # считаются по сообщениям с выбранными тегами.
+    has_types = bool(message_type_counts(work))
+    tag_col, type_col = st.columns([3, 2]) if has_types else (st.container(), None)
+    with tag_col:
+        selected_tags, match_all = _tag_filter(work, project_id)
     if selected_tags:
         work = filter_messages_by_tags(work, selected_tags, match_all=match_all)
         if work.empty:
@@ -225,7 +278,16 @@ def render_messages_block(
                 f"или выберите «{MATCH_ANY}»."
             )
             return
-    _render_message_types(work)
+    selected_types: list[str] = []
+    if type_col is not None:
+        with type_col:
+            selected_types = _type_filter(work, project_id)
+    _render_message_types(work, selected_types)
+    if selected_types:
+        work = filter_messages_by_type(work, selected_types)
+        if work.empty:
+            st.info("Сообщений выбранных типов нет. Уберите фильтр типа.")
+            return
     text_col = message_text_column(work)
     link_col = message_link_column(work)
     work["_audience"] = numeric_series(work, ["audience", "Аудитория"]).astype(int)
@@ -237,13 +299,9 @@ def render_messages_block(
     ).astype(int)
 
     if mode == "Ключевые сообщения":
-        scope = "выбранного инфоповода" if event_filter else "всей выборки"
-        if selected_tags:
-            scope = f"сообщений {_tag_scope(selected_tags, match_all)}" + (
-                " в выбранном инфоповоде" if event_filter else ""
-            )
+        scope = _feed_scope(event_filter, selected_tags, match_all, selected_types)
         st.caption(
-            f"Показаны {min(15, len(work))} сообщений с максимальной вовлеченностью для {scope}. Если вовлеченность равна 0, дополнительными критериями выступают охват и аудитория."
+            f"Показано сообщений: {min(15, len(work))} — с максимальной вовлеченностью для {scope}. Если вовлеченность равна 0, дополнительными критериями выступают охват и аудитория."
         )
         view = (
             work.sort_values(["_engagement", "_reach", "_audience"], ascending=False)
