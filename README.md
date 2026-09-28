@@ -530,7 +530,8 @@ n8n не обрабатывает данные — он только доста�
   ретраи, возврат зависших задач;
 - `scripts/ingest_worker.py` — воркер, запускается по расписанию или вручную;
 - `src/ingest_admin_ui.py` — раздел **Автозагрузка** в интерфейсе;
-- `.github/workflows/ingest-worker.yml` — запуск воркера каждые 15 минут;
+- `.github/workflows/ingest-worker.yml` — запуск воркера вручную и по сигналу
+  из n8n (расписание каждые 15 минут выключено до подключения n8n);
 - `n8n/brand-analytics-email-ingest.json` — готовый workflow для импорта в n8n;
 - `n8n/docker-compose.yml` — self-hosted n8n;
 - `requirements-worker.txt` — зависимости воркера без Streamlit;
