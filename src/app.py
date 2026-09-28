@@ -435,6 +435,7 @@ def _section_sources(
             lambda period_id: cached_period_messages(project_id, [period_id]),
             list(tag_slice or []),
         ),
+        project_id=project_id,
     )
 
 

@@ -15,7 +15,7 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
-from messages_ui import render_message_list
+from messages_ui import open_messages_for_platform, render_message_list
 from metric_cards_ui import metric_card, render_metric_row
 from services.message_compute import message_link_column, message_text_column
 from services.metrics_compute import (
@@ -141,6 +141,7 @@ def render_sources_page(
     period_ids: list[str],
     *,
     load_period_messages: Callable[[str], pd.DataFrame] | None = None,
+    project_id: str | None = None,
 ) -> None:
     st.subheader("Источники и авторы")
     if not isinstance(messages, pd.DataFrame) or messages.empty:
@@ -208,7 +209,19 @@ def render_sources_page(
         position = _selected_row(event)
         if position is not None and position < len(shown):
             row = shown.iloc[position]
-            st.markdown(f"#### {row['label']}")
+            head, action = st.columns([3, 2], vertical_alignment="center")
+            with head:
+                st.markdown(f"#### {row['label']}")
+            with action:
+                # Здесь — 15 самых заметных сообщений; вся лента площадки с
+                # поиском, фильтрами и выгрузкой в Excel — в «Сообщениях».
+                if st.button(
+                    f"Все {format_int(int(row['messages']))} сообщ. в «Сообщениях»",
+                    key=f"open_platform_messages_{row['_key']}",
+                    width="stretch",
+                ):
+                    open_messages_for_platform(project_id, str(row["label"]))
+                    st.rerun()
             _render_messages(messages_of_source(messages, row["_key"]))
     with tab_authors:
         shown_authors = authors.head(TABLE_LIMIT)

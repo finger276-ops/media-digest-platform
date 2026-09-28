@@ -165,6 +165,8 @@ def describe_filters(
     event_title: str = "",
     tags: list[str] | None = None,
     match_all: bool = False,
+    platforms: list[str] | None = None,
+    tones: list[str] | None = None,
     types: list[str] | None = None,
     search: str = "",
     slice_tags: list[str] | None = None,
@@ -178,6 +180,10 @@ def describe_filters(
     if tags:
         joiner = " и " if match_all and len(tags) > 1 else ", "
         parts.append(("теги: " if len(tags) > 1 else "тег: ") + joiner.join(tags))
+    if platforms:
+        parts.append(("площадки: " if len(platforms) > 1 else "площадка: ") + ", ".join(platforms))
+    if tones:
+        parts.append("тональность: " + ", ".join(tone.lower() for tone in tones))
     if types:
         parts.append(("типы: " if len(types) > 1 else "тип: ") + ", ".join(types))
     if search.strip():

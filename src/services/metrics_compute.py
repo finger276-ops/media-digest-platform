@@ -113,6 +113,23 @@ def sentiment_masks(messages: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
     return positive, negative
 
 
+SENTIMENT_LABELS = ("Негатив", "Нейтрал", "Позитив")
+
+
+def sentiment_labels(messages: pd.DataFrame) -> pd.Series:
+    """Тональность каждого сообщения словом — по тем же маскам, что счётчики.
+
+    Негатив важнее позитива при грязной разметке (sentiment_masks); всё, что
+    не позитив и не негатив, — нейтрал.
+    """
+    if messages is None or messages.empty:
+        return pd.Series(dtype="object")
+    positive, negative = sentiment_masks(messages)
+    labels = pd.Series(SENTIMENT_LABELS[1], index=messages.index, dtype="object")
+    labels = labels.mask(positive.reindex(messages.index, fill_value=False).astype(bool), SENTIMENT_LABELS[2])
+    return labels.mask(negative.reindex(messages.index, fill_value=False).astype(bool), SENTIMENT_LABELS[0])
+
+
 def _row_markup(messages: pd.DataFrame) -> pd.Series:
     """Размечено ли каждое сообщение: непустая тональность или флаг негатива."""
     text = sentiment_text(messages).str.strip()

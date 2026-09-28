@@ -237,3 +237,26 @@ def messages_of_author(messages: pd.DataFrame, key: str) -> pd.DataFrame:
     if not isinstance(messages, pd.DataFrame) or messages.empty:
         return messages
     return messages[author_keys(messages) == str(key)]
+
+
+def platform_options(messages: pd.DataFrame) -> list[tuple[str, int]]:
+    """Площадки выборки и число сообщений — самые частые первыми, «Без площадки» в конце."""
+    if not isinstance(messages, pd.DataFrame) or messages.empty:
+        return []
+    labels = platform_labels(messages)
+    frame = pd.DataFrame({"label": labels.values, "key": labels.str.lower().values})
+    counts = frame.groupby("key").size()
+    names = frame.groupby("key")["label"].agg(lambda s: s.value_counts().index[0])
+    order = sorted(
+        counts.index,
+        key=lambda key: (names[key] == NO_SOURCE_LABEL, -int(counts[key]), names[key].lower()),
+    )
+    return [(str(names[key]), int(counts[key])) for key in order]
+
+
+def filter_messages_by_platform(messages: pd.DataFrame, platforms: list[str]) -> pd.DataFrame:
+    """Сообщения выбранных площадок (vk.com, telegram.org…). Пустой выбор — все."""
+    keys = {str(value).strip().lower() for value in platforms or [] if str(value).strip()}
+    if not keys or not isinstance(messages, pd.DataFrame) or messages.empty:
+        return messages
+    return messages[source_keys(messages).isin(keys).to_numpy()]

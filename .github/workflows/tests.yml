@@ -205,3 +205,6 @@ jobs:
 
       - name: Выгрузка отобранных сообщений в Excel
         run: python tests/test_message_export.py
+
+      - name: Фильтры площадки и тональности в «Сообщениях», переход из «Источников»
+        run: python tests/test_messages_platform_tone.py

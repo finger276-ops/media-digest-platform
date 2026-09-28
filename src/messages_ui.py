@@ -36,12 +36,17 @@ from services.message_compute import message_link_column, message_text_column
 from services.metrics_compute import (
     NO_METRIC_VALUE,
     PERIOD_METRIC_COLUMNS,
+    SENTIMENT_LABELS,
     format_int,
+    has_sentiment_markup,
     numeric_series,
     percent_text,
+    sentiment_labels,
 )
 from services.period_comparison import pp_delta
+from services.source_stats import filter_messages_by_platform, platform_options
 from services.story_recovery import is_residual_title
+from sidebar_ui import NAV_STATE_KEY
 from services.tag_compute import filter_messages_by_tags, normalize_tag_key, tag_options
 
 MATCH_ANY = "С любым из тегов"
@@ -153,6 +158,68 @@ def _tag_filter(work: pd.DataFrame, project_id: str | None) -> tuple[list[str], 
     return list(selected), match_all
 
 
+PLATFORM_FILTER_KEY = "messages_platform_filter_{}"
+TONE_FILTER_KEY = "messages_tone_filter_{}"
+
+
+def _platform_filter(work: pd.DataFrame, project_id: str | None) -> list[str]:
+    """Выбор площадок — доменов, как в «Источниках»: vk.com, telegram.org."""
+    options = platform_options(work)
+    if not options:
+        return []
+    counts = dict(options)
+    key = PLATFORM_FILTER_KEY.format(project_id or "global")
+    _keep_selection(key, list(counts), lambda value: str(value).strip().lower())
+    return list(
+        st.multiselect(
+            "Площадка",
+            list(counts),
+            key=key,
+            format_func=lambda value: f"{value} · {format_int(counts.get(value, 0))}",
+            placeholder="Все площадки",
+            help="Площадка — сайт или соцсеть, как в разделе «Источники». Число — сколько "
+            "сообщений с учётом тегов.",
+        )
+    )
+
+
+def _tone_filter(work: pd.DataFrame, project_id: str | None) -> list[str]:
+    """Выбор тональности; без разметки в выгрузке фильтра нет."""
+    labels = sentiment_labels(work)
+    counts = {label: int((labels == label).sum()) for label in SENTIMENT_LABELS}
+    key = TONE_FILTER_KEY.format(project_id or "global")
+    _keep_selection(key, list(counts), lambda value: str(value))
+    return list(
+        st.multiselect(
+            "Тональность",
+            list(counts),
+            key=key,
+            format_func=lambda value: f"{value} · {format_int(counts.get(value, 0))}",
+            placeholder="Любая тональность",
+        )
+    )
+
+
+def open_messages_for_platform(project_id: str | None, platform: str) -> None:
+    """Перейти из «Источников» в ленту площадки: только её сообщения, вся лента.
+
+    Прочие фильтры ленты сбрасываются — иначе оставшийся с прошлого раза тег
+    спрятал бы часть сообщений площадки, и число разошлось бы с «Источниками».
+    """
+    suffix = project_id or "global"
+    for key in (
+        f"messages_tag_filter_{suffix}",
+        f"messages_type_filter_{suffix}",
+        TONE_FILTER_KEY.format(suffix),
+        "full_feed_search",
+        "full_feed_page",
+    ):
+        st.session_state.pop(key, None)
+    st.session_state[PLATFORM_FILTER_KEY.format(suffix)] = [platform]
+    st.session_state["messages_block_mode"] = "Вся лента"
+    st.session_state[NAV_STATE_KEY] = "Сообщения"
+
+
 def _type_filter(work: pd.DataFrame, project_id: str | None) -> list[str]:
     """Выбор типов сообщения над лентой: пост, комментарий, репост."""
     options = message_type_counts(work)
@@ -237,11 +304,22 @@ def _tag_scope(tags: list[str], match_all: bool) -> str:
     return f"со всеми тегами {names}" if match_all else f"с любым из тегов {names}"
 
 
-def _feed_scope(event_filter, tags: list[str], match_all: bool, types: list[str]) -> str:
+def _feed_scope(
+    event_filter,
+    tags: list[str],
+    match_all: bool,
+    types: list[str],
+    platforms: list[str] | None = None,
+    tones: list[str] | None = None,
+) -> str:
     """Для чего показан топ: «всей выборки», «сообщений с тегом «Т» и с типом «Пост»»."""
-    if not tags and not types:
+    if not (tags or types or platforms or tones):
         return "выбранного инфоповода" if event_filter else "всей выборки"
     parts = [_tag_scope(tags, match_all)] if tags else []
+    if platforms:
+        parts.append(("на площадке " if len(platforms) == 1 else "на площадках ") + ", ".join(platforms))
+    if tones:
+        parts.append("с тональностью " + ", ".join(tone.lower() for tone in tones))
     if types:
         names = ", ".join(f"«{value}»" for value in types)
         parts.append(f"с типом {names}" if len(types) == 1 else f"с типами {names}")
@@ -327,10 +405,13 @@ def render_messages_block(
                 "По выбранному инфоповоду сообщения не найдены. Возможно, данные были пересобраны или связи инфоповодов изменились."
             )
             return
-    # Порядок отбора: инфоповод → теги → тип. Числа в списке типов и карточки
-    # считаются по сообщениям с выбранными тегами.
+    # Порядок отбора: инфоповод → теги → площадка → тональность → тип. Числа в
+    # списке каждого фильтра считаются по сообщениям, прошедшим предыдущие;
+    # карточки типов — по всему, кроме фильтра типа (он сужает саму ленту).
     has_types = bool(message_type_counts(work))
-    tag_col, type_col = st.columns([3, 2]) if has_types else (st.container(), None)
+    has_tone = has_sentiment_markup(work)
+    tag_col, platform_col = st.columns(2)
+    tone_col, type_col = st.columns(2) if (has_types or has_tone) else (None, None)
     with tag_col:
         selected_tags, match_all = _tag_filter(work, project_id)
     if selected_tags:
@@ -341,8 +422,21 @@ def render_messages_block(
                 f"или выберите «{MATCH_ANY}»."
             )
             return
+    with platform_col:
+        selected_platforms = _platform_filter(work, project_id)
+    if selected_platforms:
+        work = filter_messages_by_platform(work, selected_platforms)
+    selected_tones: list[str] = []
+    if has_tone and tone_col is not None:
+        with tone_col:
+            selected_tones = _tone_filter(work, project_id)
+        if selected_tones:
+            work = work[sentiment_labels(work).isin(selected_tones).to_numpy()]
+    if work.empty:
+        st.info("Сообщений с такими площадкой и тональностью нет. Уберите лишний фильтр.")
+        return
     selected_types: list[str] = []
-    if type_col is not None:
+    if has_types and type_col is not None:
         with type_col:
             selected_types = _type_filter(work, project_id)
     _render_message_types(work, selected_types)
@@ -364,7 +458,9 @@ def render_messages_block(
     search = ""
     if mode == "Ключевые сообщения":
         export_set = work
-        scope = _feed_scope(event_filter, selected_tags, match_all, selected_types)
+        scope = _feed_scope(
+            event_filter, selected_tags, match_all, selected_types, selected_platforms, selected_tones
+        )
         st.caption(
             f"Показано сообщений: {min(15, len(work))} — с максимальной вовлеченностью для {scope}. Если вовлеченность равна 0, дополнительными критериями выступают охват и аудитория."
         )
@@ -431,6 +527,8 @@ def render_messages_block(
                 event_title=str((event_filter or {}).get("title") or ""),
                 tags=selected_tags,
                 match_all=match_all,
+                platforms=selected_platforms,
+                tones=selected_tones,
                 types=selected_types,
                 search=search,
                 slice_tags=slice_tags,
