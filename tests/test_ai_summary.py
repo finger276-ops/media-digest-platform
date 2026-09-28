@@ -372,6 +372,34 @@ check(
     card,
 )
 
+print("7.5. Площадки и типы сообщений в карточке")
+typed = sample_messages().assign(
+    platform=["vk.com", "vk.com", "t.me", "vk.com", "telegram.org", ""],
+    message_link=[""] * 5 + ["https://otzovik.com/review/1"],
+    message_type=["Пост", "Комментарий", "Пост", "Пост", "Репост", "Пост"],
+)
+card_typed = build_data_card(project_name="ТЕХНОНИКОЛЬ", periods=periods, period_ids=["p1"], messages=typed,
+                             events_agg=events, include_excerpts=False)
+check("типы сообщений в карточке",
+      "Типы сообщений: пост — 4 (66,7%), комментарий — 1 (16,7%), репост — 1 (16,7%)." in card_typed, card_typed)
+check("площадки — домены с долей и негативом",
+      "- vk.com: 3 сообщ. (50,0%), негатив 2 (66,7%)" in card_typed
+      and "- telegram.org: 2 сообщ. (33,3%)" in card_typed and "- otzovik.com: 1 сообщ." in card_typed, card_typed)
+check("в блоке площадок нет названий сообществ", "Телеграм-канал" not in card_typed and "Пикабу" not in card_typed)
+check("без типа в выгрузке — так и сказано", "в выгрузке тип сообщения не указан" in card, card)
+unmarked_typed = typed.assign(sentiment="")
+card_unmarked = build_data_card(project_name="Т", periods=periods, period_ids=["p1"], messages=unmarked_typed,
+                                events_agg=events, include_excerpts=False)
+check("без разметки у площадок нет «негатив 0»", "- vk.com: 3 сообщ. (50,0%)\n" in card_unmarked + "\n"
+      and "vk.com: 3 сообщ. (50,0%), негатив" not in card_unmarked, card_unmarked)
+check("типы из метрик периода, если они посчитаны",
+      "Типы сообщений: пост — 10 (100,0%)." in build_data_card(
+          project_name="Т", periods=periods, period_ids=["p1"], messages=typed, events_agg=events,
+          metrics={"messages": 10, "sentiment": {}, "message_types": [("Пост", 10)]}, include_excerpts=False))
+check("задание саммари упоминает площадки и формат", "на каких площадках и в каком формате" in build_prompt(KIND_SUMMARY, "x"))
+check("задание рисков просит назвать площадку", "площадка, если негатив сосредоточен на одной" in build_prompt(KIND_RISKS, "x")
+      .replace("\n", " "))
+
 print("8. Выдержки: включаются явно, для рисков — только негатив")
 card_full = build_data_card(
     project_name="ТЕХНОНИКОЛЬ",

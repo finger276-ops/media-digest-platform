@@ -37,7 +37,9 @@ from .metrics_compute import (
     sentiment_masks,
     sentiment_unmarked,
 )
+from .message_kinds import message_type_counts
 from .period_comparison import daily_metrics_for_comparison
+from .source_stats import build_source_statistics
 from .report_highlights import event_title_column, top_report_events, top_report_tags
 
 KIND_SUMMARY = "summary"
@@ -57,6 +59,7 @@ EXCERPT_LIMIT = 24
 EXCERPT_CHARS = 400
 TOP_TAGS = 10
 TOP_EVENTS = 12
+TOP_SOURCES = 6
 
 SYSTEM_PROMPT = """Ты аналитик медиамониторинга. Пишешь по-русски, для \
 руководителя, который не читал выгрузку.
@@ -129,6 +132,39 @@ def _tags_block(messages: pd.DataFrame) -> str:
             piece += f", негатив {_fmt_int(row.get('Негатив', 0))}"
         lines.append(piece)
     return "Топ тегов:\n" + "\n".join(lines)
+
+
+def _message_types_block(messages: pd.DataFrame, metrics: dict[str, Any] | None) -> str:
+    """Посты, комментарии, репосты — по колонке «Тип сообщения» выгрузки."""
+    if isinstance(metrics, dict) and "message_types" in metrics:
+        types = [(str(label), int(count or 0)) for label, count in metrics.get("message_types") or []]
+    else:
+        types = message_type_counts(messages) if isinstance(messages, pd.DataFrame) else []
+    total = sum(count for _, count in types)
+    if not types or not total:
+        # Без этой строки модель додумала бы, что «обсуждение шло в комментариях».
+        return "Типы сообщений: в выгрузке тип сообщения не указан."
+    parts = [f"{label.lower()} — {_fmt_int(count)} ({_share(count, total)})" for label, count in types]
+    return "Типы сообщений: " + ", ".join(parts) + "."
+
+
+def _sources_block(messages: pd.DataFrame) -> str:
+    """Площадки — сайты и соцсети, как в разделе «Источники», без названий сообществ."""
+    if not isinstance(messages, pd.DataFrame) or messages.empty:
+        return ""
+    stats = build_source_statistics(messages)
+    if stats.empty:
+        return ""
+    total = int(len(messages))
+    # Без разметки «негатив 0» у каждой площадки — не измерение.
+    marked = has_sentiment_markup(messages)
+    lines = []
+    for _, row in stats.head(TOP_SOURCES).iterrows():
+        piece = f"- {row['label']}: {_fmt_int(row['messages'])} сообщ. ({_share(row['messages'], total)})"
+        if marked:
+            piece += f", негатив {_fmt_int(row['negative'])} ({_share(row['negative'], row['messages'])})"
+        lines.append(piece)
+    return "Площадки (сайты и соцсети):\n" + "\n".join(lines)
 
 
 def _events_block(events_agg: pd.DataFrame) -> str:
@@ -362,8 +398,10 @@ def build_data_card(
         f"Проект: {project_name}",
         f"Период: {_period_label(periods, period_ids)}",
         metrics_block(messages, metrics),
+        _message_types_block(messages, metrics),
         comparison_block(metrics),
         _tags_block(messages),
+        _sources_block(messages),
         _events_block(events_agg),
         _brand_metrics_block(brand_cards),
     ]
@@ -387,6 +425,8 @@ TASK_PROMPTS = {
 - как изменилась картина к предыдущему периоду, если динамика есть в карточке;
 - где сосредоточен негатив (если в карточке сказано, что разметки \
 тональности нет, — одной фразой скажи, что тональность не оценивалась);
+- на каких площадках и в каком формате (посты, комментарии, репосты) шло \
+обсуждение — если это есть в карточке и если это что-то говорит о периоде;
 - если в карточке есть блок «По дням внутри периода» — укажи конкретный \
 день пика (сообщений или негатива), это конкретнее, чем «негатив вырос»;
 - одно-два наблюдения, которые не видны из голых цифр.""",
@@ -404,7 +444,8 @@ TASK_PROMPTS = {
     KIND_RISKS: """Напиши блок рисков для клиента: сначала одно предложение с \
 общей оценкой, затем 3–5 пунктов списка.
 
-Каждый пункт: в чём риск, насколько он заметен по цифрам, что с ним делать. \
+Каждый пункт: в чём риск, насколько он заметен по цифрам, где он (площадка, \
+если негатив сосредоточен на одной), что с ним делать. \
 Формулировки конкретные, без «усилить коммуникацию» и «мониторить ситуацию».
 
 Если серьёзного негатива в периоде нет — так и напиши одним абзацем и не \
