@@ -22,6 +22,11 @@ from services.event_filter_state import (
 )
 from metric_cards_ui import DELTA_NEUTRAL, metric_card, render_metric_row
 from services.formatting import fmt_date
+from services.message_export import (
+    describe_filters,
+    messages_to_xlsx,
+    safe_messages_filename,
+)
 from services.message_kinds import (
     filter_messages_by_type,
     message_type_counts,
@@ -243,8 +248,39 @@ def _feed_scope(event_filter, tags: list[str], match_all: bool, types: list[str]
     return "сообщений " + " и ".join(parts) + (" в выбранном инфоповоде" if event_filter else "")
 
 
+def _render_excel_button(
+    export_set: pd.DataFrame,
+    *,
+    project_name: str,
+    period_label: str,
+    filters: list[str],
+    key: str,
+) -> None:
+    """Все отобранные сообщения — в Excel; файл собирается по нажатию."""
+    count = int(len(export_set))
+    st.download_button(
+        f"Скачать в Excel · {format_int(count)} сообщ.",
+        # Функция, а не байты: файл на тысячи строк собирается только по
+        # нажатию, а не на каждой перерисовке страницы.
+        data=lambda: messages_to_xlsx(
+            export_set, project_name=project_name, period_label=period_label, filters=filters
+        ),
+        file_name=safe_messages_filename(project_name or "project", period_label),
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key=key,
+        on_click="ignore",
+        help="Все сообщения, отобранные фильтрами, — не только эта страница. "
+        "На втором листе файла записано, какой отбор выгружен.",
+    )
+
+
 def render_messages_block(
-    messages: pd.DataFrame, *, project_id: str | None = None
+    messages: pd.DataFrame,
+    *,
+    project_id: str | None = None,
+    project_name: str = "",
+    period_label: str = "",
+    slice_tags: list[str] | None = None,
 ) -> None:
     """Render key messages and full feed as a readable list.
 
@@ -325,7 +361,9 @@ def render_messages_block(
         work, ["engagement", "Вовлечённость", "Вовлеченность", "engagement_count"]
     ).astype(int)
 
+    search = ""
     if mode == "Ключевые сообщения":
+        export_set = work
         scope = _feed_scope(event_filter, selected_tags, match_all, selected_types)
         st.caption(
             f"Показано сообщений: {min(15, len(work))} — с максимальной вовлеченностью для {scope}. Если вовлеченность равна 0, дополнительными критериями выступают охват и аудитория."
@@ -381,6 +419,22 @@ def render_messages_block(
             f"Найдено сообщений: {format_int(total_found)}. "
             f"Показано: {format_int(start + 1 if total_found else 0)}–{format_int(min(end, total_found))} из {format_int(total_found)}."
         )
+        export_set = view
         view = view.iloc[start:end].copy()
 
+    if not export_set.empty:
+        _render_excel_button(
+            export_set,
+            project_name=project_name,
+            period_label=period_label,
+            filters=describe_filters(
+                event_title=str((event_filter or {}).get("title") or ""),
+                tags=selected_tags,
+                match_all=match_all,
+                types=selected_types,
+                search=search,
+                slice_tags=slice_tags,
+            ),
+            key=f"messages_excel_{project_id or 'global'}",
+        )
     render_message_list(view, text_col=text_col, link_col=link_col)

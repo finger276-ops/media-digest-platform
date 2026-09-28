@@ -95,7 +95,7 @@ BRANDING = {
 print("1. Вспомогательные функции экспорта")
 check(
     "safe_export_filename убирает недопустимые символы",
-    safe_export_filename("ТЕХНОНИКОЛЬ/тест", "24.04–30.04", "docx").endswith(".docx"),
+    safe_export_filename("ТЕХНОНИКОЛЬ/тест", "24.04–30.04", "docx") == "summary_TEKHNONIKOL_test_24.04_30.04.docx",
 )
 check(
     "first_existing_col находит первую существующую колонку",

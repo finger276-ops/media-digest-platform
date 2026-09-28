@@ -20,6 +20,7 @@ from typing import Any
 import pandas as pd
 
 from .chart_style import SENTIMENT_COLOR_RANGE
+from .formatting import ascii_filename
 from .dashboard_config import (
     DEFAULT_REPORT_SECTIONS,
     REPORT_SECTION_OPTIONS,
@@ -81,9 +82,8 @@ def _classify_summary_line(raw: str) -> tuple[str, str]:
 
 
 def safe_export_filename(project_name: str, period_label: str, ext: str) -> str:
-    raw = f"summary_{project_name}_{period_label}"
-    safe = re.sub(r"[^0-9A-Za-zА-Яа-я_.-]+", "_", raw, flags=re.UNICODE).strip("_")
-    return f"{safe[:140] or 'summary'}.{ext}"
+    """Имя файла отчёта латиницей — кириллическое браузер сохранял как «download»."""
+    return ascii_filename("summary", project_name, period_label, ext=ext, fallback="summary")
 
 
 def export_top_tags(

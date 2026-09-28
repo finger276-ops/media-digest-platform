@@ -202,3 +202,6 @@ jobs:
 
       - name: Срез по тегам для всего дашборда
         run: python tests/test_tag_slice.py
+
+      - name: Выгрузка отобранных сообщений в Excel
+        run: python tests/test_message_export.py

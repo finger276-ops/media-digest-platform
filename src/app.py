@@ -403,8 +403,20 @@ def _section_tags(
 
 
 @_as_fragment
-def _section_messages(messages: pd.DataFrame, project_id: str) -> None:
-    render_messages_block(messages, project_id=project_id)
+def _section_messages(
+    messages: pd.DataFrame,
+    project_id: str,
+    project_name: str = "",
+    period_label: str = "",
+    tag_slice: list[str] | None = None,
+) -> None:
+    render_messages_block(
+        messages,
+        project_id=project_id,
+        project_name=project_name,
+        period_label=period_label,
+        slice_tags=tag_slice,
+    )
 
 
 @_as_fragment
@@ -1085,7 +1097,9 @@ def _main() -> None:
                 enriched_messages, periods, selected_period_ids, project_id, tag_slice
             )
         elif page == "Сообщения":
-            _section_messages(enriched_messages, project_id)
+            _section_messages(
+                enriched_messages, project_id, project_name, period_label, tag_slice
+            )
         elif page == "Динамика":
             # Гейт раньше был по числу периодов (нужно 2+), но динамика теперь
             # в первую очередь по дням: одного периода на неделю хватает, если

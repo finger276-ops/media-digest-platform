@@ -120,3 +120,37 @@ def source_system_title(value: Any) -> str:
 def status_title(value: Any) -> str:
     code = str(value or "").strip() or "active"
     return STATUS_TITLES.get(code.lower(), code)
+
+
+# Транслитерация для имён скачиваемых файлов. Кириллическое имя браузер
+# получает в заголовке как filename*=utf-8''…, и кнопка скачивания Streamlit
+# такое имя не подхватывает: файл «ТЕХНОНИКОЛЬ_апрель.docx» сохранялся как
+# «download» без расширения. Латиница доходит как есть.
+_TRANSLIT = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e", "ж": "zh",
+    "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m", "н": "n", "о": "o",
+    "п": "p", "р": "r", "с": "s", "т": "t", "у": "u", "ф": "f", "х": "kh", "ц": "ts",
+    "ч": "ch", "ш": "sh", "щ": "shch", "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu",
+    "я": "ya",
+}
+
+
+def ascii_filename(*parts: Any, ext: str, fallback: str = "file") -> str:
+    """Имя файла латиницей: «Кнауф», «01.04–07.04» → «Knauf_01.04_07.04.docx»."""
+    raw = "_".join(str(part) for part in parts if str(part or "").strip())
+    latin = []
+    for index, char in enumerate(raw):
+        lower = char.lower()
+        if lower not in _TRANSLIT:
+            latin.append(char)
+            continue
+        mapped = _TRANSLIT[lower]
+        if char == lower:
+            latin.append(mapped)
+            continue
+        # Слово заглавными («ТЕХНОНИКОЛЬ») — «TEKHNONIKOL», а не «TEKhNONIKOL».
+        neighbours = raw[max(0, index - 1) : index] + raw[index + 1 : index + 2]
+        caps_word = any(n.isalpha() and n.isupper() for n in neighbours)
+        latin.append(mapped.upper() if caps_word else mapped.capitalize())
+    safe = re.sub(r"[^0-9A-Za-z_.-]+", "_", "".join(latin)).strip("_.")
+    return f"{safe[:140] or fallback}.{ext}"
