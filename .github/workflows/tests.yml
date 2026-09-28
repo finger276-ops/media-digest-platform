@@ -211,3 +211,6 @@ jobs:
 
       - name: Топ площадок в отчёте (Word, PDF, PNG, PowerPoint)
         run: python tests/test_report_sources.py
+
+      - name: Тексты ИИ по срезу (генерация, ключи хранения, саммари среза)
+        run: python tests/test_ai_slice.py

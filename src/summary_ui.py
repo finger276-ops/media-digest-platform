@@ -14,6 +14,7 @@ from ai_summary_ui import render_ai_summary_panel
 from client_insights_ui import build_client_insights_summary
 from report_export_ui import render_summary_export_buttons
 from services.ai_summary import comparison_block, metrics_block
+from services.ai_summary import summary_storage_key as services_summary_storage_key
 from services.cached_store import (
     ManualEditConflict,
     clear_platform_caches,
@@ -32,7 +33,7 @@ from services.period_comparison import selected_period_label
 from services.project_settings import DEMO_MESSAGE
 from services.report_highlights import event_title_column, top_report_events
 from services.roles import role_rank
-from tag_slice_ui import slice_title
+from tag_slice_ui import slice_scope, slice_title
 
 
 def _as_subheading(block: str) -> str:
@@ -141,11 +142,8 @@ def build_auto_summary(
     return "\n\n".join(block for block in blocks if block)
 
 
-def summary_storage_key(period_ids: list[str], profile: str = "") -> str:
-    return (
-        "summary::"
-        + "__".join(sorted(str(x) for x in (period_ids or []) if str(x).strip()))
-    )
+def summary_storage_key(period_ids: list[str], profile: str = "", scope: str = "") -> str:
+    return services_summary_storage_key(period_ids, scope)
 
 
 def render_period_summary(
@@ -168,14 +166,14 @@ def render_period_summary(
 ) -> None:
     """Unified editable/exportable period summary for all project profiles.
 
-    tag_slice — срез по тегам (tag_slice_ui). Сохранённое саммари и тексты ИИ
-    написаны по всему периоду, поэтому при срезе показывается автоматическое
-    саммари по сообщениям среза, а правка и генерация ИИ скрыты: сохранить
-    текст среза под ключом периода значило бы затереть саммари всего периода.
+    tag_slice — срез по тегам (tag_slice_ui). У среза своё саммари и свои
+    тексты ИИ (ключ хранения со срезом): саммари всего периода при срезе не
+    показывается и не затирается.
     """
     st.subheader("Саммари периода")
-    key = summary_storage_key(period_ids, profile)
-    manual = None if tag_slice else get_manual(project_id, key)
+    scope = slice_scope(tag_slice)
+    key = summary_storage_key(period_ids, profile, scope)
+    manual = get_manual(project_id, key)
     auto_summary = build_auto_summary(
         messages,
         events_agg,
@@ -190,26 +188,28 @@ def render_period_summary(
         st.caption("Текст подготовлен с помощью ИИ.")
     if tag_slice:
         st.caption(
-            f"Срез по тегам ({slice_title(tag_slice)}): саммари собрано автоматически по "
-            "сообщениям среза. Сохранённое саммари периода и тексты ИИ написаны по всем "
-            "сообщениям — чтобы их увидеть или изменить, сбросьте срез."
+            f"Саммари среза ({slice_title(tag_slice)}) — своё, отдельно от саммари всего "
+            "периода: его можно написать, поправить или сгенерировать ИИ, саммари периода "
+            "при этом не меняется."
+            + ("" if manual else " Пока его нет, оно собрано автоматически по сообщениям среза.")
         )
-    else:
-        # По умолчанию генерация доступна только владельцу платформы: она тратит
-        # деньги и отправляет данные проекта внешнему сервису. Владелец может
-        # открыть её редакторам конкретного проекта — настройка внутри панели.
-        render_ai_summary_panel(
-            project_id,
-            project_name,
-            period_ids,
-            messages,
-            events_agg,
-            periods,
-            role=role,
-            metrics=metrics,
-            project_settings=project_settings,
-            client_preview=client_preview,
-        )
+    # По умолчанию генерация доступна только владельцу платформы: она тратит
+    # деньги и отправляет данные проекта внешнему сервису. Владелец может
+    # открыть её редакторам конкретного проекта — настройка внутри панели.
+    render_ai_summary_panel(
+        project_id,
+        project_name,
+        period_ids,
+        messages,
+        events_agg,
+        periods,
+        role=role,
+        metrics=metrics,
+        project_settings=project_settings,
+        client_preview=client_preview,
+        scope=scope,
+        slice_label=slice_title(tag_slice),
+    )
 
     metrics = metrics or overview_metrics(messages)
     metrics.setdefault("period_label", selected_period_label(periods, period_ids))
@@ -242,8 +242,11 @@ def render_period_summary(
             read_only=read_only,
         )
 
-    if role_rank(role) >= role_rank("editor") and not tag_slice:
-        with st.expander("Редактировать саммари", expanded=False):
+    if role_rank(role) >= role_rank("editor"):
+        with st.expander(
+            "Редактировать саммари среза" if tag_slice else "Редактировать саммари",
+            expanded=False,
+        ):
             # Версия замораживается при первом показе поля: пока редактор
             # пишет, кеш с TTL может подтянуть чужую правку, и сохранение
             # затёрло бы её без предупреждения.

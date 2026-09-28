@@ -13,10 +13,11 @@
 - инфоповоды без сообщений среза остаются -> «в инфоповодах нет чужого
   бренда» и «инфоповод без сообщений в выборке уходит» краснеют;
 - «Индексы бренда» получают срез -> «индексы бренда — без среза» краснеет;
-- отчёт при срезе показывает сохранённое саммари периода -> «отчёт: саммари
-  по срезу, а не сохранённое» краснеет;
-- правка саммари при срезе не скрыта -> «при срезе правки саммари нет»
-  краснеет;
+- отчёт при срезе показывает саммари периода -> «отчёт: саммари среза, а
+  не сохранённое саммари периода» краснеет;
+- ключ саммари без среза -> «саммари всего периода не затёрто» краснеет;
+- риски в «Обзоре» без среза в ключе -> «в «Обзоре» при срезе — риски
+  среза» краснеет;
 - выбор среза не сверяется с новой выборкой -> «тег того же написания
   остаётся в срезе после смены периода» краснеет.
 """
@@ -204,19 +205,46 @@ check("индексы бренда — без среза", bool(plain_brand) and
       f"{plain_brand} / {sliced_brand}")
 check("подпись, что срез к индексам не применён", any(BRAND_INDEX_NOTE in str(c.value) for c in at.caption))
 
-print("4. Отчёт со срезом")
+print("4. Отчёт со срезом: своё саммари и свои риски")
+SLICE_SUMMARY_KEY = f"summary::{P2}::tags=технониколь"
 at = open_page("Отчёт", slice_tags=["Технониколь"])
 check("Отчёт открылся", not at.exception, str(at.exception))
 texts = " ".join(str(m.value) for m in at.markdown)
-check("отчёт: саммари по срезу, а не сохранённое", "Сохранённое саммари всего периода" not in texts
-      and any("Срез по тегам (тег: Технониколь)" in str(c.value) for c in at.caption),
-      str([str(c.value) for c in at.caption if "Срез" in str(c.value)]))
-check("при срезе правки саммари нет", "Редактировать саммари" not in [str(e.label) for e in at.expander],
+check("отчёт: саммари среза, а не сохранённое саммари периода", "Сохранённое саммари всего периода" not in texts
+      and any("Саммари среза (тег: Технониколь)" in str(c.value) for c in at.caption),
+      str([str(c.value) for c in at.caption if "Саммари" in str(c.value)]))
+check("при срезе правится саммари среза", "Редактировать саммари среза" in [str(e.label) for e in at.expander],
       str([str(e.label) for e in at.expander]))
+area = next((t for t in at.text_area if str(t.label) == "Текст саммари"), None)
+area.input("Технониколь: протечки кровли — главная тема.").run()
+next(b for b in at.button if str(b.label) == "Сохранить саммари").click().run()
+saved = {row["row_key"]: row["payload"] for row in CLIENT.db["platform_manual_rows"]}
+check("саммари среза сохранено под ключом среза",
+      saved.get(SLICE_SUMMARY_KEY, {}).get("summary") == "Технониколь: протечки кровли — главная тема.",
+      str([k for k in saved if k.startswith("summary::")]))
+check("саммари всего периода не затёрто",
+      saved.get(f"summary::{P2}", {}).get("summary") == "Сохранённое саммари всего периода.")
+at = open_page("Отчёт", slice_tags=["Технониколь"])
+check("срез снова открыт — его саммари на месте",
+      "Технониколь: протечки кровли — главная тема." in " ".join(str(m.value) for m in at.markdown))
 at = open_page("Отчёт")
-check("без среза — сохранённое саммари и правка на месте",
+check("без среза — сохранённое саммари периода и правка на месте",
       "Сохранённое саммари всего периода" in " ".join(str(m.value) for m in at.markdown)
       and "Редактировать саммари" in [str(e.label) for e in at.expander])
+at = open_page("Отчёт", slice_tags=["Кнауф"])
+check("у другого среза — своё саммари, не чужое",
+      "Технониколь: протечки кровли" not in " ".join(str(m.value) for m in at.markdown))
+
+store.save_manual(PROJECT, "ai_texts", f"ai_text::risks::{P2}::tags=технониколь",
+                  {"text": "Риски Технониколь.", "kind": "risks"})
+at = open_page("Обзор", slice_tags=["Технониколь"])
+marks = " ".join(str(m.value) for m in at.markdown)
+check("в «Обзоре» при срезе — риски среза", "Риски среза (тег: Технониколь)" in marks
+      and "Риски Технониколь." in marks and "Риски всего периода." not in marks, marks[:300])
+at = open_page("Обзор", slice_tags=["Кнауф"])
+marks = " ".join(str(m.value) for m in at.markdown)
+check("нет рисков среза — риски периода с подписью", "без среза" in marks and "Риски всего периода." in marks
+      and "Риски Технониколь." not in marks, marks[:300])
 
 print("5. Смена периода")
 at = open_page("Обзор", slice_tags=["ТЕХНОНИКОЛЬ", "Кровля"], periods=(P1,))

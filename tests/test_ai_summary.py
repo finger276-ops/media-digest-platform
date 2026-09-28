@@ -400,6 +400,13 @@ check("задание саммари упоминает площадки и фо
 check("задание рисков просит назвать площадку", "площадка, если негатив сосредоточен на одной" in build_prompt(KIND_RISKS, "x")
       .replace("\n", " "))
 
+check("срез назван в карточке", "Срез: только сообщения с тегами (тег: Технониколь)." in build_data_card(
+    project_name="Т", periods=periods, period_ids=["p1"], messages=typed, events_agg=events,
+    include_excerpts=False, slice_label="тег: Технониколь"))
+check("без среза — строки о срезе нет", "Срез:" not in card_typed)
+check("у среза свой ключ текста ИИ", ai_text_storage_key(KIND_SUMMARY, ["p1"], "tags=технониколь")
+      == "ai_text::summary::p1::tags=технониколь" != ai_text_storage_key(KIND_SUMMARY, ["p1"]))
+
 print("8. Выдержки: включаются явно, для рисков — только негатив")
 card_full = build_data_card(
     project_name="ТЕХНОНИКОЛЬ",

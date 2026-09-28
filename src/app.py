@@ -105,6 +105,7 @@ from tag_slice_ui import (
     apply_slice,
     render_tag_slice,
     slice_keys,
+    slice_scope,
     slice_title,
     sliced_loader,
 )
@@ -1036,18 +1037,28 @@ def _main() -> None:
     # роутер ради границы отказа.
     def _render_selected_section() -> None:
         if page == "Обзор":
-            # Текст ИИ написан по всему периоду — при срезе это названо прямо.
-            render_saved_ai_text(
+            # При срезе — риски среза, если их написали; иначе риски всего
+            # периода с прямой подписью, что они не по срезу.
+            shown_slice_risks = bool(tag_slice) and render_saved_ai_text(
                 project_id,
                 AI_KIND_RISKS,
                 selected_period_ids,
-                heading=(
-                    "Риски периода — по всем сообщениям, без среза по тегам"
-                    if tag_slice
-                    else "Риски периода"
-                ),
+                heading=f"Риски среза ({slice_title(tag_slice)})",
                 show_model=is_admin and not client_preview,
+                scope=slice_scope(tag_slice),
             )
+            if not shown_slice_risks:
+                render_saved_ai_text(
+                    project_id,
+                    AI_KIND_RISKS,
+                    selected_period_ids,
+                    heading=(
+                        "Риски периода — по всем сообщениям, без среза по тегам"
+                        if tag_slice
+                        else "Риски периода"
+                    ),
+                    show_model=is_admin and not client_preview,
+                )
             render_client_insights(
                 enriched_messages,
                 events_agg,

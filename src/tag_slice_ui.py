@@ -8,8 +8,8 @@
 целым периодом.
 
 Не режутся «Индексы бренда»: доля голоса внутри одного бренда всегда 100 %.
-Сохранённые саммари и тексты ИИ написаны по всему периоду — при срезе отчёт
-собирает саммари по сообщениям среза, а правка сохранённого отключается.
+У среза свои саммари и тексты ИИ (slice_scope в ключе хранения): их пишут и
+правят при включённом срезе, а тексты всего периода остаются нетронутыми.
 """
 
 from __future__ import annotations
@@ -65,6 +65,12 @@ def render_tag_slice(messages: pd.DataFrame, project_id: str) -> list[str]:
 def slice_keys(tags: list[str]) -> tuple[str, ...]:
     """Ключ среза для кешей: без регистра и порядка."""
     return tuple(sorted({normalize_tag_key(tag) for tag in tags or [] if normalize_tag_key(tag)}))
+
+
+def slice_scope(tags: list[str] | None) -> str:
+    """Срез в ключе хранения саммари и текстов ИИ: «tags=технониколь»; без среза — ""."""
+    keys = slice_keys(list(tags or []))
+    return f"tags={'|'.join(keys)}" if keys else ""
 
 
 def slice_title(tags: list[str]) -> str:

@@ -392,11 +392,22 @@ def build_data_card(
     brand_cards: dict[str, dict[str, Any]] | None = None,
     include_excerpts: bool = True,
     negative_excerpts: bool = False,
+    slice_label: str = "",
 ) -> str:
-    """Собрать компактную карточку данных периода для модели."""
+    """Собрать компактную карточку данных периода для модели.
+
+    slice_label — срез по тегам («тег: Технониколь»): без этой строки модель
+    писала бы о «периоде бренда», хотя видит только сообщения одного тега.
+    """
     blocks = [
         f"Проект: {project_name}",
         f"Период: {_period_label(periods, period_ids)}",
+        (
+            f"Срез: только сообщения с тегами ({slice_label}). Все цифры ниже — по ним; "
+            "остальные сообщения периода сюда не входят."
+            if slice_label
+            else ""
+        ),
         metrics_block(messages, metrics),
         _message_types_block(messages, metrics),
         comparison_block(metrics),
@@ -526,7 +537,20 @@ def can_generate_ai(
     return str(role or "").strip().lower() in {"editor", "owner"}
 
 
-def ai_text_storage_key(kind: str, period_ids: list[str]) -> str:
-    """Ключ ручной записи: свой текст на каждый набор периодов."""
-    periods = "__".join(sorted(str(x) for x in (period_ids or []) if str(x).strip()))
-    return f"ai_text::{kind}::{periods}"
+def _periods_part(period_ids: list[str]) -> str:
+    return "__".join(sorted(str(x) for x in (period_ids or []) if str(x).strip()))
+
+
+def _scope_part(scope: str) -> str:
+    """Срез по тегам в ключе: у каждого среза свой текст, текст периода не затирается."""
+    return f"::{scope}" if scope else ""
+
+
+def ai_text_storage_key(kind: str, period_ids: list[str], scope: str = "") -> str:
+    """Ключ ручной записи: свой текст на каждый набор периодов и срез."""
+    return f"ai_text::{kind}::{_periods_part(period_ids)}{_scope_part(scope)}"
+
+
+def summary_storage_key(period_ids: list[str], scope: str = "") -> str:
+    """Ключ саммари периода (или среза) — его видит клиент и берут выгрузки."""
+    return f"summary::{_periods_part(period_ids)}{_scope_part(scope)}"

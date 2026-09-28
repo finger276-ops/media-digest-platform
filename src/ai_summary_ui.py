@@ -39,6 +39,7 @@ from services.ai_summary import (
     KIND_TITLES,
     ai_access_level,
     ai_text_storage_key,
+    summary_storage_key,
     build_data_card,
     can_generate_ai,
     generate_text,
@@ -205,12 +206,17 @@ def _render_access_control(
         st.rerun()
 
 
+def _draft_key(kind: str, project_id: str, scope: str = "") -> str:
+    """Черновик модели — свой у периода и у каждого среза по тегам."""
+    return f"ai_draft_{kind}_{project_id}" + (f"::{scope}" if scope else "")
+
+
 def load_ai_text(
-    project_id: str, kind: str, period_ids: list[str]
+    project_id: str, kind: str, period_ids: list[str], scope: str = ""
 ) -> dict[str, Any] | None:
-    """Сохранённый текст модели для этого набора периодов."""
+    """Сохранённый текст модели для этого набора периодов (и среза)."""
     try:
-        payload = get_manual(project_id, ai_text_storage_key(kind, period_ids))
+        payload = get_manual(project_id, ai_text_storage_key(kind, period_ids, scope))
     except Exception:  # noqa: BLE001 - без текста раздел работает как раньше
         return None
     if isinstance(payload, dict) and str(payload.get("text") or "").strip():
@@ -225,6 +231,7 @@ def render_saved_ai_text(
     *,
     heading: str = "",
     show_model: bool = False,
+    scope: str = "",
 ) -> bool:
     """Показать сохранённый текст модели в профильном разделе.
 
@@ -233,7 +240,7 @@ def render_saved_ai_text(
     владельца платформы: заказчику «yandex · yandexgpt/latest» ничего не
     говорит.
     """
-    payload = load_ai_text(project_id, kind, period_ids)
+    payload = load_ai_text(project_id, kind, period_ids, scope)
     if not payload:
         return False
     with st.container(border=True):
@@ -298,8 +305,14 @@ def render_ai_summary_panel(
     metrics: dict[str, Any] | None = None,
     project_settings: dict[str, Any] | None = None,
     client_preview: bool = False,
+    scope: str = "",
+    slice_label: str = "",
 ) -> None:
-    """Блок «Тексты от ИИ» в разделе «Отчёт»."""
+    """Блок «Тексты от ИИ» в разделе «Отчёт».
+
+    scope / slice_label — срез по тегам: тексты пишутся по сообщениям среза и
+    хранятся отдельно от текстов всего периода.
+    """
     # В предпросмотре клиентского вида владелец смотрит на проект глазами
     # заказчика, а заказчик генерацию не видит никогда. Признак владельца здесь
     # живёт отдельно от роли (session_state), поэтому понижения роли мало.
@@ -409,6 +422,7 @@ def render_ai_summary_panel(
             metrics=metrics,
             brand_cards=brand_cards,
             include_excerpts=include_excerpts,
+            slice_label=slice_label,
         )
         preview_card = build_data_card(**base_args)
 
@@ -431,8 +445,16 @@ def render_ai_summary_panel(
         # любым кодом мог заменить подготовленный владельцем текст витрины
         # или удалить блок рисков, и это увидел бы каждый следующий гость.
         can_write = owner or not demo
-        columns = st.columns(3)
-        kinds = [KIND_SUMMARY, KIND_BRAND, KIND_RISKS]
+        # Индексы бренда считаются без среза (доля голоса внутри одного бренда
+        # — всегда 100 %), поэтому и комментарий к ним — только по периоду.
+        kinds = [KIND_SUMMARY, KIND_RISKS] if scope else [KIND_SUMMARY, KIND_BRAND, KIND_RISKS]
+        if scope:
+            st.caption(
+                f"Срез по тегам ({slice_label}): саммари и риски пишутся по сообщениям среза "
+                "и хранятся отдельно от текстов всего периода. Комментарий к индексам "
+                "бренда — без среза."
+            )
+        columns = st.columns(len(kinds))
         for column, kind in zip(columns, kinds):
             with column:
                 if st.button(
@@ -468,6 +490,7 @@ def render_ai_summary_panel(
                             extra,
                             config,
                             can_write=can_write,
+                            scope=scope,
                         )
                         if demo_spend == DEMO_SPENT:
                             # Остаток в шапке и в панели нарисован до клика. Без
@@ -479,7 +502,9 @@ def render_ai_summary_panel(
 
         _show_generation_notice(project_id)
         for kind in kinds:
-            _render_generated_block(project_id, kind, period_ids, can_write=can_write)
+            _render_generated_block(
+                project_id, kind, period_ids, can_write=can_write, scope=scope
+            )
 
 
 RERUN_AFTER_RENDER_KEY = "_rerun_after_render"
@@ -562,6 +587,7 @@ def _run_generation(
     config: Any,
     *,
     can_write: bool = True,
+    scope: str = "",
 ) -> None:
     args = dict(base_args)
     if kind == KIND_RISKS:
@@ -580,7 +606,7 @@ def _run_generation(
                 "detail": exc.detail,
             }
             return
-    st.session_state[f"ai_draft_{kind}_{project_id}"] = result
+    st.session_state[_draft_key(kind, project_id, scope)] = result
     # Гостю демо-проекта сохранять нечем (кнопки записи у него нет, см.
     # _render_generated_block): просить его сохранить значило бы дать
     # указание, которое рядом же запрещено.
@@ -596,18 +622,26 @@ def _run_generation(
 
 
 def _render_generated_block(
-    project_id: str, kind: str, period_ids: list[str], *, can_write: bool = True
+    project_id: str,
+    kind: str,
+    period_ids: list[str],
+    *,
+    can_write: bool = True,
+    scope: str = "",
 ) -> None:
-    draft = st.session_state.get(f"ai_draft_{kind}_{project_id}")
-    saved = load_ai_text(project_id, kind, period_ids)
+    draft_key = _draft_key(kind, project_id, scope)
+    draft = st.session_state.get(draft_key)
+    saved = load_ai_text(project_id, kind, period_ids, scope)
     if not draft and not saved:
         return
 
     st.divider()
     st.markdown(f"**{KIND_TITLES[kind]}**")
     current = str((draft or saved or {}).get("text") or "")
-    storage_key = ai_text_storage_key(kind, period_ids)
-    widget_key = f"ai_text_{kind}_{project_id}"
+    storage_key = ai_text_storage_key(kind, period_ids, scope)
+    # Поле — своё у каждого среза: иначе текст одного бренда переехал бы в
+    # поле другого и сохранился бы под его ключом.
+    widget_key = f"ai_text_{kind}_{project_id}" + (f"::{scope}" if scope else "")
     # Версия замораживается при первом показе поля: пока редактор правит
     # текст, кеш с TTL может подтянуть чужое сохранение, и запись затёрла бы
     # его без предупреждения.
@@ -635,7 +669,7 @@ def _render_generated_block(
             "Сохранить", key=f"ai_save_{kind}_{project_id}", width="stretch"
         ):
             payload = dict(draft or saved or {})
-            payload.update({"text": edited, "kind": kind, "period_ids": period_ids})
+            payload.update({"text": edited, "kind": kind, "period_ids": period_ids, "scope": scope})
             try:
                 save_manual(
                     project_id,
@@ -654,29 +688,27 @@ def _render_generated_block(
                 st.session_state.pop(versions_key, None)
             else:
                 st.session_state.pop(versions_key, None)
-                st.session_state.pop(f"ai_draft_{kind}_{project_id}", None)
+                st.session_state.pop(draft_key, None)
                 st.success("Сохранено. Текст виден в своём разделе дашборда.")
                 st.rerun()
     with columns[1]:
+        target = "среза" if scope else "периода"
         if can_write and kind == KIND_SUMMARY and st.button(
-            "Сделать саммари периода",
+            f"Сделать саммари {target}",
             key=f"ai_promote_{kind}_{project_id}",
             width="stretch",
             help=(
-                "Заменить текст саммари периода этим. Он попадёт в Word, PDF и "
+                f"Заменить текст саммари {target} этим. Он попадёт в Word, PDF и "
                 "PNG-выгрузки и будет виден клиенту."
             ),
         ):
-            periods_key = "summary::" + "__".join(
-                sorted(str(x) for x in period_ids if str(x).strip())
-            )
             save_manual(
                 project_id,
                 "summaries",
-                periods_key,
-                {"summary": edited, "period_ids": period_ids, "source": "ai"},
+                summary_storage_key(period_ids, scope),
+                {"summary": edited, "period_ids": period_ids, "source": "ai", "scope": scope},
             )
-            st.success("Саммари периода заменено.")
+            st.success(f"Саммари {target} заменено.")
             st.rerun()
     with columns[2]:
         if can_write and saved and st.button(
@@ -684,8 +716,8 @@ def _render_generated_block(
             key=f"ai_delete_{kind}_{project_id}",
             width="stretch",
         ):
-            delete_manual(project_id, ai_text_storage_key(kind, period_ids))
-            st.session_state.pop(f"ai_draft_{kind}_{project_id}", None)
+            delete_manual(project_id, ai_text_storage_key(kind, period_ids, scope))
+            st.session_state.pop(draft_key, None)
             st.rerun()
 
     if draft:
