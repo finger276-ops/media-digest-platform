@@ -54,6 +54,7 @@ from tag_slice_ui import (
 from overview_ui import render_period_comparison_metrics
 from reviews_ui import render_reviews
 from ab_compare_ui import render_ab_comparison
+from audience_ui import render_audience_page
 from client_insights_ui import render_client_insights
 from project_admin_ui import render_project_access, render_project_manager
 from session_presence_ui import render_presence_heartbeat
@@ -594,6 +595,8 @@ def _main() -> None:
             _section_sources(
                 enriched_messages, periods, selected_period_ids, project_id, tag_slice
             )
+        elif page == "Аудитория":
+            render_audience_page(enriched_messages)
         elif page == "Сообщения":
             _section_messages(
                 enriched_messages, project_id, project_name, period_label, tag_slice

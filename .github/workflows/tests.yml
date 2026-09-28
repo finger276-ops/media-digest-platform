@@ -220,3 +220,6 @@ jobs:
 
       - name: Сохранённые виды (срез и фильтры под именем, ссылка)
         run: python tests/test_saved_views.py
+
+      - name: Раздел «Аудитория» (пол, возраст, география авторов; отчёт; ИИ)
+        run: python tests/test_audience.py

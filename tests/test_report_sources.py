@@ -199,8 +199,9 @@ from services.project_settings import (  # noqa: E402
 )
 
 LEGACY = {"report_sections": ["metrics", "sentiment", "highlights"]}
+# Новые разделы («Топ площадок», затем «Аудитория») встают на своё место в порядке конструктора.
 check("набор, сохранённый до «Топ площадок», получает его сам",
-      report_sections_from_project_settings(LEGACY) == ["metrics", "sentiment", "top_sources", "highlights"],
+      report_sections_from_project_settings(LEGACY) == ["metrics", "sentiment", "top_sources", "audience", "highlights"],
       str(report_sections_from_project_settings(LEGACY)))
 saved_now = report_sections_setting(["metrics", "highlights"])
 check("при сохранении запоминается, какие разделы были в конструкторе",

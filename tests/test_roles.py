@@ -192,7 +192,7 @@ print("1. Зритель: аналитика видна, работа с дан�
 viewer = open_as("viewer")
 check("приложение открылось", not viewer.exception, str(viewer.exception))
 viewer_side = sidebar_buttons(viewer)
-for section in ["Обзор", "Индексы бренда", "Теги", "Инфоповоды", "Отзывы", "Источники", "Сообщения", "Динамика", "Отчёт"]:
+for section in ["Обзор", "Индексы бренда", "Теги", "Инфоповоды", "Отзывы", "Источники", "Аудитория", "Сообщения", "Динамика", "Отчёт"]:
     check(f"зрителю доступен раздел «{section}»", section in viewer_side, str(viewer_side))
 for closed in ["Загрузка файла", "История периодов", "Автозагрузка", "Проекты", "Сессии"]:
     check(f"зрителю НЕ показан «{closed}»", closed not in viewer_side, str(viewer_side))

@@ -30,6 +30,7 @@ from .report_common import (
     _pdf_metric_cards,
     resolve_report_sections,
     _short_label,
+    audience_lines,
     top_sources_lines,
 )
 
@@ -586,6 +587,13 @@ def generate_summary_pdf(payload: dict[str, Any]) -> bytes:
     if "top_sources" in sections and source_lines:
         story.append(Paragraph("Площадки", heading))
         for line in source_lines:
+            story.append(Paragraph("• " + xml_escape(line), normal))
+        story.append(Spacer(1, 10))
+
+    audience = audience_lines(payload)
+    if "audience" in sections and audience:
+        story.append(Paragraph("Аудитория", heading))
+        for line in audience:
             story.append(Paragraph("• " + xml_escape(line), normal))
         story.append(Spacer(1, 10))
 

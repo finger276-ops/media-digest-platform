@@ -154,3 +154,13 @@ def ascii_filename(*parts: Any, ext: str, fallback: str = "file") -> str:
         latin.append(mapped.upper() if caps_word else mapped.capitalize())
     safe = re.sub(r"[^0-9A-Za-z_.-]+", "_", "".join(latin)).strip("_.")
     return f"{safe[:140] or fallback}.{ext}"
+
+
+def plural(count: int, one: str, few: str, many: str) -> str:
+    """Форма слова по числу: 1 регион, 2 региона, 5 регионов, 11 регионов, 21 регион."""
+    n = abs(int(count or 0))
+    if n % 10 == 1 and n % 100 != 11:
+        return one
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return few
+    return many

@@ -19,6 +19,7 @@ from typing import Any
 
 import pandas as pd
 
+from .audience import audience_summary
 from .formatting import ascii_filename
 from .cached_store import download_storage_file
 from .message_kinds import message_type_counts
@@ -67,6 +68,8 @@ from .report_png import (  # noqa: F401
 )
 
 LOGGER = logging.getLogger("platform.report_export")
+# Регионов и городов в отчёте — как площадок: пять самых частых.
+REPORT_TOP_PLACES = 5
 
 
 def first_existing_col(df: pd.DataFrame, columns: list[str | None]) -> str | None:
@@ -274,6 +277,7 @@ def summary_export_payload(
         "top_tags": export_top_tags(messages, limit=5),
         "top_events": export_top_events(events_agg, limit=5),
         "top_sources": export_top_sources(messages, limit=5),
+        "audience": audience_summary(messages, top=REPORT_TOP_PLACES),
         "created_at": datetime.now().strftime("%d.%m.%Y %H:%M"),
     }
 

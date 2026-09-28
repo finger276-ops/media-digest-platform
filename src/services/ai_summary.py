@@ -23,6 +23,7 @@ from typing import Any
 import pandas as pd
 
 from .ai_provider import AIConfig, AIError, complete, estimate_tokens, load_ai_config
+from .audience import audience_summary, percent, places_count_text
 from .brand_metrics import METRIC_TITLES
 from .metrics_compute import (
     has_sentiment_markup,
@@ -165,6 +166,28 @@ def _sources_block(messages: pd.DataFrame) -> str:
             piece += f", негатив {_fmt_int(row['negative'])} ({_share(row['negative'], row['messages'])})"
         lines.append(piece)
     return "Площадки (сайты и соцсети):\n" + "\n".join(lines)
+
+
+def _audience_block(messages: pd.DataFrame) -> str:
+    """Пол, возраст, география авторов — с покрытием, как в разделе «Аудитория».
+
+    Без покрытия модель написала бы «аудитория — мужчины», когда пол известен у
+    пятой части авторов; с ним — оговорится сама.
+    """
+    summary = audience_summary(messages, top=TOP_SOURCES)
+    if not summary["has_data"]:
+        return ""
+    gender, age, geo = summary["gender"], summary["age"], summary["geo"]
+    lines = []
+    for block, title in ((gender, "Пол"), (age, "Возраст")):
+        if block["known"]:
+            groups = ", ".join(f"{g['name'].lower()} — {percent(g['share'])}" for g in block["groups"] if g["authors"])
+            lines.append(f"- {title} (известен у {percent(block['share_known'])} авторов): {groups}")
+    if geo["known"]:
+        places = ", ".join(f"{g['name']} — {_fmt_int(g['messages'])}" for g in geo["regions"])
+        lines.append(f"- Регионы (место известно у {percent(geo['share_known'])} авторов; "
+                     f"авторы из {places_count_text(geo)}), упоминаний: {places}")
+    return "Аудитория (из выгрузки; доли пола и возраста — среди авторов, у кого они указаны):\n" + "\n".join(lines)
 
 
 def _events_block(events_agg: pd.DataFrame) -> str:
@@ -413,6 +436,7 @@ def build_data_card(
         comparison_block(metrics),
         _tags_block(messages),
         _sources_block(messages),
+        _audience_block(messages),
         _events_block(events_agg),
         _brand_metrics_block(brand_cards),
     ]
@@ -438,6 +462,8 @@ TASK_PROMPTS = {
 тональности нет, — одной фразой скажи, что тональность не оценивалась);
 - на каких площадках и в каком формате (посты, комментарии, репосты) шло \
 обсуждение — если это есть в карточке и если это что-то говорит о периоде;
+- кто писал (пол, возраст, регионы) — только если в карточке есть блок \
+«Аудитория», и с оговоркой, у какой доли авторов признак известен;
 - если в карточке есть блок «По дням внутри периода» — укажи конкретный \
 день пика (сообщений или негатива), это конкретнее, чем «негатив вырос»;
 - одно-два наблюдения, которые не видны из голых цифр.""",

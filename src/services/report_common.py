@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Общее для всех форматов отчёта: разделы, строки о типах и площадках,
+"""Общее для всех форматов отчёта: разделы, строки о типах, площадках и аудитории,
 подписи и шрифты карточек, тональность блока.
 
 Без Streamlit и без отрисовки: этот модуль берут и report_export (данные
@@ -12,7 +12,7 @@ import logging
 from io import BytesIO
 from typing import Any
 
-
+from .audience import mentions_text, percent, places_count_text
 from .dashboard_config import DEFAULT_REPORT_SECTIONS, REPORT_SECTION_OPTIONS
 from .metrics_compute import (
     format_int,
@@ -74,6 +74,41 @@ def top_sources_lines(payload: dict[str, Any]) -> list[str]:
         f"{item['name']} — {format_int(item['messages'])} сообщ. ({item['share'] * 100:.0f}%)"
         for item in payload.get("top_sources") or []
     ]
+
+
+def _audience_groups_text(groups: list[dict[str, Any]]) -> str:
+    return ", ".join(f"{item['name'].lower()} — {percent(item['share'])}" for item in groups if item.get("authors"))
+
+
+def _places_text(places: list[dict[str, Any]]) -> str:
+    return "; ".join(f"{item['name']} — {mentions_text(item['messages'])}" for item in places)
+
+
+def audience_lines(payload: dict[str, Any]) -> list[str]:
+    """Пол, возраст и география строками для Word и PDF — каждая с покрытием.
+
+    «Пол: мужчины — 76 %, женщины — 24 % (пол известен у 22 % авторов)».
+    Без данных об авторах — пустой список, раздела в отчёте нет.
+    """
+    audience = payload.get("audience") or {}
+    if not audience.get("has_data"):
+        return []
+    lines = []
+    gender, age, geo = audience.get("gender") or {}, audience.get("age") or {}, audience.get("geo") or {}
+    if gender.get("known"):
+        lines.append(f"Пол: {_audience_groups_text(gender['groups'])} "
+                     f"(пол известен у {percent(gender['share_known'])} авторов).")
+    if age.get("known"):
+        lines.append(f"Возраст: {_audience_groups_text(age['groups'])} "
+                     f"(возраст известен у {percent(age['share_known'])} авторов).")
+    if geo.get("known"):
+        lines.append(f"География: авторы из {places_count_text(geo)} "
+                     f"(место известно у {percent(geo['share_known'])} авторов).")
+        if geo.get("regions"):
+            lines.append(f"Регионы: {_places_text(geo['regions'])}.")
+        if geo.get("cities"):
+            lines.append(f"Города: {_places_text(geo['cities'])}.")
+    return lines
 
 
 def message_types_line(payload: dict[str, Any]) -> str:

@@ -21,6 +21,7 @@ from .report_common import (
     _docx_metric,
     message_types_line,
     resolve_report_sections,
+    audience_lines,
     top_sources_lines,
     _VISUAL_SECTIONS,
 )
@@ -191,6 +192,12 @@ def generate_summary_docx(payload: dict[str, Any]) -> bytes:
     if "top_sources" in sections and source_lines:
         doc.add_heading("Площадки", level=2)
         doc.add_paragraph("Топ площадок: " + "; ".join(source_lines) + ".")
+
+    audience = audience_lines(payload)
+    if "audience" in sections and audience:
+        doc.add_heading("Аудитория", level=2)
+        for line in audience:
+            doc.add_paragraph(line)
 
     if "summary_text" in sections:
         doc.add_heading("Саммари периода", level=2)

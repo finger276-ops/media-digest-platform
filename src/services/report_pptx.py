@@ -32,6 +32,7 @@ from .metrics_compute import (
     no_sentiment_line,
     percent_text,
 )
+from .audience import percent, places_count_text
 from .report_common import _classify_summary_line, resolve_report_sections
 
 # Цвета типов сообщений — та же палитра, что у графика на экране.
@@ -265,6 +266,76 @@ def _bar_slide(deck: _Deck, title: str, items: list[dict[str, Any]]) -> None:
     series.format.fill.fore_color.rgb = deck.accent
 
 
+def _half_chart(deck: _Deck, slide, left, title: str, categories: list[str], values: list[float],
+                *, horizontal: bool, number_format: str) -> None:
+    """Половина слайда: подпись и диаграмма — для «Аудитории» по две на слайд."""
+    width = (SLIDE_W - 2 * MARGIN - Inches(0.4)) / 2
+    deck.text(slide, left, Inches(1.25), Emu(int(width)), Inches(0.45), title, size=16, bold=True)
+    data = CategoryChartData()
+    # Горизонтальные столбцы идут снизу вверх — самый крупный ставим последним.
+    order = list(zip(categories, values))
+    if horizontal:
+        order.reverse()
+    data.categories = [str(name)[:40] for name, _ in order]
+    data.add_series(title, [value for _, value in order])
+    kind = XL_CHART_TYPE.BAR_CLUSTERED if horizontal else XL_CHART_TYPE.COLUMN_CLUSTERED
+    frame = slide.shapes.add_chart(kind, left, Inches(1.75), Emu(int(width)), Inches(4.3), data)
+    chart = frame.chart
+    chart.has_legend = False
+    plot = chart.plots[0]
+    plot.gap_width = 60
+    plot.has_data_labels = True
+    plot.data_labels.position = XL_LABEL_POSITION.OUTSIDE_END
+    plot.data_labels.number_format = number_format
+    plot.data_labels.number_format_is_linked = False
+    series = plot.series[0]
+    series.format.fill.solid()
+    series.format.fill.fore_color.rgb = deck.accent
+
+
+def _audience_slides(deck: _Deck, audience: dict[str, Any]) -> None:
+    """Два слайда, как в отчётах заказчику: пол и возраст, затем география.
+
+    Пол и возраст — доли среди авторов, у кого признак указан, география —
+    число упоминаний. Под диаграммами — покрытие: без него «70 % мужчин» при
+    поле, известном у пятой части авторов, вводило бы в заблуждение.
+    """
+    width = (SLIDE_W - 2 * MARGIN - Inches(0.4)) / 2
+    right = MARGIN + Emu(int(width)) + Inches(0.4)
+    note_top = SLIDE_H - Inches(1.3)
+    gender, age, geo = audience.get("gender") or {}, audience.get("age") or {}, audience.get("geo") or {}
+    if gender.get("known") or age.get("known"):
+        slide = deck.slide("Аудитория: пол и возраст")
+        for block, left, title in ((gender, MARGIN, "Пол"), (age, right, "Возраст")):
+            if block.get("known"):
+                groups = block["groups"]
+                _half_chart(deck, slide, left, title, [g["name"] for g in groups], [g["share"] for g in groups],
+                            horizontal=False, number_format="0%")
+            else:
+                deck.text(slide, left, Inches(1.25), Emu(int(width)), Inches(0.8),
+                          f"{title}: в выгрузке не указан.", size=14, color=MUTED)
+        deck.text(
+            slide, MARGIN, note_top, SLIDE_W - 2 * MARGIN, Inches(0.7),
+            f"Пол известен у {percent(gender.get('share_known', 0))} авторов, возраст — у "
+            f"{percent(age.get('share_known', 0))}. Доли — среди авторов, у кого признак указан; "
+            "каждый автор учтён один раз.",
+            size=12, color=MUTED,
+        )
+    if geo.get("known"):
+        slide = deck.slide("Аудитория: география")
+        for places, left, title in ((geo.get("regions") or [], MARGIN, "Регионы"),
+                                    (geo.get("cities") or [], right, "Города")):
+            if places:
+                _half_chart(deck, slide, left, title, [p["name"] for p in places],
+                            [int(p["messages"]) for p in places], horizontal=True, number_format="# ##0")
+        deck.text(
+            slide, MARGIN, note_top, SLIDE_W - 2 * MARGIN, Inches(0.7),
+            f"Упоминания от авторов из {places_count_text(geo)}; место известно у "
+            f"{percent(geo.get('share_known', 0))} авторов. Число — сколько раз о бренде написали из места.",
+            size=12, color=MUTED,
+        )
+
+
 def _events_slide(deck: _Deck, items: list[dict[str, Any]]) -> None:
     slide = deck.slide("Топ инфоповодов")
     shown = [item for item in items[:5] if item.get("name")]
@@ -343,6 +414,8 @@ def generate_summary_pptx(payload: dict[str, Any]) -> bytes:
         _events_slide(deck, payload["top_events"])
     if "top_sources" in sections and payload.get("top_sources"):
         _bar_slide(deck, "Топ площадок", payload["top_sources"])
+    if "audience" in sections and (payload.get("audience") or {}).get("has_data"):
+        _audience_slides(deck, payload["audience"])
     highlights = [str(x).strip() for x in payload.get("summary_highlights") or [] if str(x).strip()]
     if "highlights" in sections and highlights:
         _bullets_slide(deck, "Главное", [("bullet", text) for text in highlights])
