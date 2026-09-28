@@ -184,6 +184,27 @@ def append_manual_events(
     return pd.concat([events, extra], ignore_index=True, sort=False)
 
 
+def drop_events_without_messages(
+    events: pd.DataFrame, messages: pd.DataFrame
+) -> pd.DataFrame:
+    """Оставить инфоповоды, у которых в суженной выборке есть сообщения.
+
+    recompute_event_counts пересчитывает только инфоповоды с сообщениями:
+    остальные сохраняли прежний счётчик, и после сужения по дням или тегам
+    чужой инфоповод оставался в списке со всеми своими сообщениями.
+    """
+    if (
+        events is None
+        or events.empty
+        or messages is None
+        or "event_id" not in messages.columns
+        or "event_id" not in events.columns
+    ):
+        return events
+    present = set(messages["event_id"].fillna("").astype(str).str.strip()) - {""}
+    return events[events["event_id"].astype(str).isin(present)].copy()
+
+
 def recompute_event_counts(
     events: pd.DataFrame, messages: pd.DataFrame
 ) -> pd.DataFrame:

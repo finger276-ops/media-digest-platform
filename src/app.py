@@ -69,6 +69,7 @@ from services.formatting import fmt_date, fmt_period
 from services.roles import can_see_error_details, role_rank
 from services.manual_moderation import (
     blocked_title_merges,
+    drop_events_without_messages,
     recompute_event_counts,
 )
 from services.event_enrichment import aggregate_events
@@ -99,6 +100,14 @@ from services.period_comparison import (
     selected_period_label,
 )
 from granularity_ui import render_granularity_selector
+from tag_slice_ui import (
+    BRAND_INDEX_NOTE,
+    apply_slice,
+    render_tag_slice,
+    slice_keys,
+    slice_title,
+    sliced_loader,
+)
 from overview_ui import (
     render_period_comparison_metrics,
     render_period_metrics_line,
@@ -202,20 +211,28 @@ def load_dashboard_data(
 
 @st.cache_data(show_spinner=False, max_entries=6, ttl=900)
 def _cached_period_overview(
-    project_id: str, period_id: str, data_version: int, manual_version: int
+    project_id: str,
+    period_id: str,
+    data_version: int,
+    manual_version: int,
+    tag_keys: tuple[str, ...] = (),
 ):
     """Метрики прошлого периода для изменений в шапке «Обзора».
 
     Период готовится так же, как выбранный: раньше он читался сырым, и
-    скрытое аналитиком сообщение продолжало считаться в сравнении.
+    скрытое аналитиком сообщение продолжало считаться в сравнении. Срез по
+    тегам — тот же, что у выбранного: срез против целого периода дал бы
+    ложное падение.
     """
-    messages = cached_period_messages(project_id, [period_id])
+    messages = apply_slice(cached_period_messages(project_id, [period_id]), list(tag_keys))
     if messages is None or messages.empty:
         return None
     return overview_metrics(messages)
 
 
-def period_overview_metrics(project_id: str, period_id: str | None):
+def period_overview_metrics(
+    project_id: str, period_id: str | None, tag_keys: tuple[str, ...] = ()
+):
     if not project_id or not period_id:
         return None
     try:
@@ -224,6 +241,7 @@ def period_overview_metrics(project_id: str, period_id: str | None):
             str(period_id),
             cache_version(project_id, "data"),
             cache_version(project_id, "manual"),
+            tuple(tag_keys),
         )
     except Exception:  # noqa: BLE001 - дельта не критична для страницы
         return None
@@ -391,13 +409,20 @@ def _section_messages(messages: pd.DataFrame, project_id: str) -> None:
 
 @_as_fragment
 def _section_sources(
-    messages: pd.DataFrame, periods: pd.DataFrame, period_ids: list[str], project_id: str
+    messages: pd.DataFrame,
+    periods: pd.DataFrame,
+    period_ids: list[str],
+    project_id: str,
+    tag_slice: list[str] | None = None,
 ) -> None:
     render_sources_page(
         messages,
         periods,
         period_ids,
-        load_period_messages=lambda period_id: cached_period_messages(project_id, [period_id]),
+        load_period_messages=sliced_loader(
+            lambda period_id: cached_period_messages(project_id, [period_id]),
+            list(tag_slice or []),
+        ),
     )
 
 
@@ -859,8 +884,25 @@ def _main() -> None:
             # один раз при импорте), меняются только счётчики.
             enriched_messages = narrowed_messages
             granularity_narrowed = True
-            events = recompute_event_counts(events, enriched_messages)
+            events = recompute_event_counts(
+                drop_events_without_messages(events, enriched_messages),
+                enriched_messages,
+            )
             raw_events_agg = aggregate_events(events)
+
+    # Срез по тегам — после гранулярности, по тем же правилам: сообщения
+    # сужаются, счётчики инфоповодов пересчитываются, инфоповоды без
+    # сообщений среза уходят. «Индексы бренда» получают выборку без среза.
+    unsliced_messages = enriched_messages
+    tag_slice = render_tag_slice(enriched_messages, project_id)
+    if tag_slice:
+        enriched_messages = apply_slice(enriched_messages, tag_slice)
+        granularity_key = f"{granularity_key}::tags={'|'.join(slice_keys(tag_slice))}"
+        events = recompute_event_counts(
+            drop_events_without_messages(events, enriched_messages),
+            enriched_messages,
+        )
+        raw_events_agg = aggregate_events(events)
 
     # Смысловая склейка заголовков идёт до порога по числу сообщений: иначе
     # одна тема, разбитая источником на три формулировки по два сообщения,
@@ -916,7 +958,7 @@ def _main() -> None:
                 )
                 prev_id = previous_period_id(periods, selected_period_ids)
                 prev_metrics = (
-                    period_overview_metrics(project_id, prev_id)
+                    period_overview_metrics(project_id, prev_id, slice_keys(tag_slice))
                     if comparable_previous
                     else None
                 )
@@ -981,11 +1023,16 @@ def _main() -> None:
     # роутер ради границы отказа.
     def _render_selected_section() -> None:
         if page == "Обзор":
+            # Текст ИИ написан по всему периоду — при срезе это названо прямо.
             render_saved_ai_text(
                 project_id,
                 AI_KIND_RISKS,
                 selected_period_ids,
-                heading="Риски периода",
+                heading=(
+                    "Риски периода — по всем сообщениям, без среза по тегам"
+                    if tag_slice
+                    else "Риски периода"
+                ),
                 show_model=is_admin and not client_preview,
             )
             render_client_insights(
@@ -998,10 +1045,12 @@ def _main() -> None:
                 analyst_view=analyst_view,
             )
         elif page == "Индексы бренда":
+            if tag_slice:
+                st.caption(BRAND_INDEX_NOTE)
             _section_brand_metrics(
                 project_id,
                 current_project_settings,
-                enriched_messages,
+                unsliced_messages,
                 periods,
                 selected_period_ids,
                 role_rank(content_role) >= role_rank("editor"),
@@ -1032,7 +1081,9 @@ def _main() -> None:
         elif page == "Отзывы":
             render_reviews(enriched_messages)
         elif page == "Источники":
-            _section_sources(enriched_messages, periods, selected_period_ids, project_id)
+            _section_sources(
+                enriched_messages, periods, selected_period_ids, project_id, tag_slice
+            )
         elif page == "Сообщения":
             _section_messages(enriched_messages, project_id)
         elif page == "Динамика":
@@ -1062,7 +1113,10 @@ def _main() -> None:
             render_ab_comparison(
                 project_id,
                 periods,
-                lambda period_id: cached_period_messages(project_id, [period_id]),
+                sliced_loader(
+                    lambda period_id: cached_period_messages(project_id, [period_id]),
+                    tag_slice,
+                ),
             )
         elif page == "Отчёт":
             report_metrics = (
@@ -1086,6 +1140,7 @@ def _main() -> None:
                 client_preview=client_preview,
                 read_only=read_only,
                 granularity_narrowed=granularity_narrowed,
+                tag_slice=tag_slice,
             )
 
     render_section_safely(page, _render_selected_section, _details=show_error_details)

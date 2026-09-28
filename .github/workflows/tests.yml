@@ -199,3 +199,6 @@ jobs:
 
       - name: Типы сообщений в сравнении периодов и в отчёте
         run: python tests/test_message_types_report.py
+
+      - name: Срез по тегам для всего дашборда
+        run: python tests/test_tag_slice.py
