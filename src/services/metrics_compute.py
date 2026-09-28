@@ -4,6 +4,8 @@ from typing import Any, Mapping
 
 import pandas as pd
 
+from .message_kinds import message_type_counts
+
 # Тональность платформа не определяет сама — берёт разметку из выгрузки. Если
 # разметки нет совсем, «0 % негатива» и «100 % нейтрала» были бы ложным нулём:
 # данных нет, а экран говорит «всё спокойно». Признак разметки живёт здесь, в
@@ -558,4 +560,7 @@ def overview_metrics(messages: pd.DataFrame) -> dict[str, Any]:
         "known": known_metrics(messages)
         if total_messages
         else {metric: True for metric in VOLUME_METRICS},
+        # Пост / комментарий / репост по колонке «Тип сообщения»; [] — типа
+        # в выгрузке нет, и разбивку не показывают.
+        "message_types": message_type_counts(messages) if total_messages else [],
     }

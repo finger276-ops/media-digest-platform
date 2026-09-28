@@ -160,9 +160,13 @@ def message_type_labels(messages: pd.DataFrame) -> pd.Series:
             break
     else:
         values = pd.Series([""] * len(messages), index=messages.index, dtype="object")
-    # «пост» и «Пост» — один тип: подпись с заглавной буквы.
-    values = values.map(lambda value: value[:1].upper() + value[1:] if value else "")
-    return values.where(values != "", NO_MESSAGE_TYPE_LABEL)
+    # «пост» и «Пост» — один тип: подпись с заглавной буквы. Разных значений
+    # единицы, сообщений — десятки тысяч, поэтому перевод по словарю.
+    lookup = {
+        value: (value[:1].upper() + value[1:]) if value else NO_MESSAGE_TYPE_LABEL
+        for value in values.unique().tolist()
+    }
+    return values.map(lookup)
 
 
 def message_type_key(value: object) -> str:
@@ -179,7 +183,7 @@ def message_type_counts(messages: pd.DataFrame) -> list[tuple[str, int]]:
     labels = message_type_labels(messages)
     if labels.empty or (labels == NO_MESSAGE_TYPE_LABEL).all():
         return []
-    keys = labels.map(message_type_key)
+    keys = labels.map({label: message_type_key(label) for label in labels.unique().tolist()})
     frame = pd.DataFrame({"label": labels.values, "key": keys.values})
     counts = frame.groupby("key").size()
     names = frame.groupby("key")["label"].agg(lambda s: s.value_counts().index[0])
@@ -200,4 +204,5 @@ def filter_messages_by_type(messages: pd.DataFrame, types: list[str]) -> pd.Data
     if not keys or messages is None or len(messages) == 0:
         return messages
     labels = message_type_labels(messages)
-    return messages[labels.map(message_type_key).isin(keys).to_numpy()]
+    lookup = {label: message_type_key(label) for label in labels.unique().tolist()}
+    return messages[labels.map(lookup).isin(keys).to_numpy()]

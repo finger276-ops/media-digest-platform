@@ -3,8 +3,9 @@
 периодов (карточки, графики, сравнительная таблица).
 
 render_project_intro — единый верхний блок для всех профилей проекта:
-агрегаты за выбранные периоды плюс (если выбрано 2+ периодов) цепочка
-последовательного сравнения через render_period_comparison_metrics.
+агрегаты за выбранные периоды (объём, тональность, тип сообщения) плюс
+(если выбрано 2+ периодов) цепочка последовательного сравнения через
+render_period_comparison_metrics.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from metric_cards_ui import (
     metric_card,
     render_metric_row,
 )
+from messages_ui import TYPE_CARDS, message_type_cards
 from services.dashboard_config import COMPARISON_CHART_BLOCKS, DEFAULT_DASHBOARD_VIEW_SETTINGS
 from services.metrics_compute import (
     METRIC_TITLES,
@@ -1133,6 +1135,17 @@ def render_project_intro(
     render_metric_row(_tone_cards(sent, prev_sent if previous else None), columns=3)
     _previous_unmarked_note(sent, prev_sent if previous else None)
     _mixed_markup_note(messages, sent)
+
+    # Пост / комментарий / репост. Нет типа в выгрузке — ряда нет: пустая
+    # разбивка клиенту ничего не сообщает. Изменение — только если тип был
+    # и в прошлом периоде, иначе «+100 п.п.» — это появившаяся колонка.
+    message_types = metrics.get("message_types") or []
+    if message_types:
+        prev_types = (previous.get("message_types") or []) if previous else []
+        render_metric_row(
+            message_type_cards(message_types, int(metrics.get("messages", 0) or 0), prev_types or None),
+            columns=TYPE_CARDS,
+        )
 
     if previous_label:
         st.caption(f"Изменения — к предыдущему периоду: {previous_label}")

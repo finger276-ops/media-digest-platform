@@ -20,7 +20,7 @@ from services.event_filter_state import (
     filter_messages_by_selected_event,
     get_selected_event_filter,
 )
-from metric_cards_ui import metric_card, render_metric_row
+from metric_cards_ui import DELTA_NEUTRAL, metric_card, render_metric_row
 from services.formatting import fmt_date
 from services.message_kinds import (
     filter_messages_by_type,
@@ -35,6 +35,7 @@ from services.metrics_compute import (
     numeric_series,
     percent_text,
 )
+from services.period_comparison import pp_delta
 from services.story_recovery import is_residual_title
 from services.tag_compute import filter_messages_by_tags, normalize_tag_key, tag_options
 
@@ -168,34 +169,60 @@ def _type_filter(work: pd.DataFrame, project_id: str | None) -> list[str]:
     )
 
 
+OTHER_TYPES = "Другие типы"
+
+
+def message_type_cards(
+    counts: list[tuple[str, int]],
+    total: int,
+    previous: list[tuple[str, int]] | None = None,
+) -> list[dict]:
+    """Карточки «Пост · 412 · 67%» — по одной на тип, не больше TYPE_CARDS.
+
+    Типов больше — последние сворачиваются в «Другие типы». previous — типы
+    прошлого периода: тогда у карточки изменение доли в п.п. Цвет изменения
+    нейтральный: больше постов или комментариев — не хорошо и не плохо.
+    """
+    if len(counts) > TYPE_CARDS:
+        rest = counts[TYPE_CARDS - 1:]
+        shown = counts[: TYPE_CARDS - 1] + [(OTHER_TYPES, sum(count for _, count in rest))]
+        rest_help = "Остальные типы: " + ", ".join(label for label, _ in rest) + "."
+    else:
+        shown, rest_help = counts, ""
+    prev_total = sum(count for _, count in previous or [])
+    prev_by_key = {message_type_key(label): count for label, count in previous or []}
+
+    def _delta(label: str, count: int) -> str | None:
+        if not prev_total or not total or label == OTHER_TYPES:
+            return None
+        share = count / total
+        prev_share = prev_by_key.get(message_type_key(label), 0) / prev_total
+        # «0» — единственная строка, которую Streamlit рисует без стрелки.
+        return "0" if round((share - prev_share) * 100, 1) == 0 else pp_delta(share, prev_share)
+
+    return [
+        metric_card(
+            label,
+            f"{format_int(count)} · {percent_text(count, total)}",
+            delta=_delta(label, count),
+            delta_color=DELTA_NEUTRAL,
+            help_text=rest_help if label == OTHER_TYPES else "",
+        )
+        for label, count in shown
+    ]
+
+
 def _render_message_types(work: pd.DataFrame, selected_types: list[str]) -> None:
     """Сколько среди сообщений выборки постов, комментариев, репостов."""
     counts = message_type_counts(work)
     if not counts:
         st.caption("Разбивки по типу сообщения нет: в выгрузке не указан тип сообщения.")
         return
-    total = int(len(work))
-    if len(counts) > TYPE_CARDS:
-        rest = counts[TYPE_CARDS - 1:]
-        counts = counts[: TYPE_CARDS - 1] + [("Другие типы", sum(count for _, count in rest))]
-        rest_help = "Остальные типы: " + ", ".join(label for label, _ in rest) + "."
-    else:
-        rest_help = ""
     st.caption(
         "Сообщений по типам"
         + (f" · в ленте только: {', '.join(selected_types)}" if selected_types else "")
     )
-    render_metric_row(
-        [
-            metric_card(
-                label,
-                f"{format_int(count)} · {percent_text(count, total)}",
-                help_text=rest_help if label == "Другие типы" else "",
-            )
-            for label, count in counts
-        ],
-        columns=TYPE_CARDS,
-    )
+    render_metric_row(message_type_cards(counts, int(len(work))), columns=TYPE_CARDS)
 
 
 def _tag_scope(tags: list[str], match_all: bool) -> str:

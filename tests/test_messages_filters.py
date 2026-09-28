@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Раздел «Сообщения»: фильтры по тегам и типу сообщения, разбивка по типам.
+"""«Сообщения»: фильтры по тегам и типу сообщения; разбивка по типам там и в «Обзоре».
 
 Мутационные проверки (что ломает какой тест):
 - filter_messages_by_tags сравнивает с учётом регистра -> «тег находится без
@@ -23,7 +23,15 @@
 - список типов считается до фильтра тегов -> «число в списке типов — с учётом
   тегов» краснеет;
 - выбор типов не сверяется с новой выборкой по ключу -> «тот же тип в другом
-  написании остаётся выбранным» краснеет.
+  написании остаётся выбранным» краснеет;
+- «Обзор» показывает изменение, когда в прошлом периоде типа не было ->
+  «прошлый период без типа — изменения нет» краснеет;
+- «Обзор» без проверки, есть ли тип в выгрузке -> «выгрузка без типа — в
+  «Обзоре» ряда типов нет» краснеет;
+- больше четырёх типов не сворачиваются -> «пятый тип — в «Другие типы»»
+  краснеет;
+- изменение доли типа с обратным знаком -> «изменение доли типа к прошлому
+  периоду» краснеет.
 """
 
 import sys
@@ -213,7 +221,65 @@ at.session_state["variant"] = "no_types"
 at.run()
 check("выгрузка без типа — фильтра типа нет", not at.exception and type_select(at) is None and tag_select(at) is not None)
 
-print("5. Страницы и смена выборки")
+print("5. Разбивка по типам в «Обзоре»")
+
+
+def overview_app():
+    import pandas as pd
+    import streamlit as st
+
+    from overview_ui import render_project_intro
+    from services.metrics_compute import overview_metrics
+
+    def frame(types):
+        return pd.DataFrame({"message_type": types, "text_clean": ["x"] * len(types), "views": [1] * len(types),
+                             "sentiment": ["нейтральная"] * len(types), "period_id": ["p2"] * len(types)})
+
+    variant = st.session_state.get("variant", "")
+    current = frame(["Пост"] * 6 + ["Комментарий"] * 3 + ["Репост"])
+    if variant == "no_types":
+        current = current.drop(columns=["message_type"])
+    if variant == "many_types":
+        current = frame(["Пост", "Пост", "Комментарий", "Репост", "Видео", "Сторис"])
+    previous = frame(["Пост"] * 5 + ["Комментарий"] * 5)
+    if variant == "previous_no_types":
+        previous = previous.drop(columns=["message_type"])
+    periods = pd.DataFrame([{"period_id": "p2", "period_name": "Май", "date_from": "2026-05-01", "date_to": "2026-05-07"}])
+    render_project_intro("Проект", current, periods, ["p2"], show_title=False, show_comparison=False,
+                         previous_metrics=overview_metrics(previous), previous_label="Апрель")
+
+
+def overview(variant=""):
+    at = AppTest.from_function(overview_app, default_timeout=60)
+    at.session_state["variant"] = variant
+    at.run()
+    return at
+
+
+at = overview()
+check("«Обзор» открылся", not at.exception, str(at.exception))
+metrics = {str(m.label): m for m in at.metric}
+check("карточки типов в «Обзоре»", str(metrics.get("Пост").value if "Пост" in metrics else "") == "6 · 60%"
+      and "Комментарий" in metrics and "Репост" in metrics, str({k: str(v.value) for k, v in metrics.items()}))
+check("изменение доли типа к прошлому периоду", "Пост" in metrics and str(metrics["Пост"].delta) == "+10,0 п.п."
+      and str(metrics["Комментарий"].delta) == "-20,0 п.п." and str(metrics["Репост"].delta) == "+10,0 п.п.",
+      str({k: str(v.delta) for k, v in metrics.items()}))
+check("остальные карточки шапки на месте", {"Сообщений", "Охват", "Позитив", "Негатив"} <= set(metrics))
+metrics = {str(m.label): m for m in overview("previous_no_types").metric}
+check("прошлый период без типа — изменения нет", "Пост" in metrics and not metrics["Пост"].delta,
+      str(metrics["Пост"].delta if "Пост" in metrics else None))
+at = overview("no_types")
+check("выгрузка без типа — в «Обзоре» ряда типов нет", not at.exception
+      and not {"Пост", "Комментарий", "Репост", "Тип не указан"} & {str(m.label) for m in at.metric}
+      and "Сообщений" in {str(m.label) for m in at.metric})
+metrics = {str(m.label): m for m in overview("many_types").metric}
+# Пост 2, затем по одному: Видео, Комментарий, Репост, Сторис. Три первых —
+# свои карточки, Репост и Сторис — «Другие типы».
+check("пятый тип — в «Другие типы»", "Другие типы" in metrics and str(metrics["Другие типы"].value) == "2 · 33%"
+      and not {"Репост", "Сторис"} & set(metrics) and not metrics["Другие типы"].delta,
+      str({k: str(v.value) for k, v in metrics.items()}))
+
+print("6. Страницы и смена выборки")
 at = AppTest.from_function(messages_app, default_timeout=60)
 at.run()
 next(r for r in at.radio if str(r.label) == "Режим просмотра сообщений").set_value("Вся лента").run()

@@ -20,7 +20,9 @@
 - не передавать granularity_narrowed в render_client_insights -> падает
   «Клиентский обзор при сужении не выдумывает рост»;
 - показывать подпись без проверки prev_id -> падает «у первого периода
-  проекта подписи о причине нет».
+  проекта подписи о причине нет»;
+- не передавать типы прошлого периода в карточки типов -> падает «у типа —
+  изменение доли к P0».
 """
 
 import os
@@ -83,6 +85,9 @@ CLIENT.db["platform_periods"] = [
 _COUNTS = {"p0": 2, "p1": 3, "p2": 5}
 _DATE = {"p0": "03.09.2026", "p1": "10.09.2026", "p2": "17.09.2026"}
 _DATETIME = {"p0": "2026-09-03T10:00:00", "p1": "2026-09-10T10:00:00", "p2": "2026-09-17T10:00:00"}
+# Тип сообщения: в P0 только посты, в P1 из трёх сообщений один репост, в
+# P2 из пяти — два. Комментариев нет: они не кандидаты в инфоповоды.
+_REPOSTS = {"p0": 0, "p1": 1, "p2": 2}
 
 
 def _message_row(period_id, index):
@@ -109,6 +114,7 @@ def _message_row(period_id, index):
         "author": f"user_{period_id}_{index}",
         "tags": "Тема",
         "event_title": "Тема",
+        "message_type": "Репост" if index < _REPOSTS[period_id] else "Пост",
     }
     return {
         "project_id": "ov_project",
@@ -171,6 +177,19 @@ if period_multiselect:
         any("01.09.2026–07.09.2026" in c for c in _captions()),
         str([c for c in _captions() if "предыдущ" in c]),
     )
+    post_card, repost_card = _metric("Пост"), _metric("Репост")
+    check(
+        "разбивка по типам в шапке «Обзора»",
+        post_card is not None and str(post_card.value) == "2 · 67%"
+        and repost_card is not None and str(repost_card.value) == "1 · 33%",
+        str([(str(m.label), str(m.value)) for m in at.metric]),
+    )
+    check(
+        "у типа — изменение доли к P0",
+        post_card is not None and str(post_card.delta) == "-33,3 п.п."
+        and repost_card is not None and str(repost_card.delta) == "+33,3 п.п.",
+        repr((post_card.delta if post_card else None, repost_card.delta if repost_card else None)),
+    )
 
     print("2. Два периода вместе (P1+P2) — сравнение с одним P0 нечестно, оно скрыто")
     period_multiselect = [m for m in at.sidebar.multiselect if str(m.label) == "Периоды"]
@@ -186,6 +205,12 @@ if period_multiselect:
         "при двух периодах дельты не показаны ни у одной карточки шапки",
         messages_card is not None and not messages_card.delta,
         repr(messages_card.delta if messages_card else None),
+    )
+    post_card = _metric("Пост")
+    check(
+        "типы по двум периодам — сумма, без изменения",
+        post_card is not None and str(post_card.value).startswith("5 · ") and not post_card.delta,
+        repr((post_card.value, post_card.delta) if post_card else None),
     )
     check(
         "ложных «+6 (+300%)» на экране нет",
