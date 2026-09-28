@@ -123,7 +123,8 @@ def requested_names(module: str, aliases: set[str]) -> dict[str, set[str]]:
                 if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in bound:
                     names.add(node.attr)
         if names:
-            found[str(path.relative_to(REPO))] = names
+            # as_posix: ключи сверяются с «tests/…», а на Windows str() дал бы «tests\…».
+            found[path.relative_to(REPO).as_posix()] = names
     return found
 
 
