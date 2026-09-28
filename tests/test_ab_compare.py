@@ -14,7 +14,15 @@
 - default_pair берёт первые два периода -> «по умолчанию — предпоследний
   против последнего» краснеет;
 - render_ab_comparison без проверки одинаковых периодов -> «один и тот же
-  период — просьба выбрать разные» краснеет.
+  период — просьба выбрать разные» краснеет;
+- default_tag_pair без настроек брендов -> «по умолчанию — свой бренд против
+  конкурента из настроек» краснеет;
+- compare_tags без exclude -> «в «Других тегах» нет самих сравниваемых
+  тегов» краснеет;
+- доля площадки от всех сообщений, а не от сообщений тега -> «площадки: доли
+  у каждого тега и разница» краснеет;
+- колонки таблицы не переименованы в теги -> «таблица: колонки — теги,
+  разница Б к А» краснеет.
 """
 
 import os
@@ -170,10 +178,83 @@ if "Период А" in boxes:
     check("один и тот же период — просьба выбрать разные", any("два разных периода" in str(i.value) for i in at.info),
           str([str(i.value) for i in at.info]))
 
+check("один тег в выборке — режима тегов нет", not [r for r in at.radio if str(r.label) == "Что сравнивать"])
+
+print("5. Два тега (бренда)")
+from services.ab_compare import (  # noqa: E402
+    compare_platform_shares,
+    compare_type_shares,
+    default_tag_pair,
+)
+from services.tag_compute import filter_messages_by_tags  # noqa: E402
+
+BRANDS = pd.DataFrame({
+    # «Кровля» — самый частый тег, но это тема, а не бренд.
+    "tags": ["Технониколь|Кровля"] * 6 + ["Кнауф|Кровля"] * 4 + ["Кровля"] * 5 + ["Технониколь|Кнауф"],
+    "platform": ["vk.com"] * 4 + ["t.me"] * 2 + ["vk.com", "t.me", "t.me", "t.me"] + ["vk.com"] * 5 + ["vk.com"],
+    "message_type": ["Пост"] * 5 + ["Комментарий"] + ["Пост", "Пост", "Репост", "Репост"] + ["Пост"] * 6,
+    "sentiment": ["негатив", "нейтрал"] * 8,
+    "text_clean": ["x"] * 16, "views": [10] * 16, "audience": [100] * 16, "engagement": [1] * 16,
+})
+BRAND_MAP = {"own": ["ТЕХНОНИКОЛЬ"], "competitors": ["Кнауф"]}
+check("по умолчанию — свой бренд против конкурента из настроек",
+      default_tag_pair(BRANDS, BRAND_MAP) == ("Технониколь", "Кнауф"), str(default_tag_pair(BRANDS, BRAND_MAP)))
+check("без настроек брендов — два самых частых тега", default_tag_pair(BRANDS) == ("Кровля", "Технониколь"),
+      str(default_tag_pair(BRANDS)))
+side_a = filter_messages_by_tags(BRANDS, ["Технониколь"])
+side_b = filter_messages_by_tags(BRANDS, ["Кнауф"])
+platforms = compare_platform_shares(side_a, side_b).set_index("Площадка")
+check("площадки: доли у каждого тега и разница", platforms.loc["vk.com", "А"] == "5 · 71%"
+      and platforms.loc["telegram.org", "Б"] == "3 · 60%" and platforms.loc["telegram.org", "Разница доли"] == "+31,4 п.п.",
+      str(platforms.to_dict("index")))
+types = compare_type_shares(side_a, side_b).set_index("Тип сообщения")
+check("типы: доли у каждого тега и разница", types.loc["Репост", "Б"] == "2 · 40%"
+      and types.loc["Пост", "Разница доли"] == "-25,7 п.п.", str(types.to_dict("index")))
+check("нет типа у одной стороны — прочерк", compare_type_shares(side_a, side_b.drop(columns=["message_type"]))
+      .set_index("Тип сообщения").loc["Пост", "Разница доли"] == "—")
+neighbours = compare_tags(side_a, side_b, exclude=["Технониколь", "Кнауф"])
+check("в «Других тегах» нет самих сравниваемых тегов", set(neighbours["Тег"]) == {"Кровля"}, str(neighbours.to_dict("records")))
+
+
+def brands_app():
+    import pandas as pd
+    import streamlit as st
+
+    from ab_compare_ui import render_ab_comparison
+
+    periods = pd.DataFrame([
+        {"period_id": "p1", "period_name": "Март", "date_from": "2026-03-01", "date_to": "2026-03-07"},
+        {"period_id": "p2", "period_name": "Апрель", "date_from": "2026-04-01", "date_to": "2026-04-07"},
+    ])
+    render_ab_comparison("proj", periods, lambda pid: pd.DataFrame(), current_messages=st.session_state["brands"],
+                         brand_map={"own": ["ТЕХНОНИКОЛЬ"], "competitors": ["Кнауф"]})
+
+
+at = AppTest.from_function(brands_app, default_timeout=60)
+at.session_state["brands"] = BRANDS
+at.run()
+mode = next((r for r in at.radio if str(r.label) == "Что сравнивать"), None)
+check("выбор: два периода или два тега", mode is not None and "Два тега (бренда)" in list(mode.options),
+      str([str(r.label) for r in at.radio]))
+mode.set_value("Два тега (бренда)").run()
+check("сравнение тегов открылось", not at.exception, str(at.exception))
+boxes = {str(s.label): s for s in at.selectbox}
+check("по умолчанию Технониколь против Кнауф", boxes.get("Тег А") is not None and boxes["Тег А"].value == "Технониколь"
+      and boxes["Тег Б"].value == "Кнауф", str({k: v.value for k, v in boxes.items()}))
+table = next((el.value for el in at.dataframe if "Показатель" in el.value.columns), None)
+check("таблица: колонки — теги, разница Б к А", table is not None
+      and list(table.columns) == ["Показатель", "Технониколь", "Кнауф", "Разница Б к А"]
+      and table.set_index("Показатель").loc["Сообщений", "Технониколь"] == "7", str(table.to_dict("records") if table is not None else None))
+tab_frames = [el.value for el in at.dataframe]
+check("площадки и типы на вкладках", any("Площадка" in t.columns and "Технониколь" in t.columns for t in tab_frames)
+      and any("Тип сообщения" in t.columns for t in tab_frames), str([list(t.columns) for t in tab_frames]))
+boxes["Тег Б"].set_value("Технониколь").run()
+check("один и тот же тег — просьба выбрать разные", any("два разных тега" in str(i.value) for i in at.info))
+
 print()
 if failures:
     print(f"ПРОВАЛЕНО: {len(failures)}")
     for f in failures:
         print(f"  - {f}")
     raise SystemExit(1)
-print("Сравнение двух периодов работает.")
+print("Сравнение двух периодов и двух тегов работает.")

@@ -145,6 +145,7 @@ from services.dashboard_config import (
 )
 from services.project_settings import (
     DEMO_MESSAGE,
+    category_brands_from_project_settings,
     demo_ai_runs_left,
     is_demo_project,
     project_settings_from_row,
@@ -1143,6 +1144,9 @@ def _main() -> None:
                     lambda period_id: cached_period_messages(project_id, [period_id]),
                     tag_slice,
                 ),
+                # Два тега сравниваются без среза: теги выбираются в самом блоке.
+                current_messages=unsliced_messages,
+                brand_map=category_brands_from_project_settings(current_project_settings),
             )
         elif page == "Отчёт":
             report_metrics = (

@@ -13,6 +13,8 @@
 - инфоповоды без сообщений среза остаются -> «в инфоповодах нет чужого
   бренда» и «инфоповод без сообщений в выборке уходит» краснеют;
 - «Индексы бренда» получают срез -> «индексы бренда — без среза» краснеет;
+- сравнение двух тегов получает срез -> «сравнение тегов — без среза:
+  Технониколь против Кнауф» краснеет;
 - отчёт при срезе показывает саммари периода -> «отчёт: саммари среза, а
   не сохранённое саммари периода» краснеет;
 - ключ саммари без среза -> «саммари всего периода не затёрто» краснеет;
@@ -204,6 +206,15 @@ sliced_brand = {str(m.label): str(m.value) for m in at.metric}
 check("индексы бренда — без среза", bool(plain_brand) and sliced_brand == plain_brand,
       f"{plain_brand} / {sliced_brand}")
 check("подпись, что срез к индексам не применён", any(BRAND_INDEX_NOTE in str(c.value) for c in at.caption))
+
+at = open_page("Динамика", slice_tags=["Технониколь"])
+check("Динамика со срезом открылась", not at.exception, str(at.exception))
+mode = next((r for r in at.radio if str(r.label) == "Что сравнивать"), None)
+if mode is not None:
+    mode.set_value("Два тега (бренда)").run()
+boxes = {str(b.label): b.value for b in at.selectbox}
+check("сравнение тегов — без среза: Технониколь против Кнауф",
+      boxes.get("Тег А") == "Технониколь" and boxes.get("Тег Б") == "Кнауф", str(boxes))
 
 print("4. Отчёт со срезом: своё саммари и свои риски")
 SLICE_SUMMARY_KEY = f"summary::{P2}::tags=технониколь"

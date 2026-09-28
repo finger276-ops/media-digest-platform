@@ -185,7 +185,7 @@ jobs:
       - name: Отчёт в PowerPoint (разделы, прочерки, диаграммы, кнопка)
         run: python tests/test_report_pptx.py
 
-      - name: Сравнение двух произвольных периодов (А/Б)
+      - name: Сравнение А/Б (два периода или два тега)
         run: python tests/test_ab_compare.py
 
       - name: Резервные копии (полный круг, проект, хранение, блок владельца)
