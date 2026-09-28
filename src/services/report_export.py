@@ -25,6 +25,7 @@ from .dashboard_config import (
     REPORT_SECTION_OPTIONS,
 )
 from .cached_store import download_storage_file
+from .message_kinds import message_type_counts
 from .metrics_compute import (
     NO_SENTIMENT_REASON,
     VOLUME_METRICS,
@@ -204,6 +205,27 @@ def _logo_image_from_payload(payload: dict[str, Any]):
         return None
 
 
+def report_message_types(
+    metrics: dict[str, Any], messages: pd.DataFrame | None
+) -> list[tuple[str, int]]:
+    """Пост / комментарий / репост для отчёта — те же числа, что в шапке «Обзора»."""
+    if isinstance(metrics, dict) and "message_types" in metrics:
+        return [(str(label), int(count or 0)) for label, count in metrics.get("message_types") or []]
+    if isinstance(messages, pd.DataFrame) and not messages.empty:
+        return message_type_counts(messages)
+    return []
+
+
+def message_types_line(payload: dict[str, Any]) -> str:
+    """«Типы сообщений: Пост — 412 (67%), Комментарий — 150 (24%)…» или ""."""
+    types = payload.get("message_types") or []
+    total = sum(int(count or 0) for _, count in types)
+    if not types or not total:
+        return ""
+    parts = [f"{label} — {format_int(count)} ({percent_text(count, total)})" for label, count in types]
+    return "Типы сообщений: " + ", ".join(parts) + "."
+
+
 def resolve_report_sections(sections: list[str] | None) -> list[str]:
     """Нормализовать выбор блоков конструктора: неизвестные id отбрасываются,
     пустой/некорректный выбор откатывается на полный набор по умолчанию —
@@ -260,6 +282,8 @@ def summary_export_payload(
         # Без разметки тональности числа выше — «всё в нейтрале»; рендереры
         # по этому признаку рисуют пометку вместо диаграммы.
         "sentiment_markup": not sentiment_unmarked(sent, messages),
+        # Пусто — в выгрузке нет «Тип сообщения», и строки о типах в отчёте нет.
+        "message_types": report_message_types(metrics, messages),
         "comparison_sequence": metrics.get("comparison_sequence") or [],
         # limit=5: столько же всегда и рисуют PNG/DOCX/PDF (items[:5]) -
         # раньше "полный" шаблон запрашивал 8, но лишние 3 нигде не
@@ -390,7 +414,23 @@ def _draw_metrics_section(ax, payload, comparison, accent, top: float) -> float:
         )
     # 0.227 - высота самого блока (до низа второй строки карточек), + 0.050 -
     # зазор до заголовка следующего блока в исходной раскладке (0.862 -> 0.585).
-    return top - 0.277
+    types_line = message_types_line(payload)
+    if not types_line:
+        return top - 0.277
+    # Типы сообщений — одной строкой под карточками, в зазоре до следующего
+    # блока: ещё один ряд карточек вытеснил бы «Главное» с листа. Сдвиг вниз —
+    # 0.010: при полном наборе блоков последняя строка «Главного» стоит на
+    # 0.011 выше подписи, и сдвиг больше стоил бы ей места.
+    ax.text(
+        0.060,
+        top - 0.251,
+        _short_label(types_line, 120),
+        fontsize=8.4,
+        color="#374151",
+        va="top",
+        ha="left",
+    )
+    return top - 0.287
 
 
 def _export_sentiment(
@@ -950,6 +990,9 @@ def generate_summary_docx(payload: dict[str, Any]) -> bytes:
                 f"охват — {_docx_metric(payload, 'reach')}; "
                 f"вовлеченность — {_docx_metric(payload, 'engagement')}."
             )
+            types_line = message_types_line(payload)
+            if types_line:
+                doc.add_paragraph(types_line)
         if "sentiment" in sections and not payload.get("sentiment_markup", True):
             doc.add_paragraph(no_sentiment_line("Тональность"))
         elif "sentiment" in sections:
@@ -1498,6 +1541,10 @@ def generate_summary_pdf(payload: dict[str, Any]) -> bytes:
                 _PdfMetricsBlock(cards, subtitle, accent_color, ink_color, muted_color, font_name, bold_font_name)
             )
         )
+        types_line = message_types_line(payload)
+        if types_line:
+            story.append(Spacer(1, 4))
+            story.append(Paragraph(xml_escape(types_line), normal))
         story.append(Spacer(1, 10))
 
     if "sentiment" in sections:

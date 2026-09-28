@@ -84,6 +84,7 @@ DEFAULT_REPORT_BRANDING = {
 COMPARISON_CHART_BLOCKS = [
     "Динамика основных метрик",
     "Динамика тональности",
+    "Динамика типов сообщений",
     "Сравнение выбранной метрики",
     "Круговые диаграммы тональности",
 ]
@@ -96,7 +97,11 @@ DEFAULT_DASHBOARD_VIEW_SETTINGS = {
     # открывает проект без единого рабочего инструмента.
     "default_view_mode": "analyst",  # client / analyst
     "start_section": "Обзор",
-    "comparison_visible_charts": ["Динамика основных метрик", "Динамика тональности"],
+    "comparison_visible_charts": [
+        "Динамика основных метрик",
+        "Динамика тональности",
+        "Динамика типов сообщений",
+    ],
     "client_hide_technical": True,
     "main_visible_blocks": ["metrics", "comparison", "summary", "threshold"],
     # Порог склейки инфоповодов с близкими заголовками. 0 — склейка выключена,

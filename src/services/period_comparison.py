@@ -13,6 +13,7 @@ from typing import Any
 import pandas as pd
 
 from .formatting import fmt_date_short, period_picker_label
+from .message_kinds import NO_MESSAGE_TYPE_LABEL, message_type_key
 from .metrics_compute import (
     NO_METRIC_VALUE,
     format_int,
@@ -783,8 +784,102 @@ COMPARISON_TABLE_VIEWS = {
     "Охват": [("Охват", "reach"), ("Δ охвата", None)],
     "Вовлеченность": [("Вовлеченность", "engagement"), ("Δ вовлеченности", None)],
     "Тональность": [],
+    "Типы сообщений": [],
     "Все показатели": [],
 }
+TYPES_VIEW = "Типы сообщений"
+
+
+def comparison_has_types(comparison: list[dict[str, Any]]) -> bool:
+    """Есть ли тип сообщения хотя бы в одной точке сравнения."""
+    return any(item.get("message_types") for item in comparison or [])
+
+
+def comparison_type_order(comparison: list[dict[str, Any]]) -> list[str]:
+    """Типы всей цепочки: самые частые за всё время первыми, «Тип не указан» — в конце.
+
+    Один порядок на всю таблицу и график: колонка «Пост» не должна прыгать с
+    места на место от периода к периоду.
+    """
+    totals: dict[str, int] = {}
+    names: dict[str, str] = {}
+    for item in comparison or []:
+        for label, count in item.get("message_types") or []:
+            key = message_type_key(label)
+            totals[key] = totals.get(key, 0) + int(count or 0)
+            names.setdefault(key, str(label))
+    order = sorted(
+        totals,
+        key=lambda key: (names[key] == NO_MESSAGE_TYPE_LABEL, -totals[key], names[key].lower()),
+    )
+    return [names[key] for key in order]
+
+
+def _type_counts_by_key(item: dict[str, Any] | None) -> dict[str, int]:
+    return {
+        message_type_key(label): int(count or 0)
+        for label, count in (item or {}).get("message_types") or []
+    }
+
+
+def type_comparison_row(
+    item: dict[str, Any], previous: dict[str, Any] | None, order: list[str]
+) -> dict[str, Any]:
+    """Строка таблицы «Типы сообщений»: «412 · 67%» и изменение доли в п.п.
+
+    Точка без типа в выгрузке — прочерки, а не нули; изменение — только если
+    тип был и в предыдущей точке, иначе «+67 п.п.» было бы появившейся колонкой.
+    """
+    row: dict[str, Any] = {"Период": item.get("label", item.get("period_id", ""))}
+    counts = _type_counts_by_key(item)
+    total = int(item.get("messages", 0) or 0)
+    prev_counts = _type_counts_by_key(previous)
+    prev_total = int((previous or {}).get("messages", 0) or 0)
+    for label in order:
+        key = message_type_key(label)
+        if not counts or not total:
+            row[label] = NO_METRIC_VALUE
+            row[f"Δ {label}"] = NO_METRIC_VALUE
+            continue
+        count = counts.get(key, 0)
+        row[label] = f"{format_int(count)} · {percent_text(count, total)}"
+        row[f"Δ {label}"] = (
+            pp_delta(count / total, prev_counts.get(key, 0) / prev_total)
+            if prev_counts and prev_total
+            else NO_METRIC_VALUE
+        )
+    return row
+
+
+def type_share_rows(comparison: list[dict[str, Any]]) -> pd.DataFrame:
+    """Доли типов по точкам — для графика «Динамика типов сообщений».
+
+    Точки без типа (нет колонки или ни одного сообщения) в таблицу не
+    попадают: график их не рисует, а экран называет их подписью.
+    """
+    order = comparison_type_order(comparison)
+    raw_labels = [
+        short_period_chart_label(str(item.get("label", item.get("period_id", "")) or ""))
+        for item in comparison
+    ]
+    rows: list[dict[str, Any]] = []
+    for item, short_label in zip(comparison, dedupe_chart_labels(raw_labels)):
+        counts = _type_counts_by_key(item)
+        total = int(item.get("messages", 0) or 0)
+        if not counts or not total:
+            continue
+        for label in order:
+            count = counts.get(message_type_key(label), 0)
+            rows.append(
+                {
+                    "Период": short_label,
+                    "Полный период": str(item.get("label", item.get("period_id", "")) or ""),
+                    "Тип": label,
+                    "Сообщений": count,
+                    "Доля": count / total,
+                }
+            )
+    return pd.DataFrame(rows, columns=["Период", "Полный период", "Тип", "Сообщений", "Доля"])
 
 
 def build_comparison_table(
@@ -801,6 +896,8 @@ def build_comparison_table(
         full = comparison_row(item, previous)
         if view == "Все показатели":
             rows.append(full)
+        elif view == TYPES_VIEW:
+            rows.append(type_comparison_row(item, previous, comparison_type_order(comparison)))
         elif view == "Тональность":
             rows.append(
                 {

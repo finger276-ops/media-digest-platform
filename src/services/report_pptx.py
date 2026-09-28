@@ -34,6 +34,9 @@ from .metrics_compute import (
 )
 from .report_export import _classify_summary_line, resolve_report_sections
 
+# Цвета типов сообщений — та же палитра, что у графика на экране.
+TYPE_COLORS = ("2A78D6", "EB6834", "1BAF7A", "EDA100", "E87BA4", "008300", "4A3AA7", "E34948")
+
 SLIDE_W = Inches(13.333)
 SLIDE_H = Inches(7.5)
 MARGIN = Inches(0.6)
@@ -176,6 +179,36 @@ def _metrics_slide(deck: _Deck) -> None:
         series.format.line.width = Pt(2.5)
 
 
+def _message_types_slide(deck: _Deck) -> None:
+    """Пост / комментарий / репост: кольцо и числа, как у тональности."""
+    types = [(str(label), int(count or 0)) for label, count in deck.payload.get("message_types") or []]
+    total = sum(count for _, count in types)
+    if not types or not total:
+        return
+    slide = deck.slide("Типы сообщений")
+    data = CategoryChartData()
+    data.categories = [label for label, _ in types]
+    data.add_series("Сообщений", [count for _, count in types])
+    frame = slide.shapes.add_chart(XL_CHART_TYPE.DOUGHNUT, MARGIN, Inches(1.3), Inches(6.5),
+                                   Inches(5.4), data)
+    chart = frame.chart
+    chart.has_legend = True
+    plot = chart.plots[0]
+    plot.has_data_labels = True
+    labels = plot.data_labels
+    labels.show_percentage = True
+    labels.show_value = False
+    labels.number_format = "0%"
+    labels.number_format_is_linked = False
+    palette = iter(TYPE_COLORS)
+    for point, (label, _) in zip(plot.series[0].points, types):
+        point.format.fill.solid()
+        color = "9E9E9E" if label == "Тип не указан" else next(palette, "9E9E9E")
+        point.format.fill.fore_color.rgb = RGBColor.from_string(color)
+    lines = [f"{label}: {percent_text(count, total)} · {format_int(count)} сообщ." for label, count in types]
+    deck.text(slide, Inches(7.6), Inches(2.6), Inches(5), Inches(2.5), "\n".join(lines), size=20)
+
+
 def _sentiment_slide(deck: _Deck) -> None:
     payload = deck.payload
     slide = deck.slide("Тональность")
@@ -301,6 +334,7 @@ def generate_summary_pptx(payload: dict[str, Any]) -> bytes:
     _title_slide(deck)
     if "metrics" in sections:
         _metrics_slide(deck)
+        _message_types_slide(deck)
     if "sentiment" in sections:
         _sentiment_slide(deck)
     if "top_tags" in sections and payload.get("top_tags"):

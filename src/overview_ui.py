@@ -44,26 +44,32 @@ from services.metrics_compute import (
 )
 from services.period_comparison import (
     COMPARISON_TABLE_VIEWS,
+    TYPES_VIEW,
     build_comparison_metrics,
     build_comparison_table,
+    comparison_has_types,
+    comparison_type_order,
     chart_number_label,
     comparison_visual_rows,
     metric_delta,
     period_coverage_days,
     pp_delta,
     selected_period_label,
+    type_share_rows,
 )
 from services.project_settings import (
     chart_label_settings_from_project_settings,
     chart_label_text_kwargs,
 )
 from services.chart_style import (
+    CATEGORICAL_PALETTE,
     LINE_INTERPOLATE,
     PERIOD_AXIS,
     SENTIMENT_COLOR_DOMAIN,
     SENTIMENT_COLOR_RANGE,
     fixed_color_scale,
 )
+from services.message_kinds import NO_MESSAGE_TYPE_LABEL
 
 # Порядок метрик закреплён здесь же, где строится их цветовая шкала — тот же
 # порядок, что в metrics_cols ниже, чтобы цвет метрики не зависел от того, в
@@ -951,6 +957,61 @@ def render_period_comparison_charts(
                         label_settings=label_settings,
                     )
 
+    if "Динамика типов сообщений" in selected_blocks:
+        _render_type_dynamics(comparison)
+
+
+def _type_color_scale(order: list[str]) -> alt.Scale:
+    """Цвет типа — по его месту в общем порядке; «Тип не указан» — серый."""
+    palette = iter(CATEGORICAL_PALETTE)
+    colors = [
+        "#9e9e9e" if label == NO_MESSAGE_TYPE_LABEL else next(palette, "#9e9e9e")
+        for label in order
+    ]
+    return alt.Scale(domain=order, range=colors)
+
+
+def _render_type_dynamics(comparison: list[dict[str, Any]]) -> None:
+    """Доли постов, комментариев, репостов по точкам — 100%-столбцы."""
+    st.markdown("**Динамика типов сообщений, %**")
+    rows = type_share_rows(comparison)
+    if rows.empty:
+        st.caption("Тип сообщения в выгрузке не указан — графика нет.")
+        return
+    shown = set(rows["Полный период"])
+    skipped = [
+        str(item.get("label", item.get("period_id", "")))
+        for item in comparison
+        if str(item.get("label", item.get("period_id", "")) or "") not in shown
+    ]
+    if skipped:
+        st.caption("Без типа сообщения или без сообщений, на графике нет: " + ", ".join(skipped))
+    order = comparison_type_order(comparison)
+    rows = rows.assign(_order=rows["Тип"].map({label: i for i, label in enumerate(order)}))
+    bars = (
+        alt.Chart(rows)
+        .mark_bar(size=28)
+        .encode(
+            x=alt.X("Период:N", sort=None, title="Период", axis=PERIOD_AXIS),
+            y=alt.Y(
+                "Сообщений:Q", title="Доля, %", stack="normalize", axis=alt.Axis(format="%")
+            ),
+            order=alt.Order("_order:Q", sort="ascending"),
+            color=alt.Color(
+                "Тип:N",
+                scale=_type_color_scale(order),
+                legend=alt.Legend(title="Тип сообщения"),
+            ),
+            tooltip=[
+                alt.Tooltip("Полный период:N", title="Период"),
+                "Тип",
+                alt.Tooltip("Сообщений:Q", format=","),
+                alt.Tooltip("Доля:Q", format=".1%"),
+            ],
+        )
+    )
+    st.altair_chart(bars.properties(height=320), width="stretch")
+
 
 def render_period_comparison_metrics(
     messages: pd.DataFrame,
@@ -1007,6 +1068,19 @@ def render_period_comparison_metrics(
     )
     _previous_unmarked_note(current.get("sentiment"), previous.get("sentiment"))
 
+    # Пост / комментарий / репост последней точки к предыдущей — те же
+    # карточки, что в шапке «Обзора».
+    current_types = current.get("message_types") or []
+    if current_types:
+        render_metric_row(
+            message_type_cards(
+                current_types,
+                int(current.get("messages", 0) or 0),
+                previous.get("message_types") or None,
+            ),
+            columns=TYPE_CARDS,
+        )
+
     render_period_comparison_charts(
         comparison,
         granularity=granularity,
@@ -1018,9 +1092,16 @@ def render_period_comparison_metrics(
     )
 
     st.markdown("**Сравнительная таблица**")
+    # Нет типа ни в одной точке — вида «Типы сообщений» нет: таблица из
+    # одних прочерков ничего не сообщает.
+    table_views = [
+        name
+        for name in COMPARISON_TABLE_VIEWS
+        if name != TYPES_VIEW or comparison_has_types(comparison)
+    ]
     view = st.radio(
         "Показатель",
-        list(COMPARISON_TABLE_VIEWS.keys()),
+        table_views,
         index=0,
         horizontal=True,
         key=f"comparison_table_view_{abs(hash(tuple(item.get('period_id', '') for item in comparison)))}",

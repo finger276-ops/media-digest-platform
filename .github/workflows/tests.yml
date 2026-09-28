@@ -196,3 +196,6 @@ jobs:
 
       - name: Раздел «Сообщения» (фильтры по тегам и типу, разбивка по типам)
         run: python tests/test_messages_filters.py
+
+      - name: Типы сообщений в сравнении периодов и в отчёте
+        run: python tests/test_message_types_report.py
