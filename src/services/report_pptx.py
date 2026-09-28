@@ -341,6 +341,8 @@ def generate_summary_pptx(payload: dict[str, Any]) -> bytes:
         _bar_slide(deck, "Топ тегов", payload["top_tags"])
     if "top_events" in sections and payload.get("top_events"):
         _events_slide(deck, payload["top_events"])
+    if "top_sources" in sections and payload.get("top_sources"):
+        _bar_slide(deck, "Топ площадок", payload["top_sources"])
     highlights = [str(x).strip() for x in payload.get("summary_highlights") or [] if str(x).strip()]
     if "highlights" in sections and highlights:
         _bullets_slide(deck, "Главное", [("bullet", text) for text in highlights])

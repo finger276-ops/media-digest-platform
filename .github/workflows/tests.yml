@@ -208,3 +208,6 @@ jobs:
 
       - name: Фильтры площадки и тональности в «Сообщениях», переход из «Источников»
         run: python tests/test_messages_platform_tone.py
+
+      - name: Топ площадок в отчёте (Word, PDF, PNG, PowerPoint)
+        run: python tests/test_report_sources.py

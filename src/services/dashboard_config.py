@@ -63,6 +63,7 @@ REPORT_SECTION_OPTIONS = {
     "sentiment": "Тональность",
     "top_tags": "Топ тегов",
     "top_events": "Топ инфоповодов",
+    "top_sources": "Топ площадок",
     "highlights": "Главное (тезисы саммари)",
     "summary_text": "Полный текст саммари",
 }

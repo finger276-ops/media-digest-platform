@@ -27,6 +27,7 @@ from .dashboard_config import (
 )
 from .cached_store import download_storage_file
 from .message_kinds import message_type_counts
+from .source_stats import build_source_statistics
 from .metrics_compute import (
     NO_SENTIMENT_REASON,
     VOLUME_METRICS,
@@ -46,7 +47,7 @@ LOGGER = logging.getLogger("platform.report_export")
 # Разделы, у которых вообще есть что нарисовать на PNG-инфографике. Если
 # аналитик оставил только "Полный текст саммари", инфографика с одним
 # заголовком и пустым телом — лишняя страница, а не полезный блок.
-_VISUAL_SECTIONS = {"metrics", "sentiment", "top_tags", "top_events", "highlights"}
+_VISUAL_SECTIONS = {"metrics", "sentiment", "top_tags", "top_events", "top_sources", "highlights"}
 
 
 def first_existing_col(df: pd.DataFrame, columns: list[str | None]) -> str | None:
@@ -216,6 +217,36 @@ def report_message_types(
     return []
 
 
+def export_top_sources(messages: pd.DataFrame | None, limit: int = 5) -> list[dict[str, Any]]:
+    """Площадки с наибольшим числом сообщений — домены, как в «Источниках»."""
+    if not isinstance(messages, pd.DataFrame) or messages.empty:
+        return []
+    stats = build_source_statistics(messages)
+    if stats.empty:
+        return []
+    total = int(len(messages))
+    return [
+        {"name": str(row["label"]), "messages": int(row["messages"]), "share": int(row["messages"]) / total}
+        for _, row in stats.head(limit).iterrows()
+    ]
+
+
+def sources_line(payload: dict[str, Any]) -> str:
+    """«Площадки: vk.com 60% · telegram.org 30%» — одна строка для PNG."""
+    items = payload.get("top_sources") or []
+    if not items:
+        return ""
+    return "Площадки: " + " · ".join(f"{item['name']} {item['share'] * 100:.0f}%" for item in items)
+
+
+def top_sources_lines(payload: dict[str, Any]) -> list[str]:
+    """«vk.com — 412 сообщ. (67%)» — для Word и PDF."""
+    return [
+        f"{item['name']} — {format_int(item['messages'])} сообщ. ({item['share'] * 100:.0f}%)"
+        for item in payload.get("top_sources") or []
+    ]
+
+
 def message_types_line(payload: dict[str, Any]) -> str:
     """«Типы сообщений: Пост — 412 (67%), Комментарий — 150 (24%)…» или ""."""
     types = payload.get("message_types") or []
@@ -290,6 +321,7 @@ def summary_export_payload(
         # показывались, просто отбрасывались слоем отрисовки.
         "top_tags": export_top_tags(messages, limit=5),
         "top_events": export_top_events(events_agg, limit=5),
+        "top_sources": export_top_sources(messages, limit=5),
         "created_at": datetime.now().strftime("%d.%m.%Y %H:%M"),
     }
 
@@ -414,23 +446,27 @@ def _draw_metrics_section(ax, payload, comparison, accent, top: float) -> float:
         )
     # 0.227 - высота самого блока (до низа второй строки карточек), + 0.050 -
     # зазор до заголовка следующего блока в исходной раскладке (0.862 -> 0.585).
-    types_line = message_types_line(payload)
-    if not types_line:
+    # Типы сообщений и площадки — строками под карточками, в зазоре до
+    # следующего блока: ещё ряд карточек или отдельный блок вытеснили бы
+    # «Главное» с листа. Первая строка сдвигает блоки ниже на 0.010, вторая —
+    # ещё на 0.010: при полном наборе блоков это одна строка «Главного».
+    lines = [message_types_line(payload)]
+    if "top_sources" in set(payload.get("sections") or []):
+        lines.append(sources_line(payload))
+    lines = [line for line in lines if line]
+    if not lines:
         return top - 0.277
-    # Типы сообщений — одной строкой под карточками, в зазоре до следующего
-    # блока: ещё один ряд карточек вытеснил бы «Главное» с листа. Сдвиг вниз —
-    # 0.010: при полном наборе блоков последняя строка «Главного» стоит на
-    # 0.011 выше подписи, и сдвиг больше стоил бы ей места.
-    ax.text(
-        0.060,
-        top - 0.251,
-        _short_label(types_line, 120),
-        fontsize=8.4,
-        color="#374151",
-        va="top",
-        ha="left",
-    )
-    return top - 0.287
+    for index, line in enumerate(lines):
+        ax.text(
+            0.060,
+            top - 0.251 - index * 0.019,
+            _short_label(line, 120),
+            fontsize=8.4,
+            color="#374151",
+            va="top",
+            ha="left",
+        )
+    return top - 0.287 - (len(lines) - 1) * 0.010
 
 
 def _export_sentiment(
@@ -670,6 +706,18 @@ def _draw_top_lists_section(
     return top - 0.177
 
 
+def _draw_sources_section(ax, payload, top: float) -> float:
+    """Площадки отдельной строкой — когда блок «Основные метрики» выключен.
+
+    С ним строка стоит под карточками метрик (_draw_metrics_section).
+    """
+    line = sources_line(payload)
+    if not line:
+        return top
+    ax.text(0.060, top, _short_label(line, 120), fontsize=8.4, color="#374151", va="top", ha="left")
+    return top - 0.040
+
+
 def _draw_highlights_section(ax, payload, top: float) -> float:
     ax.text(
         0.060,
@@ -831,6 +879,9 @@ def generate_summary_infographic_png(payload: dict[str, Any]) -> bytes:
         cursor = _draw_top_lists_section(
             ax, payload, cursor, show_tags=show_tags, show_events=show_events
         )
+
+    if "top_sources" in sections and "metrics" not in sections:
+        cursor = _draw_sources_section(ax, payload, cursor)
 
     if "highlights" in sections:
         cursor = _draw_highlights_section(ax, payload, cursor)
@@ -1024,6 +1075,11 @@ def generate_summary_docx(payload: dict[str, Any]) -> bytes:
                         if x.get("name")
                     )
                 )
+
+    source_lines = top_sources_lines(payload)
+    if "top_sources" in sections and source_lines:
+        doc.add_heading("Площадки", level=2)
+        doc.add_paragraph("Топ площадок: " + "; ".join(source_lines) + ".")
 
     if "summary_text" in sections:
         doc.add_heading("Саммари периода", level=2)
@@ -1590,6 +1646,13 @@ def generate_summary_pdf(payload: dict[str, Any]) -> bytes:
                 )
             )
         )
+        story.append(Spacer(1, 10))
+
+    source_lines = top_sources_lines(payload)
+    if "top_sources" in sections and source_lines:
+        story.append(Paragraph("Площадки", heading))
+        for line in source_lines:
+            story.append(Paragraph("• " + xml_escape(line), normal))
         story.append(Spacer(1, 10))
 
     if "highlights" in sections:
