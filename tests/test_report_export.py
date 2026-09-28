@@ -493,32 +493,32 @@ check(
 # возврат старой ветки «if len(comparison) >= 2: comparison[-1]» прямо в
 # генераторе PDF — хелпер comparison вообще не принимает. Блоки PDF подменены
 # записывающими подклассами: что пришло в конструктор, то и нарисовано.
-import services.report_export as report_export_module  # noqa: E402
+import services.report_pdf as report_pdf_module  # noqa: E402
 
 recorded_pdf = {}
 
 
-class _RecordingMetrics(report_export_module._PdfMetricsBlock):
+class _RecordingMetrics(report_pdf_module._PdfMetricsBlock):
     def __init__(self, cards, subtitle, *args, **kwargs):
         recorded_pdf["cards"] = {title: value for title, value, _ in cards}
         recorded_pdf["subtitle"] = subtitle
         super().__init__(cards, subtitle, *args, **kwargs)
 
 
-class _RecordingSentiment(report_export_module._PdfSentimentBlock):
+class _RecordingSentiment(report_pdf_module._PdfSentimentBlock):
     def __init__(self, values, colors, labels, total, *args, **kwargs):
         recorded_pdf["sentiment_total"] = total
         recorded_pdf["sentiment_values"] = list(values)
         super().__init__(values, colors, labels, total, *args, **kwargs)
 
 
-original_blocks = (report_export_module._PdfMetricsBlock, report_export_module._PdfSentimentBlock)
-report_export_module._PdfMetricsBlock = _RecordingMetrics
-report_export_module._PdfSentimentBlock = _RecordingSentiment
+original_blocks = (report_pdf_module._PdfMetricsBlock, report_pdf_module._PdfSentimentBlock)
+report_pdf_module._PdfMetricsBlock = _RecordingMetrics
+report_pdf_module._PdfSentimentBlock = _RecordingSentiment
 try:
     pdf12 = generate_summary_pdf(dict(mismatched_payload, comparison_sequence=fake_comparison))
 finally:
-    report_export_module._PdfMetricsBlock, report_export_module._PdfSentimentBlock = original_blocks
+    report_pdf_module._PdfMetricsBlock, report_pdf_module._PdfSentimentBlock = original_blocks
 check("PDF с разбивкой из двух точек собрался", pdf12[:4] == b"%PDF", str(pdf12[:8]))
 check(
     "PDF целиком: карточка «Сообщения» — итог области, а не последний день",

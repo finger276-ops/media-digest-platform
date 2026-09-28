@@ -241,7 +241,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 from docx import Document  # noqa: E402
 
-from services import report_export  # noqa: E402
+from services import report_export, report_pdf  # noqa: E402
 
 payload_none = report_export.summary_export_payload("Проект", "Апрель", "Текст.", mc.overview_metrics(no_markup),
                                                     messages=no_markup, events_agg=pd.DataFrame())
@@ -270,7 +270,7 @@ check("PNG без разметки: кольцевая диаграмма не �
 check("PNG при законном нуле: диаграмма есть", sentiment_axes(payload_neutral) == 1)
 
 created = []
-original_block = report_export._PdfSentimentBlock
+original_block = report_pdf._PdfSentimentBlock
 
 
 class _SpyBlock(original_block):
@@ -279,14 +279,14 @@ class _SpyBlock(original_block):
         super().__init__(*args, **kwargs)
 
 
-report_export._PdfSentimentBlock = _SpyBlock
+report_pdf._PdfSentimentBlock = _SpyBlock
 try:
     report_export.generate_summary_pdf(payload_none)
     check("PDF без разметки: блок-диаграмма не создан", created == [], str(created))
     report_export.generate_summary_pdf(payload_neutral)
     check("PDF при законном нуле: диаграмма есть", len(created) == 1, str(created))
 finally:
-    report_export._PdfSentimentBlock = original_block
+    report_pdf._PdfSentimentBlock = original_block
 
 print("8. Негатив по флагу и английской разметке в тегах и инфоповодах")
 from services.manual_moderation import recompute_event_counts  # noqa: E402

@@ -1,71 +1,22 @@
 from __future__ import annotations
 
 import argparse
-import functools
 import logging
 import os
-import uuid
-import re
-import textwrap
-from io import BytesIO
-from datetime import datetime
-from pathlib import Path
-from typing import Any
 
 import pandas as pd
 import streamlit as st
-import altair as alt
 
-from error_ui import set_error_details_allowed, show_error, show_error_details
+from error_ui import set_error_details_allowed, show_error_details
 from metric_cards_ui import inject_metric_css
-from services.cached_store import (
-    supabase_configured,
-    list_projects,
-    create_project,
-    update_project,
-    resolve_project_access,
-    list_periods,
-    update_period_metadata,
-    delete_period,
-    delete_project,
-    save_report_logo_to_storage,
-    download_storage_file,
-    load_storage_file,
-    delete_storage_file,
-    clear_platform_caches,
-    cache_version,
-)
-from services.metrics_compute import (
-    numeric_series,
-    format_int,
-    sentiment_counts,
-    percent_text,
-    overview_metrics,
-)
-from services.tag_compute import (
-    split_pipe_values,
-    build_tag_statistics,
-)
-from services.message_compute import message_text_column, message_link_column
-from services.event_titles import (
-    DEFAULT_SIMILARITY,
-    merge_similar_events,
-    normalize_event_title,
-    preview_merge_levels,
-)
-from services.ingest import IngestError, process_canonical, read_canonical_bytes
-from ingest_admin_ui import render_ingest_admin_page
-from brand_metrics_ui import render_brand_metrics_page
+from services.cached_store import supabase_configured
 from ai_summary_ui import RERUN_AFTER_RENDER_KEY, render_saved_ai_text
 from services.ai_summary import (
     KIND_BRAND as AI_KIND_BRAND,
     KIND_RISKS as AI_KIND_RISKS,
 )
-from tag_hierarchy_ui import render_tag_hierarchy_block
-from tag_tier_analytics_ui import render_tier_analytics_block
 from services.observability import report_failure
-from services.perf import perf_block, render_perf_sidebar, reset_perf_events
-from services.formatting import fmt_date, fmt_period
+from services.perf import render_perf_sidebar, reset_perf_events
 from services.roles import can_see_error_details, role_rank
 from services.manual_moderation import (
     blocked_title_merges,
@@ -73,30 +24,20 @@ from services.manual_moderation import (
     recompute_event_counts,
 )
 from services.event_enrichment import aggregate_events
-from services.dashboard_data import cached_period_messages, prepare_period_data
+from services.dashboard_data import cached_period_messages
 from summary_ui import render_period_summary
 from sidebar_ui import (
     NAV_STATE_KEY,
     dashboard_view_mode_for_session,
-    render_min_event_messages_control,
     cached_merge_similar_events,
-    render_title_merge_control,
     filter_small_events,
-    render_small_events_notice,
     normalize_section,
     render_sidebar_nav,
 )
-from events_ui import render_events
-from upload_history_ui import (
-    render_period_selector,
-    render_upload_page,
-    render_period_history,
-)
+from upload_history_ui import render_period_selector
 from services.period_comparison import (
-    period_metrics_for_comparison,
     build_comparison_metrics,
     filter_messages_by_buckets,
-    previous_period_id,
     selected_period_label,
 )
 from granularity_ui import render_granularity_selector
@@ -110,144 +51,43 @@ from tag_slice_ui import (
     slice_title,
     sliced_loader,
 )
-from overview_ui import (
-    render_period_comparison_metrics,
-    render_period_metrics_line,
-    render_project_intro,
-)
-from services.event_filter_state import (
-    set_selected_event_filter,
-    get_selected_event_filter,
-    clear_selected_event_filter,
-    filter_messages_by_selected_event,
-    event_series_filter,
-)
-from messages_ui import render_messages_block, render_message_list
+from overview_ui import render_period_comparison_metrics
 from reviews_ui import render_reviews
-from sources_ui import render_sources_page
 from ab_compare_ui import render_ab_comparison
-from backups_ui import render_backups_block
-from audit_ui import render_audit_page
-from tags_ui import render_tag_statistics
 from client_insights_ui import render_client_insights
 from project_admin_ui import render_project_access, render_project_manager
-from session_presence_ui import render_presence_heartbeat, render_session_presence_page
+from session_presence_ui import render_presence_heartbeat
 from services.dashboard_config import (
     ALGORITHM_PROFILE_OPTIONS,
-    LEGACY_PROFILE_ALIASES,
-    CHART_LABEL_POSITION_OPTIONS,
-    CHART_LABEL_FONT_OPTIONS,
-    DEFAULT_CHART_LABEL_SETTINGS,
-    DEFAULT_REPORT_BRANDING,
-    COMPARISON_CHART_BLOCKS,
-    DEFAULT_DASHBOARD_VIEW_SETTINGS,
     DASHBOARD_SECTION_OPTIONS,
-    SECTION_ALIASES,
 )
 from services.project_settings import (
-    DEMO_MESSAGE,
     category_brands_from_project_settings,
     demo_ai_runs_left,
     is_demo_project,
     project_settings_from_row,
-    valid_hex_color,
     dashboard_view_settings_from_project_settings,
     report_branding_from_project_settings,
     project_topic_profile,
-    is_brand_analytics_event_set,
-    default_min_event_messages,
     chart_label_settings_from_project_settings,
-    chart_label_text_kwargs,
-    chart_label_radius,
 )
+from dashboard_header_ui import render_header_metrics, render_project_header, render_view_panel
+from dashboard_sections_ui import (
+    _section_brand_metrics,
+    _section_events,
+    _section_messages,
+    _section_sources,
+    _section_tags,
+)
+from service_pages_ui import render_page_without_periods
+
+# Прежние имена app: данные дашборда и граница отказа живут в своих модулях,
+# их по-прежнему можно импортировать отсюда (tests/boundary_app.py и др.).
+from dashboard_loader import load_dashboard_data, period_overview_metrics  # noqa: F401
+from section_boundary_ui import _as_fragment, render_section_safely  # noqa: F401
 
 APP_TITLE = "Платформа дайджестов"
 APP_VERSION = "4.12.4: саммари от ИИ, сертификат без терминала"
-
-
-def _dashboard_data_uncached(
-    project_id: str, period_ids: list[str]
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, Any]]:
-    """Загрузить и подготовить данные проекта за выбранные периоды."""
-    events, enriched, manual_state = prepare_period_data(project_id, period_ids)
-    return events, enriched, aggregate_events(events), manual_state
-
-
-@st.cache_data(show_spinner=False, max_entries=4, ttl=900)
-def _cached_dashboard_data(
-    project_id: str,
-    period_ids_key: tuple[str, ...],
-    data_version: int,
-    manual_version: int,
-):
-    with perf_block(
-        "dashboard.prepare_data", project_id=project_id, periods=len(period_ids_key)
-    ):
-        return _dashboard_data_uncached(project_id, list(period_ids_key))
-
-
-def load_dashboard_data(
-    project_id: str, period_ids: list[str]
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, Any]]:
-    """Кешированная подготовка данных дашборда.
-
-    Ключ кеша — идентификаторы проекта и периодов плюс версии кеша, а не сами
-    таблицы. Раньше Streamlit хешировал датафреймы целиком на каждом
-    перезапуске страницы, и на больших выгрузках это стоило дороже самого
-    расчёта. Промежуточные шаги (обогащение, ручные правки, агрегация
-    инфоповодов) больше не кешируются по отдельности: результат считается один
-    раз и хранится ограниченным числом записей, чтобы не съедать память.
-    """
-    key = tuple(sorted(str(pid) for pid in (period_ids or []) if str(pid).strip()))
-    if not key:
-        empty = pd.DataFrame()
-        return empty, empty, empty, {}
-    return _cached_dashboard_data(
-        str(project_id),
-        key,
-        cache_version(project_id, "data"),
-        cache_version(project_id, "manual"),
-    )
-
-
-
-
-@st.cache_data(show_spinner=False, max_entries=6, ttl=900)
-def _cached_period_overview(
-    project_id: str,
-    period_id: str,
-    data_version: int,
-    manual_version: int,
-    tag_keys: tuple[str, ...] = (),
-):
-    """Метрики прошлого периода для изменений в шапке «Обзора».
-
-    Период готовится так же, как выбранный: раньше он читался сырым, и
-    скрытое аналитиком сообщение продолжало считаться в сравнении. Срез по
-    тегам — тот же, что у выбранного: срез против целого периода дал бы
-    ложное падение.
-    """
-    messages = apply_slice(cached_period_messages(project_id, [period_id]), list(tag_keys))
-    if messages is None or messages.empty:
-        return None
-    return overview_metrics(messages)
-
-
-def period_overview_metrics(
-    project_id: str, period_id: str | None, tag_keys: tuple[str, ...] = ()
-):
-    if not project_id or not period_id:
-        return None
-    try:
-        return _cached_period_overview(
-            str(project_id),
-            str(period_id),
-            cache_version(project_id, "data"),
-            cache_version(project_id, "manual"),
-            tuple(tag_keys),
-        )
-    except Exception:  # noqa: BLE001 - дельта не критична для страницы
-        return None
 
 
 def parse_args() -> argparse.Namespace:
@@ -301,186 +141,7 @@ def is_platform_admin() -> bool:
     return False
 
 
-def normalize_text(value: Any) -> str:
-    return str(value or "").strip()
-
-
 LOGGER = logging.getLogger("platform.app")
-
-
-def project_logo_bytes(project_id: str, branding: dict[str, Any] | None) -> bytes:
-    """Логотип проекта для шапки — тот же файл, что уходит в отчёт.
-
-    Логотип не обязателен, и его отсутствие не повод ронять страницу: шапка
-    просто остаётся без картинки. Ссылка на внешний адрес в шапку не идёт —
-    страница не должна ждать чужой сервер при каждой перерисовке; для отчёта
-    такая ссылка по-прежнему работает.
-    """
-    storage_path = str((branding or {}).get("logo_storage_path") or "").strip()
-    if not storage_path:
-        return b""
-    try:
-        return load_storage_file(storage_path, project_id)
-    except Exception:  # noqa: BLE001 — картинка не стоит падения страницы
-        LOGGER.warning("Не удалось загрузить логотип проекта %s", project_id)
-        return b""
-
-
-def render_section_safely(title: str, render, *args, _details: bool = False, **kwargs) -> bool:
-    """Отрисовать раздел так, чтобы его падение не уносило всю страницу.
-
-    Без этой границы исключение в любом блоке роняло весь дашборд: заказчик
-    видел трейсбек вместо платформы, хотя не работал один раздел из двенадцати.
-
-    st.rerun() внутри раздела продолжает работать: RerunException наследуется от
-    BaseException, поэтому мимо except Exception проходит насквозь. Расширить
-    границу до BaseException — значит молча сломать каждую кнопку в приложении;
-    это стережёт tests/test_section_boundary.py.
-
-    Параметр назван с подчёркиванием, чтобы не столкнуться с именами аргументов
-    самих разделов, которые уезжают дальше через **kwargs.
-    """
-    if getattr(render, "_guarded_fragment", False):
-        # Фрагмент ловит свои ошибки сам (см. _as_fragment): при перерисовке
-        # одного фрагмента эта граница уже не участвует.
-        kwargs = {**kwargs, "_section_title": title, "_section_details": _details}
-    try:
-        render(*args, **kwargs)
-        return True
-    except Exception as exc:  # noqa: BLE001 — это и есть граница отказа
-        _render_section_failure(title, exc, _details)
-        return False
-
-
-def _render_section_failure(title: str, exc: BaseException, details: bool) -> None:
-    LOGGER.error("Раздел «%s» не отрисовался", title, exc_info=exc)
-    # Заказчик видит вежливое сообщение, а владелец платформы — событие
-    # в настроенном канале (Sentry или вебхук). Без настройки — только лог.
-    report_failure(f"раздел «{title}»", exc)
-    st.error(f"Не удалось отобразить раздел «{title}».")
-    st.caption(
-        "Остальные разделы продолжают работать. Попробуйте обновить "
-        "страницу, выбрать другой период или вернуться сюда позже."
-    )
-    if details:
-        with st.expander("Подробности ошибки", expanded=False):
-            st.exception(exc)
-
-
-def _as_fragment(func):
-    """Обернуть раздел во фрагмент, если версия Streamlit это умеет.
-
-    Внутри фрагмента перерисовывается только он сам: пагинация ленты, выбор
-    тега или инфоповода больше не заставляют приложение заново собирать данные
-    всего проекта.
-
-    Ошибку фрагмент ловит сам, внутри. Исключение, вышедшее из фрагмента,
-    Streamlit показывает своим трейсбеком — с путями к файлам и текстом
-    ошибки — любому, кто смотрит страницу, и только потом отдаёт наружу; а при
-    перерисовке одного фрагмента (клик по тегу, листание ленты) внешней
-    границы render_section_safely нет вовсе. Название раздела и то, можно ли
-    показывать подробности, приходят от render_section_safely и сохраняются в
-    аргументах фрагмента для его собственных перерисовок.
-    """
-
-    @functools.wraps(func)
-    def guarded(*args, _section_title: str = "", _section_details: bool = False, **kwargs):
-        try:
-            return func(*args, **kwargs)
-        except Exception as exc:  # noqa: BLE001 — граница отказа внутри фрагмента
-            _render_section_failure(_section_title or "раздел", exc, _section_details)
-            return None
-
-    fragment = getattr(st, "fragment", None)
-    wrapped = fragment(guarded) if callable(fragment) else guarded
-    wrapped._guarded_fragment = True
-    return wrapped
-
-
-@_as_fragment
-def _section_tags(
-    messages: pd.DataFrame, project_id: str, analyst_view: bool = False
-) -> None:
-    render_tag_statistics(messages, project_id=project_id, analyst_view=analyst_view)
-    render_tier_analytics_block(messages, project_id, analyst_view=analyst_view)
-
-
-@_as_fragment
-def _section_messages(
-    messages: pd.DataFrame,
-    project_id: str,
-    project_name: str = "",
-    period_label: str = "",
-    tag_slice: list[str] | None = None,
-) -> None:
-    render_messages_block(
-        messages,
-        project_id=project_id,
-        project_name=project_name,
-        period_label=period_label,
-        slice_tags=tag_slice,
-    )
-
-
-@_as_fragment
-def _section_sources(
-    messages: pd.DataFrame,
-    periods: pd.DataFrame,
-    period_ids: list[str],
-    project_id: str,
-    tag_slice: list[str] | None = None,
-) -> None:
-    render_sources_page(
-        messages,
-        periods,
-        period_ids,
-        load_period_messages=sliced_loader(
-            lambda period_id: cached_period_messages(project_id, [period_id]),
-            list(tag_slice or []),
-        ),
-        project_id=project_id,
-    )
-
-
-@_as_fragment
-def _section_events(
-    project_id: str,
-    role: str,
-    events_agg: pd.DataFrame,
-    messages: pd.DataFrame,
-    manual_state: dict[str, Any],
-    hidden_events: int,
-    hidden_messages: int,
-    min_event_messages: int,
-    read_only: bool = False,
-) -> None:
-    render_small_events_notice(hidden_events, hidden_messages, min_event_messages)
-    render_events(
-        project_id, role, events_agg, messages, manual_state, read_only=read_only
-    )
-
-
-@_as_fragment
-def _section_brand_metrics(
-    project_id: str,
-    project_settings: dict[str, Any],
-    messages: pd.DataFrame,
-    periods: pd.DataFrame,
-    period_ids: list[str],
-    role_can_edit: bool,
-    read_only: bool = False,
-    partial_period: bool = False,
-) -> None:
-    render_brand_metrics_page(
-        project_id,
-        project_settings,
-        messages,
-        periods,
-        period_ids,
-        role_can_edit=role_can_edit,
-        read_only=read_only,
-        partial_period=partial_period,
-    )
 
 
 def main() -> None:
@@ -641,77 +302,18 @@ def _main() -> None:
     set_error_details_allowed(show_error_details)
 
     # --- страницы, которым не нужны данные периодов ---
-    if page in ("Проекты", "Настройки проекта"):
-        render_section_safely(
-            page,
-            render_project_manager,
-            projects,
-            is_admin=is_admin,
-            role=role,
-            current_project_id=project_id,
-            _details=show_error_details,
-        )
-        if page == "Проекты" and is_admin:
-            st.divider()
-            render_section_safely(
-                "Резервные копии", render_backups_block, _details=show_error_details
-            )
-        return
-    if page == "Сессии":
-        render_section_safely(
-            "Сессии",
-            render_session_presence_page,
-            is_admin=is_admin,
-            _details=show_error_details,
-        )
-        return
-    if page == "Журнал":
-        render_section_safely(
-            "Журнал",
-            render_audit_page,
-            projects,
-            is_admin=is_admin,
-            _details=show_error_details,
-        )
-        return
-    if not project_id:
-        st.info("Введите код доступа к проекту или войдите как владелец платформы.")
-        return
-    if page == "Загрузка файла":
-        render_section_safely(
-            "Загрузка файла",
-            render_upload_page,
-            project_id,
-            role,
-            args.work_dir,
-            current_project_settings,
-            read_only=demo_read_only,
-            _details=show_error_details,
-        )
-        return
-    if page == "История периодов":
-        render_section_safely(
-            "История периодов",
-            render_period_history,
-            project_id,
-            role,
-            read_only=demo_read_only,
-            work_dir=args.work_dir,
-            _details=show_error_details,
-        )
-        return
-    if page == "Автозагрузка":
-        render_section_safely(
-            "Автозагрузка",
-            render_ingest_admin_page,
-            project_id,
-            project_name,
-            args.work_dir,
-            role=role,
-            read_only=demo_read_only,
-            is_admin=is_admin,
-            _details=show_error_details,
-        )
+    if render_page_without_periods(
+        page,
+        projects,
+        project_id=project_id,
+        project_name=project_name,
+        role=role,
+        is_admin=is_admin,
+        work_dir=args.work_dir,
+        current_project_settings=current_project_settings,
+        demo_read_only=demo_read_only,
+        show_error_details=show_error_details,
+    ):
         return
 
     if not selected_period_ids:
@@ -778,98 +380,35 @@ def _main() -> None:
         head_left, head_right = st.columns([6, 1])
     else:
         head_left, head_right = st.container(), None
-    with head_left:
-        # Логотип берётся тот же, что уходит в отчёт: один логотип на проект,
-        # загружается в настройках. Два разных неминуемо разошлись бы, а
-        # заказчик увидел бы на экране одно, в присланном файле другое.
-        logo = project_logo_bytes(project_id, report_branding)
-        if logo:
-            logo_col, name_col = st.columns([1, 6], vertical_alignment="center")
-            with logo_col:
-                st.image(logo, width=110)
-            name_box = name_col
-        else:
-            name_box = st.container()
-        with name_box:
-            st.markdown(f"### {project_name}")
-            # Профиль алгоритма — техническая деталь, клиенту он ничего не говорит.
-            head_parts = (
-                [page, period_label]
-                if hide_technical
-                else [profile_label, page, period_label]
-            )
-            st.caption(" · ".join(x for x in head_parts if x))
+    render_project_header(
+        head_left,
+        project_id=project_id,
+        project_name=project_name,
+        report_branding=report_branding,
+        page=page,
+        period_label=period_label,
+        profile_label=profile_label,
+        hide_technical=hide_technical,
+    )
 
     # Заголовки, которые аналитик запретил склеивать автоматически.
     blocked_merge_titles = blocked_title_merges(manual_state)
     saved_title_merge = float(dashboard_view_settings.get("event_title_merge") or 0.0)
 
-    min_event_messages: int | None = None
-    event_title_merge_threshold = saved_title_merge
-    if not show_view_panel:
-        show_metrics = "metrics" in saved_blocks
-        min_event_messages = int(default_min_event_messages(project_profile, events))
-    else:
-        with head_right:
-            if hasattr(st, "popover"):
-                view_box = st.popover("⚙️ Вид", width="stretch")
-            else:
-                view_box = st.expander("⚙️ Вид")
-            with view_box:
-                show_metrics = st.checkbox(
-                    "Метрики периода в шапке",
-                    value=("metrics" in saved_blocks),
-                    key="view_show_metrics",
-                    help=(
-                        "В «Обзоре» — полоса из четырёх показателей и тональности. "
-                        "В остальных разделах те же числа одной строкой, чтобы не "
-                        "отодвигать таблицы вниз."
-                    ),
-                )
-                if hide_technical:
-                    min_event_messages = int(
-                        default_min_event_messages(project_profile, events)
-                    )
-                else:
-                    min_event_messages = render_min_event_messages_control(
-                        project_profile,
-                        events,
-                        key="main_min_event_messages",
-                        container=view_box,
-                    )
-                    event_title_merge_threshold = render_title_merge_control(
-                        saved_title_merge,
-                        key="main_title_merge",
-                        container=view_box,
-                    )
-                # read_only — тот же признак «демо-гость, не владелец», что
-                # гасит запись в панели ИИ и в разделах отчёта: без него гость
-                # с кодом редактора мог сохранить свой вид как умолчание для
-                # всех следующих гостей демо-проекта.
-                if role_rank(role) >= role_rank("editor") and not read_only:
-                    st.divider()
-                    if st.button(
-                        "Открывать проект на этом разделе",
-                        key="view_save_start_section",
-                        help=f"Запомнить «{page}» как стартовый раздел проекта.",
-                    ):
-                        updated = dict(current_project_settings or {})
-                        dvs_raw = dict(updated.get("dashboard_view_settings") or {})
-                        dvs_raw[start_key] = page
-                        dvs_raw["main_visible_blocks"] = (
-                            ["metrics"] if show_metrics else []
-                        ) + [b for b in saved_blocks if b != "metrics"]
-                        dvs_raw["event_title_merge"] = float(
-                            event_title_merge_threshold
-                        )
-                        updated["dashboard_view_settings"] = dvs_raw
-                        try:
-                            update_project(project_id, settings=updated)
-                            clear_platform_caches(project_id)
-                            st.success("Сохранено для проекта.")
-                            st.rerun()
-                        except Exception as exc:  # noqa: BLE001 — сохранение не роняет страницу
-                            show_error("Не удалось сохранить настройки вида.", exc, warning=True)
+    show_metrics, min_event_messages, event_title_merge_threshold = render_view_panel(
+        head_right,
+        page=page,
+        project_id=project_id,
+        project_profile=project_profile,
+        current_project_settings=current_project_settings,
+        events=events,
+        saved_blocks=saved_blocks,
+        saved_title_merge=saved_title_merge,
+        start_key=start_key,
+        role=role,
+        hide_technical=hide_technical,
+        read_only=read_only,
+    )
 
     if demo_read_only:
         st.info(
@@ -963,82 +502,19 @@ def _main() -> None:
 
     metrics = None
     if show_metrics:
-        # Полоса метрик — надстройка над разделом, а не сам раздел: её падение
-        # не должно стоить пользователю содержимого страницы.
-        try:
-            if page == "Обзор":
-                # В «Обзоре» показатели периода и есть содержание раздела,
-                # поэтому здесь полная полоса с динамикой к прошлому периоду.
-                # «Прошлый период» — это ровно ОДИН период перед самым ранним
-                # выбранным (previous_period_id). Карточки выше показывают
-                # сумму по ВСЕМ выбранным периодам (или по узкому куску,
-                # который оставила гранулярность) — сравнивать это с одним
-                # целым прошлым периодом нечестно: два выбранных периода
-                # против одного такого же дали бы «+100%» на ровном месте, а
-                # выбор части дней — глубокое ложное падение. Та же защита,
-                # что уже стоит в «Индексах бренда» (partial_period).
-                comparable_previous = (
-                    len(selected_period_ids) < 2 and not granularity_narrowed
-                )
-                prev_id = previous_period_id(periods, selected_period_ids)
-                prev_metrics = (
-                    period_overview_metrics(project_id, prev_id, slice_keys(tag_slice))
-                    if comparable_previous
-                    else None
-                )
-                prev_label = ""
-                prev_disabled_reason = ""
-                if prev_metrics and prev_id and not periods.empty:
-                    prev_row = periods[periods["period_id"].astype(str) == str(prev_id)]
-                    if not prev_row.empty:
-                        prev_label = str(prev_row.iloc[0].get("period_name") or prev_id)
-                elif not comparable_previous and prev_id:
-                    # Подпись — только когда сравнивать было с чем: без
-                    # прошлого периода она объясняла бы отсутствие изменения
-                    # не той причиной. Для нескольких периодов она говорит о
-                    # периоде ДО выбранных: изменения между самими выбранными
-                    # периодами «Клиентский обзор» ниже показывает.
-                    if len(selected_period_ids) < 2:
-                        prev_disabled_reason = (
-                            "Изменение к предыдущему периоду не показано: в "
-                            "гранулярности отмечены не все дни периода."
-                        )
-                    elif granularity_narrowed:
-                        prev_disabled_reason = (
-                            "Изменение к периоду до выбранных не показано: "
-                            "выбрано несколько периодов, и в гранулярности "
-                            "отмечены не все их дни."
-                        )
-                    else:
-                        prev_disabled_reason = (
-                            "Изменение к периоду до выбранных не показано: "
-                            "выбрано несколько периодов. Изменения между ними — "
-                            "ниже, в «Клиентском обзоре»."
-                        )
-                metrics = render_project_intro(
-                    project_name,
-                    enriched_messages,
-                    periods,
-                    selected_period_ids,
-                    profile_label=profile_label,
-                    chart_label_settings=chart_label_settings,
-                    comparison_visible_charts=dashboard_view_settings.get(
-                        "comparison_visible_charts"
-                    ),
-                    show_comparison=False,
-                    show_title=False,
-                    previous_metrics=prev_metrics,
-                    previous_label=prev_label,
-                    previous_disabled_reason=prev_disabled_reason,
-                )
-            else:
-                # В рабочих разделах те же числа нужны как ориентир, а не как
-                # содержание: полоса из семи карточек занимала треть экрана и
-                # отодвигала вниз таблицы, ради которых раздел и открывают.
-                metrics = render_period_metrics_line(enriched_messages)
-        except Exception:  # noqa: BLE001 — граница отказа
-            LOGGER.exception("Метрики в шапке не отрисовались")
-            st.caption("Метрики периода сейчас недоступны.")
+        metrics = render_header_metrics(
+            page,
+            project_id=project_id,
+            project_name=project_name,
+            enriched_messages=enriched_messages,
+            periods=periods,
+            selected_period_ids=selected_period_ids,
+            granularity_narrowed=granularity_narrowed,
+            tag_slice=tag_slice,
+            profile_label=profile_label,
+            chart_label_settings=chart_label_settings,
+            dashboard_view_settings=dashboard_view_settings,
+        )
     st.divider()
 
     # --- содержимое выбранного раздела ---

@@ -139,8 +139,8 @@
 | Что | Файл |
 | --- | --- |
 | Нормализация, похожесть, склейка, диагностика | `src/services/event_titles.py` |
-| Сборка агрегата инфоповодов | `aggregate_events` в `src/app.py` |
-| Блок склейки и диагностика в интерфейсе | `render_title_merge_report`, `render_title_merge_diagnostics` в `src/app.py` |
+| Сборка агрегата инфоповодов | `aggregate_events` в `src/services/event_enrichment.py` |
+| Блок склейки и диагностика в интерфейсе | `render_title_merge_report`, `render_title_merge_diagnostics` в `src/events_manual_ui.py` |
 | `event_id` сюжета Brand Analytics | `make_events_from_source_stories` в `src/preprocess.py` |
 | Префикс периода у идентификаторов | `_prefix_ids` в `src/platform_store.py` |
 | Тесты | `tests/test_event_titles.py` |

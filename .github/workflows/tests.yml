@@ -44,6 +44,9 @@ jobs:
       - name: Контракт распила preprocess.py (ре-экспорт, отсутствие циклов)
         run: python tests/test_preprocess_split.py
 
+      - name: Контракт разделения крупных модулей (отчёт, «Обзор», «Инфоповоды», app)
+        run: python tests/test_module_split.py
+
       - name: Разбор выгрузки (совпадает с прежним, быстрее)
         run: python tests/test_message_normalize.py
 

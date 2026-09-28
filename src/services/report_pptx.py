@@ -32,7 +32,7 @@ from .metrics_compute import (
     no_sentiment_line,
     percent_text,
 )
-from .report_export import _classify_summary_line, resolve_report_sections
+from .report_common import _classify_summary_line, resolve_report_sections
 
 # Цвета типов сообщений — та же палитра, что у графика на экране.
 TYPE_COLORS = ("2A78D6", "EB6834", "1BAF7A", "EDA100", "E87BA4", "008300", "4A3AA7", "E34948")

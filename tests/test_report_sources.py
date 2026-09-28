@@ -40,6 +40,7 @@ from pptx import Presentation  # noqa: E402
 from pptx.enum.chart import XL_CHART_TYPE  # noqa: E402
 
 import services.report_export as report_export  # noqa: E402
+import services.report_png as report_png  # noqa: E402
 from services.dashboard_config import DEFAULT_REPORT_SECTIONS, REPORT_SECTION_OPTIONS  # noqa: E402
 from services.report_pptx import generate_summary_pptx  # noqa: E402
 
@@ -119,7 +120,7 @@ check("площадки в PDF", "Площадки" in pdf_texts and "• vk.com
 
 print("3. PNG")
 highlight_lines = {}
-_highlights = report_export._draw_highlights_section
+_highlights = report_png._draw_highlights_section
 
 
 def _spy_highlights(ax, data, top):
@@ -127,7 +128,7 @@ def _spy_highlights(ax, data, top):
     return _highlights(ax, data, top)
 
 
-report_export._draw_highlights_section = _spy_highlights
+report_png._draw_highlights_section = _spy_highlights
 
 
 def png_texts(sections=None):
@@ -158,7 +159,7 @@ texts = png_texts(sections=["top_sources", "highlights"])
 check("PNG: метрики выключены — площадки отдельной строкой", any(t.startswith("Площадки: vk.com") for t in texts),
       str(texts[:12]))
 check("PNG: раздел выключен — площадок нет", not any("Площадки" in t for t in png_texts(sections=["metrics"])))
-report_export._draw_highlights_section = _highlights
+report_png._draw_highlights_section = _highlights
 
 print("4. PowerPoint")
 
