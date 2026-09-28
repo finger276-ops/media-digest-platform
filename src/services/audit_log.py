@@ -38,6 +38,7 @@ _SAVE_TITLES = {
     "summaries": "Саммари сохранено",
     "ai_texts": "Текст от ИИ сохранён",
     "rebuild_orphans": "Правка отложена при пересборке периода",
+    "saved_views": "Вид сохранён",
 }
 _DELETE_TITLES = {
     "event_edits": "Правка инфоповода отменена",
@@ -49,6 +50,7 @@ _DELETE_TITLES = {
     "title_merge_blocks": "Заголовок возвращён в автосклейку",
     "summaries": "Саммари удалено",
     "ai_texts": "Текст от ИИ удалён",
+    "saved_views": "Вид удалён",
 }
 # Поля правки инфоповода и как они называются в сводке.
 _EVENT_FIELDS = (("title", "название"), ("description", "описание"), ("tags", "теги"), ("hidden", "скрытие"))
@@ -99,6 +101,8 @@ def summarize(action: str, table_name: str, before: dict | None, after: dict | N
         return f"{title}: «{_short(after.get('title'), 60)}»"
     if table_name == "title_merge_blocks" and after.get("title"):
         return f"{title}: «{_short(after.get('title'), 60)}»"
+    if table_name == "saved_views" and after.get("name"):
+        return f"{title}: «{_short(after.get('name'), 60)}»"
     return title
 
 

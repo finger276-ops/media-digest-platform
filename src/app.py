@@ -100,6 +100,7 @@ from services.period_comparison import (
     selected_period_label,
 )
 from granularity_ui import render_granularity_selector
+from saved_views_ui import apply_view_from_link, render_saved_views
 from tag_slice_ui import (
     BRAND_INDEX_NOTE,
     apply_slice,
@@ -611,6 +612,11 @@ def _main() -> None:
             dashboard_view_mode_for_session(role, dashboard_view_settings) == "client"
         )
 
+    # Вид по ссылке ?view=… — до меню и фильтров: он выбирает раздел и
+    # выставляет срез и фильтры, а их можно менять только до отрисовки.
+    if project_id:
+        apply_view_from_link(project_id)
+
     page = render_sidebar_nav(
         groups, default_section, after_group={"Аналитика": _periods_block}
     )
@@ -910,6 +916,9 @@ def _main() -> None:
     # сообщений среза уходят. «Индексы бренда» получают выборку без среза.
     unsliced_messages = enriched_messages
     tag_slice = render_tag_slice(enriched_messages, project_id)
+    render_saved_views(
+        project_id, can_edit=role_rank(role) >= role_rank("editor") and not read_only
+    )
     if tag_slice:
         enriched_messages = apply_slice(enriched_messages, tag_slice)
         granularity_key = f"{granularity_key}::tags={'|'.join(slice_keys(tag_slice))}"

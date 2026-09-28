@@ -214,3 +214,6 @@ jobs:
 
       - name: Тексты ИИ по срезу (генерация, ключи хранения, саммари среза)
         run: python tests/test_ai_slice.py
+
+      - name: Сохранённые виды (срез и фильтры под именем, ссылка)
+        run: python tests/test_saved_views.py
