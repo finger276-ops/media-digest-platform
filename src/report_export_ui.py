@@ -19,7 +19,10 @@ import streamlit as st
 from error_ui import show_error
 from services.observability import report_failure
 from services.dashboard_config import REPORT_SECTION_OPTIONS
-from services.project_settings import report_sections_from_project_settings
+from services.project_settings import (
+    report_sections_from_project_settings,
+    report_sections_setting,
+)
 from services.report_export import (
     _export_sentiment,
     generate_summary_docx,
@@ -86,9 +89,7 @@ def render_summary_export_buttons(
             from services.cached_store import clear_platform_caches, update_project
 
             updated = dict(project_settings or {})
-            updated["report_sections"] = list(selected_sections) or list(
-                REPORT_SECTION_OPTIONS.keys()
-            )
+            updated.update(report_sections_setting(selected_sections))
             try:
                 update_project(project_id, settings=updated)
                 clear_platform_caches(project_id)

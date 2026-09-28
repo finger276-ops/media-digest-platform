@@ -234,19 +234,54 @@ def report_branding_from_project_settings(
     return result
 
 
+# Разделы, которые были в конструкторе до того, как сохранённый набор начал
+# помнить, какие разделы аналитик видел. Всё, что добавилось позже («Топ
+# площадок»), у проектов с набором, сохранённым раньше, включается само.
+LEGACY_KNOWN_REPORT_SECTIONS = (
+    "metrics",
+    "sentiment",
+    "top_tags",
+    "top_events",
+    "highlights",
+    "summary_text",
+)
+
+
+def report_sections_setting(selected: list[str] | None) -> dict[str, list[str]]:
+    """Что записать в настройки проекта при сохранении набора разделов.
+
+    Кроме самого набора — какие разделы были в конструкторе в момент
+    сохранения: раздел, который появится позже, аналитик не видел и не
+    выключал, и он должен включиться у проекта сам. Выключенный осознанно
+    остаётся выключенным.
+    """
+    chosen = [s for s in (selected or []) if s in REPORT_SECTION_OPTIONS]
+    return {
+        "report_sections": chosen or list(REPORT_SECTION_OPTIONS.keys()),
+        "report_sections_known": list(REPORT_SECTION_OPTIONS.keys()),
+    }
+
+
 def report_sections_from_project_settings(settings: dict[str, Any] | None) -> list[str]:
     """Какие блоки включать в PNG/DOCX/PDF по умолчанию для проекта.
 
     Сохранено — как и брендирование — на уровне проекта: аналитик выбирает
     один раз, дальше выгрузка собирается так же, с возможностью поменять
-    набор перед конкретной выгрузкой (см. report_export_ui.py).
+    набор перед конкретной выгрузкой (см. report_export_ui.py). Разделы,
+    появившиеся после сохранения набора, добавляются к нему сами.
     """
     raw = {}
+    known_raw = None
     if isinstance(settings, dict):
         raw = settings.get("report_sections")
+        known_raw = settings.get("report_sections_known")
     if not isinstance(raw, list) or not raw:
         return list(DEFAULT_REPORT_SECTIONS)
-    result = [s for s in raw if s in REPORT_SECTION_OPTIONS]
+    known = set(known_raw) if isinstance(known_raw, list) and known_raw else set(LEGACY_KNOWN_REPORT_SECTIONS)
+    chosen = {s for s in raw if s in REPORT_SECTION_OPTIONS}
+    chosen |= {s for s in REPORT_SECTION_OPTIONS if s not in known}
+    # Порядок — как в конструкторе, а не как в сохранённом списке.
+    result = [s for s in REPORT_SECTION_OPTIONS if s in chosen]
     return result or list(DEFAULT_REPORT_SECTIONS)
 
 

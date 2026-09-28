@@ -47,6 +47,7 @@ from services.project_settings import (
     project_settings_from_row,
     report_branding_from_project_settings,
     report_sections_from_project_settings,
+    report_sections_setting,
     valid_hex_color,
 )
 
@@ -619,9 +620,7 @@ def render_project_manager(
                     "logo_filename": logo_filename,
                     "logo_mime_type": logo_mime_type,
                 }
-                updated_settings["report_sections"] = list(report_sections) or list(
-                    REPORT_SECTION_OPTIONS.keys()
-                )
+                updated_settings.update(report_sections_setting(report_sections))
                 updated_settings["demo_mode"] = bool(demo_mode)
                 if reset_demo_ai:
                     updated_settings["demo_ai_runs"] = 0

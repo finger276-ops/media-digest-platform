@@ -13,7 +13,12 @@
   выключены — площадки отдельной строкой» краснеет;
 - PNG: площадки отдельным блоком с заголовком -> «PNG: с площадками
   «Главное» теряет не больше строки» краснеет;
-- PowerPoint без слайда -> «слайд «Топ площадок» с диаграммой» краснеет.
+- PowerPoint без слайда -> «слайд «Топ площадок» с диаграммой» краснеет;
+- набор без «известных» разделов -> «набор, сохранённый до «Топ площадок»,
+  получает его сам» краснеет;
+- сохранение без списка известных разделов -> «выключенный осознанно раздел
+  не возвращается» и «сохранение из выгрузки помнит известные разделы»
+  краснеют.
 """
 
 import sys
@@ -176,6 +181,64 @@ check("раздел выключен — нет слайда",
       slide(Presentation(BytesIO(generate_summary_pptx(payload(sections=["metrics"])))), "Топ площадок") is None)
 check("нет площадок — нет слайда",
       slide(Presentation(BytesIO(generate_summary_pptx(payload(messages=pd.DataFrame())))), "Топ площадок") is None)
+
+print("5. Раздел у проектов с сохранённым набором")
+import os  # noqa: E402
+
+os.environ.setdefault("SUPABASE_URL", "https://test.supabase.co")
+os.environ.setdefault("SUPABASE_SERVICE_ROLE_KEY", "test-key")
+from datetime import datetime, timezone  # noqa: E402
+
+from fake_supabase import FakeClient  # noqa: E402
+
+import platform_store as store  # noqa: E402
+from services.project_settings import (  # noqa: E402
+    report_sections_from_project_settings,
+    report_sections_setting,
+)
+
+LEGACY = {"report_sections": ["metrics", "sentiment", "highlights"]}
+check("набор, сохранённый до «Топ площадок», получает его сам",
+      report_sections_from_project_settings(LEGACY) == ["metrics", "sentiment", "top_sources", "highlights"],
+      str(report_sections_from_project_settings(LEGACY)))
+saved_now = report_sections_setting(["metrics", "highlights"])
+check("при сохранении запоминается, какие разделы были в конструкторе",
+      saved_now.get("report_sections_known") == list(REPORT_SECTION_OPTIONS)
+      and saved_now.get("report_sections") == ["metrics", "highlights"], str(saved_now))
+check("выключенный осознанно раздел не возвращается", report_sections_from_project_settings(saved_now) == ["metrics", "highlights"],
+      str(report_sections_from_project_settings(saved_now)))
+check("раздел, появившийся после сохранения, включается", report_sections_from_project_settings(
+    {"report_sections": ["metrics"], "report_sections_known": ["metrics", "sentiment"]})
+    == [s for s in REPORT_SECTION_OPTIONS if s not in {"sentiment"}], "")
+
+CLIENT = FakeClient()
+store.get_supabase_client = lambda: CLIENT
+NOW = datetime.now(timezone.utc).isoformat()
+CLIENT.db["platform_projects"] = [{"project_id": "rs", "project_name": "Разделы", "status": "active",
+                                   "settings": dict(LEGACY), "created_at": NOW, "updated_at": NOW}]
+from streamlit.testing.v1 import AppTest  # noqa: E402
+
+
+def export_app():
+    import streamlit as st
+
+    from report_export_ui import render_summary_export_buttons
+
+    render_summary_export_buttons("Разделы", "Апрель", "Итог.", {"messages": 0, "sentiment": {}}, key_prefix="rs",
+                                  project_settings=st.session_state["settings"], project_id="rs", role_can_edit=True)
+
+
+at = AppTest.from_function(export_app, default_timeout=60)
+at.session_state["settings"] = dict(LEGACY)
+at.run()
+chooser = next((m for m in at.multiselect if str(m.label) == "Разделы отчёта"), None)
+check("в выгрузке старого проекта «Топ площадок» отмечен", chooser is not None and "top_sources" in list(chooser.value),
+      str(chooser.value if chooser else None))
+chooser.set_value(["metrics", "highlights"]).run()
+next(b for b in at.button if str(b.label).startswith("Сохранить как выбор")).click().run()
+stored = CLIENT.db["platform_projects"][0]["settings"]
+check("сохранение из выгрузки помнит известные разделы", stored.get("report_sections") == ["metrics", "highlights"]
+      and "top_sources" in (stored.get("report_sections_known") or []), str(stored))
 
 print()
 if failures:
