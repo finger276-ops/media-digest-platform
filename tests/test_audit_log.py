@@ -14,7 +14,9 @@
 - audit_reason не добавляется к сводке -> «правки пересборки помечены»
   краснеет;
 - render_audit_page без проверки владельца -> «не владельцу журнал закрыт»
-  краснеет.
+  краснеет;
+- load_log без досортировки по id -> «при равном времени выше запись с
+  большим id» краснеет.
 """
 
 import os
@@ -190,6 +192,20 @@ try:
           str([str(w.value) for w in at.warning]))
 finally:
     CLIENT.table = original_table
+
+print("7. Одинаковое время записи")
+# Две правки с одним created_at — обычное дело на Windows, где часы тикают раз
+# в 1–15 мс. Postgres отдаёт такие строки в произвольном порядке, и load_log
+# досортировывает по id. Фейк при равенстве сам ставит выше позже вставленную
+# строку, поэтому id здесь идут против порядка вставки: без второго ключа выше
+# окажется «раньше», и проверка покраснеет.
+SAME_TIME = "2026-01-01T00:00:00+00:00"
+log().extend([
+    {"id": 2, "project_id": "tie", "created_at": SAME_TIME, "summary": "позже"},
+    {"id": 1, "project_id": "tie", "created_at": SAME_TIME, "summary": "раньше"},
+])
+tied = audit_log.load_log("tie")
+check("при равном времени выше запись с большим id", list(tied["summary"]) == ["позже", "раньше"], str(list(tied["summary"])))
 
 print()
 if failures:

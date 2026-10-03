@@ -26,8 +26,7 @@ class Query:
         self.db, self.table, self.op, self.payload = db, table, op, payload
         self.on_conflict = on_conflict
         self.filters = []
-        self._order = None
-        self._desc = False
+        self._orders = []
         self._limit = None
         self._range = None
 
@@ -52,7 +51,9 @@ class Query:
         return self
 
     def order(self, col, desc=False):
-        self._order, self._desc = col, desc
+        # postgrest-py не заменяет прежний порядок, а дописывает ключ через
+        # запятую (order=created_at.desc,id.desc) — так и здесь.
+        self._orders.append((col, desc))
         return self
 
     def limit(self, n):
@@ -78,6 +79,33 @@ class Query:
                 return False
         return True
 
+    def _sorted(self, found):
+        """Строки по ключам order(...); равные — в порядке вставки.
+
+        Postgres порядок строк с равным ключом не гарантирует, а фейку нужен
+        один и тот же ответ на каждом прогоне. Равные строки идут так, будто
+        последним ключом стоит скрытый bigserial id в том же направлении: при
+        desc выше позже вставленная. Одна sort(reverse=True) так не умеет —
+        сортировка устойчивая, и равные строки остаются в порядке вставки, то
+        есть при desc выше оказывалась более старая. А равных много: на Windows
+        в Python до 3.13 часы тикают раз в 1–15 мс, и две быстрые записи
+        получают один created_at — тест журнала правок из-за этого падал через
+        раз.
+
+        Сам Postgres так не делает: если коду важен порядок равных строк, он
+        обязан досортировать по уникальной колонке явно (load_log журнала
+        правок добавляет id desc). Забытый второй ключ фейк сам не поймает —
+        для этого в тесте журнала есть отдельная проверка с равным временем.
+        """
+        ordered = list(found)
+        if self._orders[-1][1]:
+            ordered.reverse()
+        # Устойчивые сортировки от младшего ключа к старшему дают составной
+        # порядок, где у каждого ключа своё направление.
+        for col, desc in reversed(self._orders):
+            ordered.sort(key=lambda r, c=col: str(r.get(c) or ""), reverse=desc)
+        return ordered
+
     def execute(self):
         rows = self.db.setdefault(self.table, [])
         if self.op in ("insert", "upsert") and isinstance(self.payload, list):
@@ -90,8 +118,8 @@ class Query:
             return Result(out)
         if self.op == "select":
             found = [dict(r) for r in rows if self._match(r)]
-            if self._order:
-                found.sort(key=lambda r: str(r.get(self._order) or ""), reverse=self._desc)
+            if self._orders:
+                found = self._sorted(found)
             if self._limit:
                 found = found[: self._limit]
             if self._range:

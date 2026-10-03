@@ -161,7 +161,13 @@ def load_log(project_id: str | None = None, *, limit: int = 500) -> pd.DataFrame
     query = client.table(AUDIT_TABLE).select("*")
     if project_id:
         query = query.eq("project_id", project_id)
-    rows = query.order("created_at", desc=True).limit(limit).execute().data or []
+    # created_at ставит приложение (store.now_iso), и у двух правок время может
+    # совпасть — например, на Windows в Python до 3.13 часы тикают раз в
+    # 1–15 мс. Строки с равным ключом Postgres отдаёт в произвольном порядке,
+    # поэтому досортировываем по id: bigserial растёт с каждой вставкой, и при
+    # равном времени выше окажется правка, записанная позже.
+    query = query.order("created_at", desc=True).order("id", desc=True)
+    rows = query.limit(limit).execute().data or []
     return pd.DataFrame(rows)
 
 
