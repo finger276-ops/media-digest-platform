@@ -81,6 +81,18 @@ class FakeSession:
         return self.responses.pop(0)
 
 
+def safe_complete(config, session):
+    """complete, но AIError возвращается значением, а не обрывает скрипт.
+
+    Иначе одна сломанная проверка остановила бы все следующие, и по выводу
+    не было бы видно, что ещё сломалось.
+    """
+    try:
+        return complete("система", "запрос", config, session=session)
+    except AIError as exc:
+        return exc
+
+
 YANDEX_OK = FakeResponse(
     payload={
         "result": {
@@ -106,6 +118,25 @@ def gigachat_token_response(expires_ms=None):
 GIGACHAT_OK = FakeResponse(
     payload={"choices": [{"message": {"content": "Текст от GigaChat."}}]}
 )
+# Ответ в формате v2 — по образцу из документации Сбера: вместо choices список
+# messages, текст — частями, finish_reason и usage в корне. В образце текст
+# начинается с пробела, поэтому и здесь он с пробелом.
+GIGACHAT_V2_OK = FakeResponse(
+    payload={
+        "model": "GigaChat-2-Max:2.0.30.01",
+        "created_at": 1781694924,
+        "messages": [
+            {"role": "assistant", "content": [{"text": " Текст от GigaChat v2."}]}
+        ],
+        "finish_reason": "stop",
+        "usage": {
+            "input_tokens": 29,
+            "input_tokens_details": {"prompt_tokens": 29, "cached_tokens": 3},
+            "output_tokens": 31,
+            "total_tokens": 60,
+        },
+    }
+)
 
 
 YANDEX_CONFIG = AIConfig(
@@ -116,6 +147,12 @@ YANDEX_CONFIG = AIConfig(
 )
 GIGACHAT_CONFIG = AIConfig(
     provider="gigachat", api_key="basic-key", model="GigaChat"
+)
+GIGACHAT_V2_CONFIG = AIConfig(
+    provider="gigachat",
+    api_key="basic-key",
+    model="GigaChat-3-Ultra",
+    chat_url=ai_provider.GIGACHAT_CHAT_URL_V2,
 )
 
 
@@ -207,8 +244,8 @@ check(
 print("2. GigaChat: сначала токен, потом запрос")
 reset_gigachat_token()
 session = FakeSession([gigachat_token_response(), GIGACHAT_OK])
-text = complete("система", "запрос", GIGACHAT_CONFIG, session=session)
-check("текст извлечён из ответа", text == "Текст от GigaChat.", text)
+text = safe_complete(GIGACHAT_CONFIG, session)
+check("текст извлечён из ответа", text == "Текст от GigaChat.", repr(text))
 check("первым идёт OAuth", session.calls[0]["url"] == ai_provider.GIGACHAT_OAUTH_URL)
 check(
     "вторым — чат по новому адресу",
@@ -223,6 +260,24 @@ check(
 check(
     "токен подставлен в Bearer",
     session.calls[1]["headers"]["Authorization"] == "Bearer token-123",
+    str(session.calls[1]["headers"]),
+)
+v1_json = session.calls[1]["json"]
+check(
+    "по умолчанию формат v1: текст сообщений — строкой",
+    v1_json["messages"]
+    == [{"role": "system", "content": "система"}, {"role": "user", "content": "запрос"}],
+    str(v1_json["messages"]),
+)
+check(
+    "в v1 температура и лимит ответа — в корне тела",
+    v1_json.get("temperature") == 0.3 and v1_json.get("max_tokens") == 1800,
+    str(v1_json),
+)
+check("в v1 нет model_options", "model_options" not in v1_json, str(v1_json))
+check(
+    "в запросе к модели есть User-Agent",
+    bool(session.calls[1]["headers"].get("User-Agent")),
     str(session.calls[1]["headers"]),
 )
 
@@ -247,8 +302,8 @@ custom = AIConfig(
     chat_url="https://api.giga.chat/v2/chat/completions",
     oauth_url="https://example.test/oauth",
 )
-session = FakeSession([gigachat_token_response(), GIGACHAT_OK])
-complete("система", "запрос", custom, session=session)
+session = FakeSession([gigachat_token_response(), GIGACHAT_V2_OK])
+text = safe_complete(custom, session)
 check(
     "свой адрес токена доезжает",
     session.calls[0]["url"] == "https://example.test/oauth",
@@ -264,11 +319,336 @@ check(
     session.calls[1]["json"]["model"] == "GigaChat-3-Ultra",
     str(session.calls[1]["json"].get("model")),
 )
+# Раньше адрес /v2/ менял только адрес: тело уходило в формате v1, а ответ
+# v2 (без choices) платформа не читала.
+v2_json = session.calls[1]["json"]
+check(
+    "на адресе /v2/ текст сообщений уходит списком частей",
+    v2_json["messages"]
+    == [
+        {"role": "system", "content": [{"text": "система"}]},
+        {"role": "user", "content": [{"text": "запрос"}]},
+    ],
+    str(v2_json["messages"]),
+)
+check(
+    "в v2 температура и лимит ответа — в model_options",
+    v2_json.get("model_options") == {"temperature": 0.3, "max_tokens": 1800},
+    str(v2_json.get("model_options")),
+)
+check(
+    "в v2 нет температуры и лимита в корне тела",
+    "temperature" not in v2_json and "max_tokens" not in v2_json,
+    str(v2_json),
+)
+check(
+    "ответ v2 разобран, пробел в начале убран",
+    text == "Текст от GigaChat v2.",
+    repr(text),
+)
 check(
     "старый адрес по-прежнему доступен как запасной",
     ai_provider.GIGACHAT_CHAT_URL_LEGACY.startswith("https://gigachat.devices.sberbank.ru"),
     ai_provider.GIGACHAT_CHAT_URL_LEGACY,
 )
+
+print("3.2. GigaChat v2: формат по адресу, разбор частей")
+V2_URL = ai_provider.GIGACHAT_CHAT_URL_V2
+
+
+def gigachat_with_url(url, **kwargs):
+    return AIConfig(provider="gigachat", api_key="basic-key", model="GigaChat", chat_url=url, **kwargs)
+
+
+def gigachat_reply(config, payload):
+    """Один запрос к GigaChat с заданным ответом; вернёт (текст или AIError, сессию)."""
+    reset_gigachat_token()
+    reply_session = FakeSession([gigachat_token_response(), FakeResponse(payload=payload)])
+    try:
+        return complete("система", "запрос", config, session=reply_session), reply_session
+    except AIError as exc:
+        return exc, reply_session
+
+
+check("по умолчанию формат v1", AIConfig(provider="gigachat").gigachat_api_version == "v1")
+check("адрес /v2/ — формат v2", gigachat_with_url(V2_URL).gigachat_api_version == "v2")
+check(
+    "старый адрес — формат v1",
+    gigachat_with_url(ai_provider.GIGACHAT_CHAT_URL_LEGACY).gigachat_api_version == "v1",
+)
+check(
+    "/v2/ с косой чертой в конце — тоже v2",
+    gigachat_with_url(V2_URL + "/").gigachat_api_version == "v2",
+)
+check(
+    "чужой адрес с /v1/ — v1",
+    gigachat_with_url("https://example.test/v1/chat/completions").gigachat_api_version == "v1",
+)
+# Формат решает конец пути. Адрес прокси без версии остаётся v1 (как было до
+# v2), а «/v2/» в начале пути прокси не превращает обычный v1 в v2.
+check(
+    "адрес без версии — v1",
+    gigachat_with_url("https://proxy.example.test/gigachat/chat/completions").gigachat_api_version == "v1",
+)
+check(
+    "/v2/ в начале пути прокси, а в конце v1 — v1",
+    gigachat_with_url("https://proxy.example.test/v2/gigachat/v1/chat/completions").gigachat_api_version
+    == "v1",
+)
+check(
+    "/V2/ заглавными — тоже v2",
+    gigachat_with_url("https://api.giga.chat/V2/chat/completions").gigachat_api_version == "v2",
+)
+
+_, zero_session = gigachat_reply(gigachat_with_url(V2_URL, temperature=0.0), GIGACHAT_V2_OK.json())
+check(
+    "в v2 нулевая температура поднимается до 0.01",
+    zero_session.calls[1]["json"]["model_options"]["temperature"] == 0.01,
+    str(zero_session.calls[1]["json"].get("model_options")),
+)
+
+parts_text, _ = gigachat_reply(
+    GIGACHAT_V2_CONFIG,
+    {
+        "messages": [
+            {
+                "role": "assistant",
+                "content": [
+                    {"text": "Первая часть. "},
+                    {"files": [{"id": "f1", "target": "image", "mime": "image/png"}]},
+                    {"text": "Вторая часть."},
+                ],
+            }
+        ]
+    },
+)
+check(
+    "части текста склеены по порядку, файл пропущен",
+    parts_text == "Первая часть. Вторая часть.",
+    repr(parts_text),
+)
+
+echo_text, _ = gigachat_reply(
+    GIGACHAT_V2_CONFIG,
+    {
+        "messages": [
+            {"role": "user", "content": [{"text": "эхо"}]},
+            {"role": "assistant", "content": [{"text": "Ответ модели."}]},
+        ]
+    },
+)
+check(
+    "сообщения не от модели не попадают в текст",
+    isinstance(echo_text, str) and "эхо" not in echo_text and "Ответ модели." in echo_text,
+    repr(echo_text),
+)
+
+two_text, _ = gigachat_reply(
+    GIGACHAT_V2_CONFIG,
+    {
+        "messages": [
+            {"role": "assistant", "content": [{"text": "Первый."}]},
+            {"role": "assistant", "content": [{"text": "Второй."}]},
+        ]
+    },
+)
+check("два сообщения модели — через перенос строки", two_text == "Первый.\nВторой.", repr(two_text))
+
+no_role_text, _ = gigachat_reply(
+    GIGACHAT_V2_CONFIG, {"messages": [{"content": [{"text": "Без роли."}]}]}
+)
+check("сообщение без роли считается ответом модели", no_role_text == "Без роли.", repr(no_role_text))
+
+for empty_label, empty_payload in (
+    ("пустой список messages", {"messages": []}),
+    ("сообщение без частей", {"messages": [{"role": "assistant", "content": []}]}),
+):
+    empty_result, _ = gigachat_reply(GIGACHAT_V2_CONFIG, empty_payload)
+    check(
+        f"v2, {empty_label}: AIError про пустой ответ",
+        isinstance(empty_result, AIError) and "пуст" in str(empty_result).lower(),
+        repr(empty_result),
+    )
+
+v1_parts, _ = gigachat_reply(
+    GIGACHAT_CONFIG, {"choices": [{"message": {"content": [{"text": "Части в v1."}]}}]}
+)
+check("v1-ответ со списком частей тоже читается", v1_parts == "Части в v1.", repr(v1_parts))
+v2_string, _ = gigachat_reply(
+    GIGACHAT_V2_CONFIG, {"messages": [{"role": "assistant", "content": "Строкой."}]}
+)
+check("v2-ответ со строкой вместо частей тоже читается", v2_string == "Строкой.", repr(v2_string))
+
+reset_gigachat_token()
+session = FakeSession(
+    [
+        gigachat_token_response(),
+        FakeResponse(status_code=401, payload={"message": "expired"}),
+        gigachat_token_response(),
+        GIGACHAT_V2_OK,
+    ]
+)
+text = safe_complete(GIGACHAT_V2_CONFIG, session)
+check("v2: после обновления токена запрос прошёл", text == "Текст от GigaChat v2.", repr(text))
+check("v2: сделано ровно четыре запроса", len(session.calls) == 4, str(len(session.calls)))
+check(
+    "v2: повтор уходит в том же формате",
+    "model_options" in session.calls[3]["json"]
+    and session.calls[3]["json"]["messages"][1]["content"] == [{"text": "запрос"}],
+    str(session.calls[3]["json"]),
+)
+check(
+    "v2: User-Agent есть в обоих запросах к модели",
+    bool(session.calls[1]["headers"].get("User-Agent"))
+    and bool(session.calls[3]["headers"].get("User-Agent")),
+    str(session.calls[3]["headers"]),
+)
+
+v2_status = ai_provider.describe_config(GIGACHAT_V2_CONFIG)
+check(
+    "в строке состояния видно, что включён v2",
+    "v2" in v2_status and "api.giga.chat" in v2_status,
+    v2_status,
+)
+v1_status = ai_provider.describe_config(GIGACHAT_CONFIG)
+check("для v1 строка состояния прежняя, без «v2»", "v2" not in v1_status, v1_status)
+legacy_status = ai_provider.describe_config(gigachat_with_url(ai_provider.GIGACHAT_CHAT_URL_LEGACY))
+check("старый адрес по-прежнему помечен устаревшим", "устаревший адрес" in legacy_status, legacy_status)
+legacy_slash_status = ai_provider.describe_config(
+    gigachat_with_url(ai_provider.GIGACHAT_CHAT_URL_LEGACY + "/")
+)
+check(
+    "старый адрес с косой чертой в конце — тоже устаревший",
+    "устаревший адрес" in legacy_slash_status,
+    legacy_slash_status,
+)
+# v2 на старом адресе всегда получает отказ: строка состояния не должна
+# называть это рабочей настройкой и терять пометку «устаревший».
+legacy_v2_status = ai_provider.describe_config(
+    gigachat_with_url("https://gigachat.devices.sberbank.ru/api/v2/chat/completions")
+)
+check(
+    "v2 на старом адресе: сказано, что не работает",
+    "не работает" in legacy_v2_status
+    and "устаревший адрес" in legacy_v2_status
+    and "запросы в формате v2" not in legacy_v2_status,
+    legacy_v2_status,
+)
+
+# load_ai_config читает и Streamlit Secrets: на время проверки отключаем их,
+# чтобы локальный secrets.toml с настоящими ключами не участвовал в тесте.
+_saved_st = ai_provider.st
+ai_provider.st = None
+_env_keys = ("AI_PROVIDER", "GIGACHAT_AUTH_KEY", "GIGACHAT_API_URL", "AI_MODEL")
+try:
+    os.environ["AI_PROVIDER"] = "gigachat"
+    os.environ["GIGACHAT_AUTH_KEY"] = "fake-basic-key"
+    loaded = load_ai_config()
+    check(
+        "без AI_MODEL модель по умолчанию — «GigaChat»",
+        loaded.model == "GigaChat" == ai_provider.DEFAULT_GIGACHAT_MODEL,
+        loaded.model,
+    )
+    check(
+        "без GIGACHAT_API_URL — адрес v1 по умолчанию",
+        loaded.chat_url == ai_provider.GIGACHAT_CHAT_URL and loaded.gigachat_api_version == "v1",
+        loaded.chat_url,
+    )
+    check("конфиг GigaChat готов", loaded.is_ready, loaded.problem)
+    os.environ["GIGACHAT_API_URL"] = V2_URL
+    os.environ["AI_MODEL"] = "GigaChat-3-Ultra"
+    loaded = load_ai_config()
+    check("AI_MODEL доезжает", loaded.model == "GigaChat-3-Ultra", loaded.model)
+    check(
+        "GIGACHAT_API_URL с /v2/ включает формат v2",
+        loaded.chat_url == V2_URL and loaded.gigachat_api_version == "v2",
+        f"{loaded.chat_url} → {loaded.gigachat_api_version}",
+    )
+finally:
+    ai_provider.st = _saved_st
+    for _key in _env_keys:
+        os.environ.pop(_key, None)
+
+print("3.3. GigaChat: отказ по теме и оборванный ответ — ошибка, а не готовый текст")
+# При отказе по теме GigaChat всё равно присылает текст — заготовку отказа.
+# Раньше она становилась черновиком саммари с пометкой «готово». Список причин
+# — из описания API Сбера (finish_reason в v1 и v2); он записан здесь явно,
+# а не взят из модуля, чтобы потерю причины в коде было видно.
+CANNED = "Не люблю менять тему разговора, но вот сейчас тот самый случай."
+for filter_reason in (
+    "blacklist",
+    "request_blacklist",
+    "request_whitelist",
+    "request_filter",
+    "response_blacklist",
+):
+    refused, _ = gigachat_reply(
+        GIGACHAT_V2_CONFIG,
+        {
+            "messages": [{"role": "assistant", "content": [{"text": CANNED}]}],
+            "finish_reason": filter_reason,
+        },
+    )
+    check(
+        f"v2 {filter_reason}: ошибка-отказ, а не текст",
+        isinstance(refused, AIError) and refused.kind == ai_provider.ERROR_FILTER,
+        repr(refused),
+    )
+    if isinstance(refused, AIError):
+        check(
+            f"v2 {filter_reason}: заготовки отказа нет в сообщении, причина — у владельца",
+            CANNED not in str(refused) and filter_reason in refused.detail,
+            f"{refused} / {refused.detail}",
+        )
+
+v1_refused, _ = gigachat_reply(
+    GIGACHAT_CONFIG,
+    {"choices": [{"message": {"content": CANNED}, "finish_reason": "blacklist"}]},
+)
+check(
+    "v1 blacklist: тоже ошибка-отказ",
+    isinstance(v1_refused, AIError) and v1_refused.kind == ai_provider.ERROR_FILTER,
+    repr(v1_refused),
+)
+if isinstance(v1_refused, AIError):
+    check(
+        "отказ по теме подсказывает, что поменять",
+        "выдержки" in str(v1_refused).lower() and "указания" in str(v1_refused),
+        str(v1_refused),
+    )
+
+for cut_label, cut_config, cut_payload in (
+    (
+        "v2",
+        GIGACHAT_V2_CONFIG,
+        {
+            "messages": [{"role": "assistant", "content": [{"text": "Начало саммари, оборв"}]}],
+            "finish_reason": "length",
+        },
+    ),
+    (
+        "v1",
+        GIGACHAT_CONFIG,
+        {"choices": [{"message": {"content": "Начало саммари, оборв"}, "finish_reason": "length"}]},
+    ),
+):
+    cut, _ = gigachat_reply(cut_config, cut_payload)
+    check(
+        f"{cut_label} length: оборванный ответ — ошибка про AI_MAX_TOKENS",
+        isinstance(cut, AIError) and "AI_MAX_TOKENS" in str(cut) and "оборв" in str(cut),
+        repr(cut),
+    )
+    if isinstance(cut, AIError):
+        check(
+            f"{cut_label} length: это настройка, не лимит запроса",
+            cut.kind == "" and "Начало саммари" not in str(cut),
+            f"{cut.kind!r}: {cut}",
+        )
+
+v1_stop, _ = gigachat_reply(
+    GIGACHAT_CONFIG, {"choices": [{"message": {"content": "Готово."}, "finish_reason": "stop"}]}
+)
+check("v1 stop: обычный ответ проходит", v1_stop == "Готово.", repr(v1_stop))
 
 print("4. Протухший токен обновляется один раз")
 reset_gigachat_token()
@@ -280,8 +660,8 @@ session = FakeSession(
         GIGACHAT_OK,
     ]
 )
-text = complete("система", "запрос", GIGACHAT_CONFIG, session=session)
-check("после обновления токена запрос прошёл", text == "Текст от GigaChat.", text)
+text = safe_complete(GIGACHAT_CONFIG, session)
+check("после обновления токена запрос прошёл", text == "Текст от GigaChat.", repr(text))
 check("сделано ровно четыре запроса", len(session.calls) == 4, str(len(session.calls)))
 
 print("5. Ошибки объясняются по-русски, а не трассировкой")
@@ -675,6 +1055,15 @@ check(
     len(session.calls[-1]["json"]["messages"][1]["content"]) < 60,
     session.calls[-1]["json"]["messages"][1]["content"],
 )
+reset_gigachat_token()
+session = FakeSession([gigachat_token_response(), GIGACHAT_V2_OK])
+result = check_connection(GIGACHAT_V2_CONFIG, session=session)
+check("проверка в формате v2 возвращает ответ модели", "GigaChat ответил" in result, result)
+check(
+    "проверка в формате v2 — тоже один короткий запрос",
+    len(session.calls[-1]["json"]["messages"][1]["content"][0]["text"]) < 60,
+    str(session.calls[-1]["json"]["messages"][1]["content"]),
+)
 
 print("16. Сертификат заводится текстом, без терминала")
 SAMPLE_PEM = """-----BEGIN CERTIFICATE-----
@@ -846,6 +1235,19 @@ LIMIT_CASES = [
         FakeResponse(429, {"status": 429, "message": "Лимит запросов в минуту исчерпан, повторите позже"}),
         ERROR_RATE,
     ),
+    # Формат v2 меняет тело запроса, но не коды ошибок: лимиты объясняются так же.
+    (
+        "GigaChat v2 413",
+        GIGACHAT_V2_CONFIG,
+        FakeResponse(413, {"status": 413, "message": "Payload Too Large"}),
+        ERROR_CONTEXT,
+    ),
+    (
+        "GigaChat v2 429",
+        GIGACHAT_V2_CONFIG,
+        FakeResponse(429, {"status": 429, "message": "Too Many Requests"}),
+        ERROR_RATE,
+    ),
 ]
 
 for label, limit_config, response, expected_kind in LIMIT_CASES:
@@ -945,6 +1347,188 @@ except AIError as exc:
 check(
     "старое поведение: AIError по-прежнему создаётся одной строкой",
     str(AIError("текст")) == "текст" and AIError("текст").kind == "" and AIError("текст").detail == "",
+)
+
+print("19. Понятные ошибки GigaChat: модель и адрес")
+# 404 у GigaChat — «нет такой модели», а 403 со страницей HTML — неверный
+# путь (например, v2 на старом адресе). Раньше первое выглядело как «ошибка 404»
+# с JSON, а второе — как «отклонил ключ», хотя ключ в порядке.
+reset_gigachat_token()
+no_model = FakeResponse(404, {"status": 404, "message": "No such model"})
+try:
+    complete(
+        "система",
+        "запрос",
+        GIGACHAT_V2_CONFIG,
+        session=FakeSession([gigachat_token_response(), no_model]),
+    )
+    check("404 GigaChat поднимает AIError", False, "исключения не было")
+except AIError as exc:
+    check("404: сказано проверить AI_MODEL", "AI_MODEL" in str(exc), str(exc))
+    check("404: в тексте нет сырого ответа", "{" not in str(exc), str(exc))
+    check("404: сырой ответ сохранён для владельца", "No such model" in exc.detail, exc.detail)
+    check("404: это не лимит", exc.kind == "", repr(exc.kind))
+
+reset_gigachat_token()
+try:
+    complete(
+        "система",
+        "запрос",
+        YANDEX_CONFIG,
+        session=FakeSession([FakeResponse(404, text="folder not found")]),
+    )
+    check("404 YandexGPT поднимает AIError", False, "исключения не было")
+except AIError as exc:
+    check(
+        "404 YandexGPT объясняется как раньше",
+        "ошибка 404" in str(exc) and "folder not found" in str(exc) and "AI_MODEL" not in str(exc),
+        str(exc),
+    )
+
+HTML_403 = "<html>\r\n<head><title>403 Forbidden</title></head>\r\n<body><center><h1>403 Forbidden</h1></center></body>\r\n</html>"
+reset_gigachat_token()
+wrong_path = AIConfig(
+    provider="gigachat",
+    api_key="basic-key",
+    model="GigaChat",
+    chat_url="https://gigachat.devices.sberbank.ru/api/v2/chat/completions",
+)
+# Страница HTML значит «по этому адресу сервиса нет»: новый токен тут не
+# поможет, поэтому повтора нет и рабочий токен в кэше не сбрасывается.
+session = FakeSession([gigachat_token_response(), FakeResponse(403, text=HTML_403)])
+try:
+    complete("система", "запрос", wrong_path, session=session)
+    check("403 со страницей HTML поднимает AIError", False, "исключения не было")
+except AIError as exc:
+    check("HTML-403: без повтора — токен ни при чём", len(session.calls) == 2, str(len(session.calls)))
+    check("HTML-403: сказано проверить GIGACHAT_API_URL", "GIGACHAT_API_URL" in str(exc), str(exc))
+    check("HTML-403: в тексте нет страницы HTML", "<html" not in str(exc), str(exc))
+    check("HTML-403: страница сохранена для владельца", "<html" in exc.detail, exc.detail[:80])
+    check("HTML-403: это не лимит", exc.kind == "", repr(exc.kind))
+cached_session = FakeSession([GIGACHAT_OK])
+safe_complete(GIGACHAT_CONFIG, cached_session)
+check(
+    "HTML-403: токен в кэше не сброшен — следующий запрос без OAuth",
+    [c["url"] for c in cached_session.calls] == [ai_provider.GIGACHAT_CHAT_URL],
+    str([c["url"] for c in cached_session.calls]),
+)
+
+# Страницы у веб-серверов разные: с DOCTYPE, заглавными, без тега <html>.
+for page_label, page_status, page in (
+    ("403 <!DOCTYPE HTML> заглавными", 403, "<!DOCTYPE HTML>\n<HTML><BODY>403</BODY></HTML>"),
+    ("403 без тега <html>", 403, "<!DOCTYPE html><head><title>SynGX</title></head><body>403</body>"),
+    ("404 страницей", 404, "<html><body><h1>404 Not Found</h1></body></html>"),
+):
+    reset_gigachat_token()
+    page_error = safe_complete(
+        GIGACHAT_V2_CONFIG,
+        FakeSession([gigachat_token_response(), FakeResponse(page_status, text=page)]),
+    )
+    check(
+        f"{page_label}: про адрес, а не про ключ или модель",
+        isinstance(page_error, AIError)
+        and "GIGACHAT_API_URL" in str(page_error)
+        and "отклонил ключ" not in str(page_error)
+        and "AI_MODEL" not in str(page_error),
+        repr(page_error),
+    )
+    check(
+        f"{page_label}: в тексте нет страницы",
+        isinstance(page_error, AIError) and "<" not in str(page_error),
+        str(page_error),
+    )
+
+reset_gigachat_token()
+json_403 = FakeResponse(403, {"status": 403, "message": "Unauthorized"})
+session = FakeSession([gigachat_token_response(), json_403, gigachat_token_response(), json_403])
+try:
+    complete("система", "запрос", GIGACHAT_V2_CONFIG, session=session)
+    check("403 с JSON поднимает AIError", False, "исключения не было")
+except AIError as exc:
+    check("403 с JSON по-прежнему про ключ", "отклонил ключ" in str(exc), str(exc))
+    check("403 с JSON: один повтор с новым токеном, как раньше", len(session.calls) == 4, str(len(session.calls)))
+
+# Те же коды от адреса токена — не про модель и не про GIGACHAT_API_URL.
+reset_gigachat_token()
+try:
+    complete(
+        "система",
+        "запрос",
+        GIGACHAT_CONFIG,
+        session=FakeSession([FakeResponse(404, text="not found")]),
+    )
+    check("404 от адреса токена поднимает AIError", False, "исключения не было")
+except AIError as exc:
+    check("404 от адреса токена не зовёт править AI_MODEL", "AI_MODEL" not in str(exc), str(exc))
+
+print("20. Ключ не попадает в текст ошибки")
+# Ключ, вставленный в Secrets с переносом строки, requests не отправляет и
+# пишет в текст ошибки сам заголовок — то есть ключ. Владелец видит этот текст
+# на странице. Ключ ниже — выдуманный.
+import requests  # noqa: E402
+
+
+class RaisingSession:
+    """Транспорт, который падает на первом же запросе заданным исключением."""
+
+    def __init__(self, exc):
+        self.exc = exc
+        self.calls = []
+
+    def post(self, url, **kwargs):
+        self.calls.append(url)
+        raise self.exc
+
+
+def invalid_header_error(value):
+    """Настоящая ошибка requests для такого заголовка — без сети."""
+    try:
+        requests.models.PreparedRequest().prepare_headers({"Authorization": value})
+    except requests.exceptions.InvalidHeader as exc:
+        return exc
+    return None
+
+
+LEAKY_KEY = "FAKEKEYPART1\nFAKEKEYPART2"
+for leak_label, leak_config, header in (
+    (
+        "GigaChat",
+        AIConfig(provider="gigachat", api_key=LEAKY_KEY, model="GigaChat"),
+        f"Basic {LEAKY_KEY}",
+    ),
+    (
+        "YandexGPT",
+        AIConfig(provider="yandex", api_key=LEAKY_KEY, folder_id="folder-1", model="yandexgpt/latest"),
+        f"Api-Key {LEAKY_KEY}",
+    ),
+):
+    header_exc = invalid_header_error(header)
+    check(f"{leak_label}: requests отвергает ключ с переносом строки", header_exc is not None)
+    if header_exc is None:
+        continue
+    reset_gigachat_token()
+    leak_error = safe_complete(leak_config, RaisingSession(header_exc))
+    leak_text = str(leak_error)
+    check(f"{leak_label}: ключа нет в тексте ошибки", "FAKEKEYPART" not in leak_text, leak_text)
+    expected_name = "GIGACHAT_AUTH_KEY" if leak_label == "GigaChat" else "YANDEX_API_KEY"
+    check(
+        f"{leak_label}: сказано, какую настройку вставить заново",
+        isinstance(leak_error, AIError) and expected_name in leak_text and "одной строкой" in leak_text,
+        leak_text,
+    )
+
+# Любая другая ошибка транспорта: текст виден владельцу, но ключ из него убран.
+reset_gigachat_token()
+other_error = safe_complete(
+    AIConfig(provider="gigachat", api_key=LEAKY_KEY, model="GigaChat"),
+    RaisingSession(OSError(f"сбой при отправке {('Basic ' + LEAKY_KEY)!r}")),
+)
+check(
+    "прочие ошибки: текст на месте, ключа нет",
+    isinstance(other_error, AIError)
+    and "Не удалось обратиться к модели" in str(other_error)
+    and "FAKEKEYPART" not in str(other_error),
+    str(other_error),
 )
 
 print()

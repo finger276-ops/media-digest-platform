@@ -88,7 +88,7 @@ from dashboard_loader import load_dashboard_data, period_overview_metrics  # noq
 from section_boundary_ui import _as_fragment, render_section_safely  # noqa: F401
 
 APP_TITLE = "Платформа дайджестов"
-APP_VERSION = "4.12.4: саммари от ИИ, сертификат без терминала"
+APP_VERSION = "4.12.5: GigaChat понимает формат v2"
 
 
 def parse_args() -> argparse.Namespace:
