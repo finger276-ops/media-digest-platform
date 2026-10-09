@@ -12,10 +12,11 @@ import logging
 import os
 import re
 import secrets
+import time
 import unicodedata
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 import pandas as pd
 
@@ -29,6 +30,18 @@ try:
 except Exception:  # pragma: no cover
     Client = Any  # type: ignore
     create_client = None  # type: ignore
+
+# Классы ошибок для повтора записи (см. is_transient_write_error). Оба пакета
+# приходят вместе с supabase; без них повторов просто нет.
+try:
+    import httpx
+except Exception:  # pragma: no cover
+    httpx = None  # type: ignore
+
+try:
+    from postgrest.exceptions import APIError as PostgrestAPIError
+except Exception:  # pragma: no cover
+    PostgrestAPIError = None  # type: ignore
 
 from services.observability import report_failure
 
@@ -49,7 +62,99 @@ ROW_KEY_COLUMNS = {
 PAGE_SIZE = 1000
 CHUNK_SIZE = 400
 
+# Служебный статус нового периода, пока его первая запись не закончена.
+# Строки периода база примет только после строки в platform_periods (внешний
+# ключ), поэтому новый период появляется в базе раньше своих строк — и до
+# конца записи его не должен видеть никто: ни выбор периодов, ни «История
+# периодов». Оборванная загрузка так и остаётся невидимой, пока тот же файл
+# не загрузят ещё раз.
+PERIOD_STATUS_UPLOADING = "uploading"
+
 LOGGER = logging.getLogger("platform.store")
+
+# Повтор записи при временном сбое. Запись периода — десятки запросов подряд,
+# и один сетевой сбой или ответ 502 посреди загрузки обрывал её целиком.
+# Повторять безопасно: каждый запрос записи идемпотентен — upsert по ключу
+# строки, delete по ключу. Паузы растут, чтобы не добивать перегруженную
+# базу; после третьего повтора ошибка уходит наверх.
+WRITE_RETRY_DELAYS: tuple[float, ...] = (1, 2, 4)
+# Пауза — на уровне модуля, чтобы тесты подменяли её и не ждали секундами.
+_retry_sleep = time.sleep
+
+# HTTP-статусы временных отказов. Статус postgrest кладёт в APIError.code
+# (числом), только когда тело ответа — не JSON-ошибка PostgREST: так отвечают
+# Cloudflare (520–524, страница HTML), шлюз Supabase (502/503/504 с одним
+# {"message": ...}) и ограничитель частоты (429). 540 — проект Supabase на
+# паузе: повтор не поможет, его включает владелец.
+_TRANSIENT_HTTP_STATUSES = frozenset(
+    {408, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524}
+)
+# Коды из JSON-ошибки PostgREST (HTTP-статус postgrest при этом не сохраняет):
+# PGRST000–003 — PostgREST не достучался до базы (503/504), 08xxx — обрыв
+# соединения с базой, 40001/40P01 — конфликт сериализации и взаимная
+# блокировка, 53300 — кончились подключения, 57P01–57P03 — база
+# перезапускается. Остальное — 23505, 21000, 25006 (база только для чтения),
+# 57014 (запрос не уложился в лимит времени: та же тяжёлая пачка упрётся туда
+# же) и прочее — повтором не лечится или лечится не наверняка.
+_TRANSIENT_DB_CODES = frozenset(
+    {
+        "PGRST000",
+        "PGRST001",
+        "PGRST002",
+        "PGRST003",
+        "40001",
+        "40P01",
+        "53300",
+        "57P01",
+        "57P02",
+        "57P03",
+    }
+)
+
+
+def is_transient_write_error(exc: BaseException) -> bool:
+    """Временный ли сбой: стоит ли повторить тот же запрос записи.
+
+    Сомнительное считается постоянным: лишний повтор данным не вредит, но
+    держит человека у экрана ещё семь секунд и откладывает настоящую ошибку.
+    """
+    if httpx is not None and isinstance(
+        exc, (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError)
+    ):
+        return True
+    if isinstance(exc, (ConnectionError, TimeoutError)):
+        return True
+    if PostgrestAPIError is not None and isinstance(exc, PostgrestAPIError):
+        code = exc.code
+        if isinstance(code, int) and not isinstance(code, bool):
+            return code in _TRANSIENT_HTTP_STATUSES
+        code = str(code or "").strip().upper()
+        return code in _TRANSIENT_DB_CODES or code.startswith("08")
+    return False
+
+
+def _write_with_retry(what: str, request: Callable[[], Any]) -> Any:
+    """Выполнить запрос записи, при временном сбое — повторить с паузами."""
+    for attempt, delay in enumerate((*WRITE_RETRY_DELAYS, None), start=1):
+        try:
+            return request()
+        except Exception as exc:  # noqa: BLE001 — постоянные ошибки уходят наверх
+            if delay is None or not is_transient_write_error(exc):
+                raise
+            # В лог — только класс и код ошибки: текст ответа базы может
+            # нести куски данных выгрузки.
+            code = getattr(exc, "code", None)
+            label = type(exc).__name__ + (f" {code}" if code not in (None, "") else "")
+            LOGGER.warning(
+                "Запись %s: временный сбой (%s), повтор %d из %d через %s с",
+                what,
+                label,
+                attempt,
+                len(WRITE_RETRY_DELAYS),
+                delay,
+            )
+            _retry_sleep(delay)
+    return None  # pragma: no cover — цикл всегда возвращает или бросает
 
 
 def _secret_value(*names: str) -> str:
@@ -447,7 +552,14 @@ def list_periods(project_id: str, include_inactive: bool = False) -> pd.DataFram
     if not include_inactive:
         df = df[df["status"].str.lower().isin(["active", ""])]
     else:
-        df = df[~df["status"].str.lower().isin(["deleted", "удален", "удалён"])]
+        # Новый период с незаконченной первой записью не показывается и в
+        # «Истории периодов»: в нём часть строк, а активировать его вручную
+        # значило бы выдать неполные данные за целые.
+        df = df[
+            ~df["status"]
+            .str.lower()
+            .isin(["deleted", "удален", "удалён", PERIOD_STATUS_UPLOADING])
+        ]
     for col in ["date_from", "date_to", "uploaded_at"]:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors="coerce")
@@ -511,11 +623,21 @@ def save_processed_tables(
 ) -> None:
     """Записать период и его таблицы.
 
-    keep_old_rows_until_written — для пересборки уже работающего периода:
-    новые строки пишутся поверх, и только потом удаляются строки, которых в
-    новой сборке нет. Обрыв посреди записи оставляет период со старыми и
-    частью новых строк, а не пустым. Метаданные периода пишутся последними —
-    при обрыве они остаются прежними.
+    keep_old_rows_until_written — безопасная запись (загрузка файла и
+    пересборка периода): новые строки пишутся поверх, и только потом
+    удаляются строки, которых в новой сборке нет. Пустым уже работавший
+    период обрыв не оставит, но и прежним тоже: при обрыве на записи строк в
+    нём все старые строки плюс часть новых (строки с тем же ключом — уже в
+    новой версии), при обрыве на удалении лишних — новые строки и часть
+    старых. Читатели видят эту смесь и пока запись идёт. Метаданные периода
+    пишутся последними — при обрыве они остаются прежними. Новый период до
+    конца записи лежит в базе со статусом PERIOD_STATUS_UPLOADING и нигде не
+    показывается. Повторная запись того же периода дописывает недостающее,
+    убирает лишнее и открывает период.
+
+    Каждый запрос записи при временном сбое повторяется (_write_with_retry).
+    Без флага — прежний порядок: период сразу активен, старые строки
+    удаляются до записи новых.
     """
     client = get_supabase_client()
     messages = tables.get("messages", pd.DataFrame())
@@ -531,30 +653,58 @@ def save_processed_tables(
         "manifest": manifest or {},
         "uploaded_at": uploaded_at or now_iso(),
     }
-    if not keep_old_rows_until_written:
-        client.table("platform_periods").upsert(
-            period_payload, on_conflict="period_id"
-        ).execute()
+    if keep_old_rows_until_written:
+        # Строка периода нужна раньше его строк: platform_table_rows ссылается
+        # на platform_periods внешним ключом. Вставляется, только если периода
+        # ещё нет (ON CONFLICT DO NOTHING): у существующего метаданные и
+        # статус не трогаются до конца записи.
+        placeholder = {**period_payload, "status": PERIOD_STATUS_UPLOADING}
+        _write_with_retry(
+            "периода (заготовка)",
+            lambda: client.table("platform_periods")
+            .upsert(placeholder, on_conflict="period_id", ignore_duplicates=True)
+            .execute(),
+        )
+    else:
+        _write_with_retry(
+            "периода",
+            lambda: client.table("platform_periods")
+            .upsert(period_payload, on_conflict="period_id")
+            .execute(),
+        )
         if replace:
-            client.table("platform_table_rows").delete().eq(
-                "project_id", project_id
-            ).eq("period_id", period_id).execute()
+            _write_with_retry(
+                "строк периода (очистка)",
+                lambda: client.table("platform_table_rows")
+                .delete()
+                .eq("project_id", project_id)
+                .eq("period_id", period_id)
+                .execute(),
+            )
     written: set[tuple[str, str]] = set()
     for table_name in TABLES:
         records = dataframe_to_payload_records(
             tables.get(table_name, pd.DataFrame()), table_name, project_id, period_id
         )
         written.update((table_name, record["row_id"]) for record in records)
-        for batch in chunked(records):
-            client.table("platform_table_rows").upsert(
-                batch, on_conflict="project_id,period_id,table_name,row_id"
-            ).execute()
+        # Размер пачки читается при вызове, а не из значения по умолчанию
+        # chunked: тесты уменьшают CHUNK_SIZE, чтобы обрыв попадал между пачками.
+        for batch in chunked(records, CHUNK_SIZE):
+            _write_with_retry(
+                f"строк {table_name}",
+                lambda batch=batch: client.table("platform_table_rows")
+                .upsert(batch, on_conflict="project_id,period_id,table_name,row_id")
+                .execute(),
+            )
     if keep_old_rows_until_written:
         if replace:
             _delete_stale_rows(client, project_id, period_id, written)
-        client.table("platform_periods").upsert(
-            period_payload, on_conflict="period_id"
-        ).execute()
+        _write_with_retry(
+            "периода",
+            lambda: client.table("platform_periods")
+            .upsert(period_payload, on_conflict="period_id")
+            .execute(),
+        )
 
 
 def _delete_stale_rows(
@@ -574,9 +724,18 @@ def _delete_stale_rows(
     deleted = 0
     for table_name, row_ids in stale.items():
         for batch in chunked(row_ids, batch_size):
-            client.table("platform_table_rows").delete().eq("project_id", project_id).eq(
-                "period_id", period_id
-            ).eq("table_name", table_name).in_("row_id", list(batch)).execute()
+            _write_with_retry(
+                f"строк {table_name} (удаление лишних)",
+                lambda table_name=table_name, batch=batch: client.table(
+                    "platform_table_rows"
+                )
+                .delete()
+                .eq("project_id", project_id)
+                .eq("period_id", period_id)
+                .eq("table_name", table_name)
+                .in_("row_id", list(batch))
+                .execute(),
+            )
             deleted += len(batch)
     return deleted
 
@@ -948,7 +1107,18 @@ def delete_project(project_id: str, *, delete_storage: bool = True) -> dict[str,
     if not project_id:
         raise ValueError("project_id is required")
 
-    periods = list_periods(project_id, include_inactive=True)
+    # Все периоды проекта, какой бы ни был статус. list_periods прячет новый
+    # период с оборванной первой загрузкой (PERIOD_STATUS_UPLOADING), а у него
+    # тоже есть строки и исходный файл в Storage: без delete_period файл с
+    # данными клиента пережил бы удаление проекта.
+    periods = pd.DataFrame(
+        _fetch_all(
+            client,
+            "platform_periods",
+            filters={"project_id": project_id},
+            select="period_id",
+        )
+    )
     period_results: list[dict[str, Any]] = []
     table_rows_deleted = 0
     manual_rows_deleted = 0

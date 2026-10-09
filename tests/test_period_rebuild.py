@@ -283,10 +283,10 @@ class FailingTable:
         self._inner = original_table(name)
         self._name = name
 
-    def upsert(self, payload, on_conflict=None):
+    def upsert(self, payload, **kwargs):
         if self._name == "platform_table_rows":
             raise RuntimeError("обрыв связи")
-        return self._inner.upsert(payload, on_conflict=on_conflict)
+        return self._inner.upsert(payload, **kwargs)
 
     def __getattr__(self, attr):
         return getattr(self._inner, attr)

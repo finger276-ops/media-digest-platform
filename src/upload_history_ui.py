@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import pandas as pd
 import streamlit as st
 
@@ -30,12 +32,36 @@ from services.import_report import normalization_lines, summarize_import
 from services.ingest import IngestError, process_canonical, read_canonical_bytes
 from services.period_rebuild import can_rebuild, rebuild_period
 from services.metrics_compute import format_int
+from services.observability import report_failure
 from services.project_settings import (
     story_build_settings_from_project_settings,
     with_story_build,
 )
 from services.roles import can_change_project_data, can_see_technical
 from tag_hierarchy_ui import render_tag_hierarchy_block
+
+# Текст для загрузки, которая не завершилась: сбой связи с базой посреди
+# записи или сбой самой платформы ещё при сборке таблиц, до записи. Какой
+# случай — страница не знает, поэтому текст верен для обоих. Запись периода
+# безопасная (platform_store.save_processed_tables,
+# keep_old_rows_until_written): старое удаляется только после записи нового,
+# метаданные периода пишутся последними, новый период до конца записи не
+# виден. Но существующий период после обрыва не прежний: в нём уже часть
+# новых строк, а при обрыве на чистке — уже без части старых. Об этом надо
+# сказать прямо, иначе аналитик сочтёт цифры периода верными.
+UPLOAD_BROKEN_MESSAGE = (
+    "Загрузка не завершилась — период не сохранён или сохранён не полностью. "
+    "Загрузите тот же файл ещё раз: повторная загрузка допишет недостающее и "
+    "уберёт лишнее. Новый период появится в списке только после успешной "
+    "загрузки. Если период уже был, он остался в списке под прежним "
+    "названием, но до повторной загрузки в нём может быть смесь прежних и "
+    "новых данных — цифрам за этот период пока не доверяйте. Если ошибка "
+    "повторится, сообщите владельцу платформы."
+)
+
+# Канал прежней границы раздела (section_boundary_ui): трейсбек упавшей
+# загрузки попадает в тот же лог, что и раньше.
+LOGGER = logging.getLogger("platform.app")
 
 
 def _render_clustering_algorithm_settings() -> tuple[float, float, float]:
@@ -359,6 +385,21 @@ def render_upload_page(
         except IngestError as exc:
             show_error(str(exc), exc)
             return
+        except Exception as exc:  # noqa: BLE001 — обрыв объясняется человеку
+            # Раньше такое исключение уходило в границу раздела: владелец
+            # получал сигнал и трейсбек в логе, а аналитик — «Не удалось
+            # отобразить раздел» без слова о том, что стало с периодом. Сигнал
+            # и трейсбек остаются: report_failure пишет в лог одну строку без
+            # стека, а без Sentry и вебхука лог — единственный след.
+            LOGGER.error("Загрузка файла не завершилась", exc_info=exc)
+            report_failure("загрузка файла не завершилась", exc, project_id=project_id)
+            show_error(UPLOAD_BROKEN_MESSAGE, exc)
+            return
+        finally:
+            # Кеш сбрасывается и при успехе, и при обрыве: часть строк могла
+            # успеть записаться, и закешированный прежний снимок выдал бы
+            # оборванную загрузку за сохранённую (или наоборот).
+            clear_platform_caches(project_id)
 
     if result.get("storage_error"):
         st.warning(
@@ -371,7 +412,6 @@ def render_upload_page(
         f"Период «{result['period_name']}» сохранен: сообщений {result['messages']}, "
         f"инфоповодов {result['events']}."
     )
-    clear_platform_caches(project_id)
 
 
 def _rebuild_summary(result: dict) -> str:

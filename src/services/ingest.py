@@ -313,6 +313,14 @@ def process_canonical(
     if file_bytes:
         manifest.setdefault("file_sha256", file_sha256(file_bytes))
 
+    # Безопасная запись, как у пересборки: раньше период сразу помечался
+    # активным, его старые строки удалялись, а новые писались пачками без
+    # транзакции. Обрыв посреди записи (сбой сети, 5xx, перезапуск) оставлял
+    # активный период пустым или неполным, а прежние данные — уже стёртыми.
+    # Теперь существующий период при обрыве не пустеет и сохраняет прежние
+    # метаданные, но до повтора в нём смесь старых и новых строк; новый период
+    # не виден. Повторная загрузка того же файла (и повтор задачи
+    # автозагрузки) дописывает недостающее и убирает лишнее.
     store.save_processed_tables(
         project_id=project_id,
         period_id=period_id,
@@ -323,6 +331,7 @@ def process_canonical(
         date_from=date_from_text or None,
         date_to=date_to_text or None,
         replace=replace,
+        keep_old_rows_until_written=True,
     )
 
     return {

@@ -22,9 +22,10 @@ class Result:
 
 
 class Query:
-    def __init__(self, db, table, op, payload=None, on_conflict=None):
+    def __init__(self, db, table, op, payload=None, on_conflict=None, ignore_duplicates=False):
         self.db, self.table, self.op, self.payload = db, table, op, payload
         self.on_conflict = on_conflict
+        self.ignore_duplicates = ignore_duplicates
         self.filters = []
         self._orders = []
         self._limit = None
@@ -113,7 +114,14 @@ class Query:
             # настоящая загрузка выгрузки (platform_table_rows).
             out = []
             for item in self.payload:
-                one = Query(self.db, self.table, self.op, item, on_conflict=self.on_conflict)
+                one = Query(
+                    self.db,
+                    self.table,
+                    self.op,
+                    item,
+                    on_conflict=self.on_conflict,
+                    ignore_duplicates=self.ignore_duplicates,
+                )
                 out.extend(one.execute().data)
             return Result(out)
         if self.op == "select":
@@ -147,6 +155,10 @@ class Query:
             keys = [k.strip() for k in str(key).split(",") if k.strip()]
             for row in rows:
                 if all(row.get(k) == self.payload.get(k) for k in keys):
+                    if self.ignore_duplicates:
+                        # ON CONFLICT DO NOTHING: строка остаётся как была,
+                        # PostgREST возвращает пустой список.
+                        return Result([])
                     # ON CONFLICT DO UPDATE обновляет только переданные колонки,
                     # остальные (например, started_at с default now()) остаются.
                     row.update(self.payload)
@@ -174,8 +186,15 @@ class Table:
     def insert(self, payload):
         return Query(self.db, self.name, "insert", payload)
 
-    def upsert(self, payload, on_conflict=None):
-        return Query(self.db, self.name, "upsert", payload, on_conflict=on_conflict)
+    def upsert(self, payload, on_conflict=None, ignore_duplicates=False):
+        return Query(
+            self.db,
+            self.name,
+            "upsert",
+            payload,
+            on_conflict=on_conflict,
+            ignore_duplicates=ignore_duplicates,
+        )
 
     def delete(self):
         return Query(self.db, self.name, "delete")

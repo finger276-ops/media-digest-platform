@@ -182,6 +182,9 @@ jobs:
       - name: Пересборка периода из исходного файла (правки, метаданные, сбой записи)
         run: python tests/test_period_rebuild.py
 
+      - name: Безопасная запись загрузки (обрыв на любой пачке, повтор временных сбоев)
+        run: python tests/test_upload_safe_write.py
+
       - name: Раздел «Источники» (площадки, авторы, новые площадки)
         run: python tests/test_sources.py
 
