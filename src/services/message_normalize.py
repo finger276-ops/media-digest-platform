@@ -87,6 +87,42 @@ def metrics_in_source(raw: pd.DataFrame) -> str:
 # строками services.import_report.repeated_id_lines.
 DUPLICATES_REMOVED = "duplicate_rows_removed"
 SHARED_ID_MESSAGES = "shared_id_messages"
+# Сколько сообщений осталось без распознанной даты: они не попадают ни в
+# динамику, ни в сравнение периодов. Лежит там же, где счётчики повторов, а
+# страница загрузки показывает его строкой services.import_report.undated_line.
+UNDATED_MESSAGES = "undated_messages"
+
+# Колонки, из которых берётся дата сообщения: первая найденная.
+DATE_COLUMNS = (
+    "Дата",
+    "Дата публикации",
+    "Дата сообщения",
+    "date",
+    "datetime",
+    "created_at",
+)
+
+
+def undated_messages(raw: pd.DataFrame, messages: pd.DataFrame) -> int:
+    """Сколько сообщений без даты — для отчёта о загрузке и манифеста.
+
+    Считаются готовые сообщения (после того как убраны повторы), а не строки
+    файла: отчёт говорит о том, что попадёт в период. Пустая ячейка даты
+    считается так же, как нераспознанная: в динамику не попадёт ни та, ни
+    другая. Если колонки даты в файле нет совсем, сообщать не о чем — 0.
+
+    Наличие колонки решает её содержимое, а не имя: сюда приходит
+    каноническая таблица (import_adapters), а в ней «Дата» есть всегда — у
+    файла без даты она просто пустая. Проверка по имени никогда бы не
+    сработала, и файл без колонки даты получал бы предупреждение «проверьте
+    колонку с датой» про колонку, которой в нём нет.
+    """
+    if raw is None or messages is None or "datetime" not in messages.columns:
+        return 0
+    dates = get_text_series(raw, DATE_COLUMNS[0], aliases=list(DATE_COLUMNS[1:]))
+    if not dates.str.strip().ne("").any():
+        return 0
+    return int(pd.to_datetime(messages["datetime"], errors="coerce").isna().sum())
 
 
 def resolve_repeated_ids(
@@ -311,11 +347,7 @@ def normalize_messages(
     df["text_clean"] = [x[0] for x in text_pairs]
     df["text_source"] = [x[1] for x in text_pairs]
 
-    date_series = get_text_series(
-        df,
-        "Дата",
-        aliases=["Дата публикации", "Дата сообщения", "date", "datetime", "created_at"],
-    )
+    date_series = get_text_series(df, DATE_COLUMNS[0], aliases=list(DATE_COLUMNS[1:]))
     df["datetime"] = parse_datetime(date_series)
     df["date"] = df["datetime"].dt.strftime("%Y-%m-%d %H:%M:%S").fillna("")
 

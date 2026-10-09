@@ -24,8 +24,13 @@ from typing import Any
 import pandas as pd
 
 from .formatting import source_system_title
-from .message_normalize import DUPLICATES_REMOVED, SHARED_ID_MESSAGES
+from .message_normalize import DUPLICATES_REMOVED, SHARED_ID_MESSAGES, UNDATED_MESSAGES
 from .metrics_compute import format_int
+
+# С какой доли сообщений без даты строка о них становится предупреждением.
+# Одно-два сообщения с пустой датой бывают в любой выгрузке; двадцатое без
+# даты — уже признак, что колонка даты записана непривычно и разобрана плохо.
+UNDATED_WARNING_SHARE = 0.05
 
 # Колонки, которые незачем показывать как непонятые: платформа добавляет их
 # сама либо использует не как данные. «Обработано» — маркер начала тегов: по
@@ -160,3 +165,37 @@ def repeated_id_lines(stats: dict[str, Any]) -> list[str]:
             "сохранены все"
         )
     return lines
+
+
+def undated_line(stats: dict[str, Any]) -> str:
+    """Сколько сообщений осталось без даты — или пустая строка, если ни одного.
+
+    stats — итог загрузки или манифест периода (счётчик считает
+    services.message_normalize.undated_messages). Такие сообщения есть в ленте,
+    но не попадают ни в один день, неделю или месяц — без этой строки
+    аналитик узнал бы о них, только сверив цифры динамики с итогом.
+    """
+    count = _count(stats, UNDATED_MESSAGES)
+    if count <= 0:
+        return ""
+    noun = "сообщения" if count % 10 == 1 and count % 100 != 11 else "сообщений"
+    tail = "оно не попадёт" if count == 1 else "они не попадут"
+    return (
+        f"Дата не распознана у {format_int(count)} {noun} — {tail} в динамику "
+        "и сравнение периодов"
+    )
+
+
+def undated_needs_warning(stats: dict[str, Any]) -> bool:
+    """Сообщений без даты больше UNDATED_WARNING_SHARE от всех в периоде.
+
+    Доля считается от сообщений периода: «messages» в итоге загрузки или
+    «rows_messages» в манифесте.
+    """
+    count = _count(stats, UNDATED_MESSAGES)
+    total = _count(stats, "messages") or _count(stats, "rows_messages")
+    if count <= 0:
+        return False
+    if total <= 0:
+        return True
+    return count / total > UNDATED_WARNING_SHARE

@@ -188,6 +188,9 @@ jobs:
       - name: Повторы ID сообщения (копии схлопнуты, разные сохранены, без 21000)
         run: python tests/test_duplicate_message_ids.py
 
+      - name: Даты выгрузки (ячейки Excel и ISO без перестановки дня и месяца, сообщения без даты в отчёте)
+        run: python tests/test_date_parsing.py
+
       - name: Раздел «Источники» (площадки, авторы, новые площадки)
         run: python tests/test_sources.py
 

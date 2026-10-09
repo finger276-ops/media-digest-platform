@@ -20,6 +20,8 @@ from typing import Any, Iterable, Iterator
 
 import pandas as pd
 
+from services.date_parsing import join_date_and_time
+
 MINIMAL_XLSX_STYLES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
   <fonts count="1"><font><sz val="11"/><color theme="1"/><name val="Calibri"/><family val="2"/><scheme val="minor"/></font></fonts>
@@ -984,16 +986,11 @@ def _canonicalize_cleaned(
         ],
     )
     time_part = first_existing(df, ["Время", "Time", "Published time"])
-    # Some exports, for example Knauf/Brand Analytics Excel, split date and time.
+    # Дата и время отдельными колонками — так выгружает, например, Excel
+    # Brand Analytics. Ячейки Excel приезжают «2026-04-01 00:00:00» и
+    # «09:30:00»: склейка убирает лишнюю полночь (services.date_parsing).
     if time_part.str.strip().ne("").any() and out["Дата"].str.strip().ne("").any():
-        out["Дата"] = [
-            (
-                f"{str(d).strip()} {str(t).strip()}".strip()
-                if str(t).strip()
-                else str(d).strip()
-            )
-            for d, t in zip(out["Дата"], time_part)
-        ]
+        out["Дата"] = join_date_and_time(out["Дата"], time_part)
 
     message = first_existing(
         df,

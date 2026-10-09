@@ -14,6 +14,8 @@ import pandas as pd
 
 from settings import TEXT_PREFIXES_TO_REMOVE
 
+from .date_parsing import parse_source_datetimes
+
 
 def stable_hash(value: str, prefix: str = "") -> str:
     digest = hashlib.md5(str(value).encode("utf-8")).hexdigest()[:12]
@@ -108,7 +110,11 @@ def clean_text(message: str, recognized: str) -> tuple[str, str]:
 
 
 def parse_datetime(series: pd.Series) -> pd.Series:
-    prepared = (
-        series.fillna("").astype(str).str.replace("\xa0", " ", regex=False).str.strip()
-    )
-    return pd.to_datetime(prepared, errors="coerce", dayfirst=True)
+    """Колонка дат выгрузки → даты (московское время без пояса), NaT — не дата.
+
+    Единственный разбор дат исходной выгрузки, правила — в
+    services/date_parsing.py. Прежний pd.to_datetime(..., dayfirst=True) над
+    всей колонкой читал «2026-04-05» (так приезжает ячейка-дата Excel) как
+    4 мая, а дни после 12-го терял.
+    """
+    return parse_source_datetimes(series)

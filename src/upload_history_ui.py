@@ -32,6 +32,8 @@ from services.import_report import (
     normalization_lines,
     repeated_id_lines,
     summarize_import,
+    undated_line,
+    undated_needs_warning,
 )
 from services.ingest import IngestError, process_canonical, read_canonical_bytes
 from services.period_rebuild import can_rebuild, rebuild_period
@@ -417,6 +419,27 @@ def render_upload_page(
         f"инфоповодов {result['events']}."
     )
     render_repeated_ids(result)
+    render_undated(result)
+
+
+def render_undated(result: dict) -> None:
+    """Сообщения без даты: сколько их и что с ними будет.
+
+    Загрузку это не останавливает — сообщения есть в ленте и в итогах. Но в
+    динамику по дням и в сравнение периодов они не попадают, и если таких
+    много, это почти всегда колонка даты, записанная непривычно: тогда
+    строка — предупреждение, а не справка.
+    """
+    line = undated_line(result)
+    if not line:
+        return
+    if undated_needs_warning(result):
+        st.warning(
+            f"{line}. Проверьте в файле колонку с датой: у этих строк она пустая "
+            "или записана так, что платформа её не поняла."
+        )
+    else:
+        st.info(f"{line}.")
 
 
 def render_repeated_ids(result: dict) -> None:
@@ -455,6 +478,9 @@ def _rebuild_summary(result: dict) -> str:
             "сообщений; они отложены и больше не применяются."
         )
     parts.extend(f"{line}." for line in repeated_id_lines(result))
+    undated = undated_line(result)
+    if undated:
+        parts.append(f"{undated}.")
     return " ".join(parts)
 
 

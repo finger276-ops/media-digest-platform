@@ -21,7 +21,7 @@ from metric_cards_ui import metric_card, render_metric_row
 from services import ingest_queue as queue
 from services.cached_store import clear_platform_caches
 from services.formatting import SOURCE_SYSTEM_LABELS, source_system_title
-from services.import_report import repeated_id_lines
+from services.import_report import repeated_id_lines, undated_line
 from services.ingest import IngestError, file_sha256, ingest_file_bytes
 from services.roles import can_change_project_data
 
@@ -33,6 +33,9 @@ STATUS_ICONS = {
     queue.STATUS_ERROR: "⚠️",
     queue.STATUS_SKIPPED: "➖",
 }
+
+# Сколько знаков текста ошибки видно в столбце «Комментарий» очереди.
+TASK_ERROR_PREVIEW_CHARS = 160
 
 
 def _fmt_dt(value: Any) -> str:
@@ -76,7 +79,7 @@ def _tasks_view(tasks: pd.DataFrame, *, is_admin: bool = False) -> pd.DataFrame:
                 ],
                 index=tasks.index,
                 dtype="object",
-            ).str.slice(0, 160),
+            ),
             "task_id": column("task_id"),
         }
     )
@@ -84,17 +87,28 @@ def _tasks_view(tasks: pd.DataFrame, *, is_admin: bool = False) -> pd.DataFrame:
 
 
 def _task_comment(error_message: Any, result: Any, *, is_admin: bool) -> str:
-    """Комментарий к задаче: текст ошибки, а у загруженной — повторы ID в файле.
+    """Комментарий к задаче: текст ошибки, а у загруженной — повторы ID в файле
+    и сообщения без даты.
 
-    Страница «Загрузка файла» говорит, сколько повторов сообщений убрано, а
-    у файла из автозагрузки этого никто не видел: итог задачи лежал только в
-    базе. Без строки аналитик не поймёт, почему сообщений в периоде меньше,
-    чем строк в файле.
+    Страница «Загрузка файла» говорит, сколько повторов сообщений убрано и у
+    скольких дата не распознана, а у файла из автозагрузки этого никто не
+    видел: итог задачи лежал только в базе. Без строки аналитик не поймёт,
+    почему сообщений в периоде меньше, чем строк в файле, или почему динамика
+    не сходится с итогом.
+
+    Обрезается только текст ошибки: в нём бывает трассировка на много строк,
+    целиком он виден ниже, в «Задачах с ошибками». Строки итога короткие и
+    все нужны — при обрезке по общей длине строка о датах, третья по счёту,
+    обрывалась на полуслове.
     """
     text = _task_error_text(error_message, is_admin=is_admin)
     if text or not isinstance(result, dict):
-        return text
-    return "; ".join(repeated_id_lines(result))
+        return text[:TASK_ERROR_PREVIEW_CHARS]
+    lines = repeated_id_lines(result)
+    undated = undated_line(result)
+    if undated:
+        lines.append(undated)
+    return "; ".join(lines)
 
 
 def _process_task_in_ui(task: dict[str, Any], work_dir: str) -> dict[str, Any]:
