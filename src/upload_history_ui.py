@@ -28,7 +28,11 @@ from services.formatting import (
     period_picker_label,
     status_title,
 )
-from services.import_report import normalization_lines, summarize_import
+from services.import_report import (
+    normalization_lines,
+    repeated_id_lines,
+    summarize_import,
+)
 from services.ingest import IngestError, process_canonical, read_canonical_bytes
 from services.period_rebuild import can_rebuild, rebuild_period
 from services.metrics_compute import format_int
@@ -412,6 +416,26 @@ def render_upload_page(
         f"Период «{result['period_name']}» сохранен: сообщений {result['messages']}, "
         f"инфоповодов {result['events']}."
     )
+    render_repeated_ids(result)
+
+
+def render_repeated_ids(result: dict) -> None:
+    """Повторы ID в файле: что убрано, что сохранено.
+
+    Без этого аналитик видит «Файл прочитан: 1 000 строк» и «сообщений 950»
+    и не знает, куда делись полсотни строк. Показывается, только если повторы
+    были.
+    """
+    lines = repeated_id_lines(result)
+    if not lines:
+        return
+    st.info(
+        "\n\n".join(lines)
+        + "\n\nПовтор — строка с тем же ID сообщения (а без ID — с той же "
+        "ссылкой), тем же текстом, датой и автором (если он указан): от него "
+        "остаётся одна строка, самая полная. Разные сообщения с одинаковым ID "
+        "или ссылкой сохраняются все."
+    )
 
 
 def _rebuild_summary(result: dict) -> str:
@@ -430,6 +454,7 @@ def _rebuild_summary(result: dict) -> str:
             f"Правок без пары: {orphaned} — у их инфоповодов изменился состав "
             "сообщений; они отложены и больше не применяются."
         )
+    parts.extend(f"{line}." for line in repeated_id_lines(result))
     return " ".join(parts)
 
 

@@ -32,6 +32,7 @@ from import_adapters import SourceFileError, read_source_table
 from io_utils import read_table
 from preprocess import run_preprocess_from_dataframe
 from .formatting import SOURCE_SYSTEM_LABELS
+from .message_normalize import DUPLICATES_REMOVED, SHARED_ID_MESSAGES
 from .project_settings import (
     project_settings_from_row,
     story_build_settings_from_project_settings,
@@ -345,6 +346,10 @@ def process_canonical(
         "storage_error": storage_error,
         "rows_source": int(len(canonical)),
         "messages": int(len(messages)),
+        # Повторы ID: страница загрузки объясняет ими, почему сообщений
+        # меньше, чем строк в файле, а очередь автозагрузки хранит в итоге.
+        DUPLICATES_REMOVED: int(manifest.get(DUPLICATES_REMOVED) or 0),
+        SHARED_ID_MESSAGES: int(manifest.get(SHARED_ID_MESSAGES) or 0),
         "events": int(len(tables.get("events", pd.DataFrame()))),
         "discussions": int(len(tables.get("discussions", pd.DataFrame()))),
         "output_dir": str(output_dir),

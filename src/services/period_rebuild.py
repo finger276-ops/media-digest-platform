@@ -37,6 +37,7 @@ import platform_store as store
 from .audit_log import audit_reason
 from .cached_store import clear_platform_caches, delete_manual, save_manual
 from .ingest import IngestError, build_period_tables, read_canonical_bytes
+from .message_normalize import DUPLICATES_REMOVED, SHARED_ID_MESSAGES
 
 # Порог совпадения состава: доля общих сообщений от объединения (Жаккар).
 # Половина — инфоповод «тот же», если больше половины его сообщений остались
@@ -337,4 +338,6 @@ def rebuild_period(
         "edits_moved": len(plan.rewrite),
         "edits_kept": plan.unchanged,
         "edits_orphaned": len(plan.orphan),
+        DUPLICATES_REMOVED: int(pipeline_manifest.get(DUPLICATES_REMOVED) or 0),
+        SHARED_ID_MESSAGES: int(pipeline_manifest.get(SHARED_ID_MESSAGES) or 0),
     }

@@ -1,6 +1,32 @@
 """Поддельный клиент Supabase для тестов (форма API supabase-py)."""
 
+import json
 import re
+
+# Ответ PostgREST, когда в одной пачке upsert две строки с одним ключом
+# конфликта: Postgres отвергает весь запрос (код 21000), ни одна строка пачки
+# не записывается. Текст — как у настоящей базы.
+DUPLICATE_IN_BATCH_ERROR = {
+    "code": "21000",
+    "details": None,
+    "hint": "Ensure that no rows proposed for insertion within the same command "
+    "have duplicate constrained values.",
+    "message": "ON CONFLICT DO UPDATE command cannot affect row a second time",
+}
+
+
+def duplicate_in_batch_error():
+    """Исключение, которое бросает supabase-py на ответ с кодом 21000.
+
+    Собирается тем же путём, что в postgrest (_sync/request_builder.py):
+    тело ответа разбирается моделью APIErrorFromJSON, словарь из неё уходит в
+    APIError. Так у загрузки то же исключение с тем же .code, что в проде.
+    """
+    from postgrest.exceptions import APIError, APIErrorFromJSON
+    from postgrest.utils import model_validate_json
+
+    body = json.dumps(DUPLICATE_IN_BATCH_ERROR).encode("utf-8")
+    return APIError(dict(model_validate_json(APIErrorFromJSON, body)))
 
 
 def _like_regex(pattern):
@@ -107,11 +133,46 @@ class Query:
             ordered.sort(key=lambda r, c=col: str(r.get(c) or ""), reverse=desc)
         return ordered
 
+    def _conflict_keys(self):
+        # Ключ конфликта берём из on_conflict, как это делает PostgREST;
+        # старая эвристика по имени таблицы осталась только как запасной
+        # вариант для вызовов без on_conflict.
+        key = self.on_conflict or (
+            "source_key" if self.table.endswith("sources") else "task_id"
+        )
+        # PostgREST принимает составной ключ через запятую
+        # ("project_id,row_key") — совпадать должны все колонки сразу.
+        return [k.strip() for k in str(key).split(",") if k.strip()]
+
+    def _reject_duplicate_keys(self):
+        """Две строки пачки с одним ключом — отказ всей пачки, как в Postgres.
+
+        Раньше фейк применял пачку построчно, и вторая строка молча
+        перезаписывала первую. Настоящая база на INSERT … ON CONFLICT DO
+        UPDATE так не умеет: весь запрос падает с кодом 21000, и загрузка
+        обрывается. ON CONFLICT DO NOTHING (ignore_duplicates) повтор
+        пропускает без ошибки. NULL в ключе с другими строками не совпадает.
+        """
+        if self.ignore_duplicates:
+            return
+        keys = self._conflict_keys()
+        seen = set()
+        for item in self.payload:
+            value = tuple(item.get(k) for k in keys)
+            if any(v is None for v in value):
+                continue
+            if value in seen:
+                raise duplicate_in_batch_error()
+            seen.add(value)
+
     def execute(self):
         rows = self.db.setdefault(self.table, [])
         if self.op in ("insert", "upsert") and isinstance(self.payload, list):
             # PostgREST принимает пачку строк одним запросом — так пишет
             # настоящая загрузка выгрузки (platform_table_rows).
+            if self.op == "upsert":
+                # Проверка до записи первой строки: отказ — на всю пачку.
+                self._reject_duplicate_keys()
             out = []
             for item in self.payload:
                 one = Query(
@@ -144,15 +205,7 @@ class Query:
             rows.append(dict(self.payload))
             return Result([dict(self.payload)])
         if self.op == "upsert":
-            # Ключ конфликта берём из on_conflict, как это делает PostgREST;
-            # старая эвристика по имени таблицы осталась только как запасной
-            # вариант для вызовов без on_conflict.
-            key = self.on_conflict or (
-                "source_key" if self.table.endswith("sources") else "task_id"
-            )
-            # PostgREST принимает составной ключ через запятую
-            # ("project_id,row_key") — совпадать должны все колонки сразу.
-            keys = [k.strip() for k in str(key).split(",") if k.strip()]
+            keys = self._conflict_keys()
             for row in rows:
                 if all(row.get(k) == self.payload.get(k) for k in keys):
                     if self.ignore_duplicates:

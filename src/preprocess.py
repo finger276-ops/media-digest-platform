@@ -61,6 +61,8 @@ from services.tag_parsing import (
 )
 from services.microtopics import regex_any, classify_microtopic
 from services.message_normalize import (
+    DUPLICATES_REMOVED,
+    SHARED_ID_MESSAGES,
     is_brand_analytics_dataframe,
     metrics_in_source,
     normalize_messages,
@@ -153,7 +155,10 @@ def build_processed_tables(
     tag_cols = detect_tag_columns(raw)
     is_brand_analytics = is_brand_analytics_dataframe(raw)
 
-    messages, message_tags = normalize_messages(raw, tag_cols)
+    # Счётчики повторов ID уходят в манифест: их показывает страница
+    # загрузки, а у периода остаётся след, почему сообщений меньше, чем строк.
+    repeats: dict[str, int] = {}
+    messages, message_tags = normalize_messages(raw, tag_cols, stats=repeats)
     # Какие метрики были в выгрузке: без этого пустая колонка «Просмотры»
     # неотличима от нулевого охвата (services.metrics_compute.metric_known).
     source_metrics = metrics_in_source(raw)
@@ -269,6 +274,8 @@ def build_processed_tables(
         "source_file": source_file,
         "rows_source": int(len(raw)),
         "rows_messages": int(len(messages)),
+        DUPLICATES_REMOVED: int(repeats.get(DUPLICATES_REMOVED, 0)),
+        SHARED_ID_MESSAGES: int(repeats.get(SHARED_ID_MESSAGES, 0)),
         "rows_discussions": int(len(discussions)),
         "rows_events": int(len(events)),
         "tag_columns": tag_cols,

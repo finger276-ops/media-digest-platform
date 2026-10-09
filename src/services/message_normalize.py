@@ -7,6 +7,10 @@
 
 from __future__ import annotations
 
+from collections import Counter
+from typing import Any, Callable
+
+import numpy as np
 import pandas as pd
 
 from services.message_kinds import classify_kinds
@@ -78,9 +82,205 @@ def metrics_in_source(raw: pd.DataFrame) -> str:
     return "|".join(present)
 
 
+# Счётчики повторов ID для отчёта о загрузке. Под этими именами они лежат в
+# манифесте периода и в итоге загрузки, а страница загрузки показывает их
+# строками services.import_report.repeated_id_lines.
+DUPLICATES_REMOVED = "duplicate_rows_removed"
+SHARED_ID_MESSAGES = "shared_id_messages"
+
+
+def resolve_repeated_ids(
+    *,
+    message_ids: list[str],
+    source_ids: list[str],
+    texts: list[str],
+    dates: list[str],
+    author_profiles: list[str],
+    author_names: list[str],
+    links: list[str],
+    filled_counts: Callable[[list[int]], list[int]],
+) -> tuple[list[str], list[int], dict[str, int]]:
+    """Разобрать строки с одинаковым ID сообщения (или ссылкой без ID).
+
+    ID сообщения — хеш «ID сообщения», а без него — ссылки. Повтор ID ломал
+    загрузку: две строки с одним ID в одной пачке записи Postgres отвергает
+    целиком (код 21000), а в разных пачках вторая молча затирает первую.
+    Повторы бывают трёх видов: файл склеен из двух выгрузок, выгрузки
+    перекрываются по датам, или у разных сообщений одна ссылка (комментарии
+    без своего ID приезжают со ссылкой на пост).
+
+    Правило владельца: настоящие повторы схлопнуть, разные сообщения не
+    терять ни одного.
+
+    - Одно и то же сообщение — тот же текст, та же дата и тот же автор и
+      ссылка там, где они есть (_messages_of_group). Остаётся одна строка —
+      самая заполненная (больше непустых ячеек в файле), при равенстве —
+      первая.
+    - Разные сообщения под одним ID остаются все. Исходный ID сохраняет
+      самое раннее по дате (_anchor_order) — у комментариев под постом это
+      обычно сам пост. Остальные получают ID из исходного ID, своего текста
+      и даты (_derived_id_source). Номер строки не участвует ни там, ни там:
+      та же выгрузка в другом порядке строк, как и выгрузка, дополненная
+      более поздними комментариями, даёт те же ID, и ручные правки (скрыть,
+      перенести) остаются у своих сообщений.
+    - Строки без ID и ссылки получили ID по номеру строки, они и так
+      разные — их правило не трогает.
+
+    Почему не «первое по файлу»: тогда исходный ID переходил бы к другому
+    сообщению при выгрузке «новые сверху», и правки, привязанные к ID,
+    молча оказывались бы у чужого сообщения. Цена выбора — периоды,
+    загруженные до версии 4.12.7: прежняя запись хранила под общим ID
+    последнее по файлу сообщение (остальные терялись), а пересборка отдаст
+    этот ID самому раннему. Это сказано в README (версия 4.12.7).
+
+    Возвращает ID для каждой строки, номера строк, которые надо убрать, и
+    счётчики для отчёта. filled_counts(позиции) — число непустых ячеек
+    исходного файла у этих строк: считается только для строк с повтором,
+    чтобы выгрузка без повторов не платила за проверку.
+    """
+    stats = {DUPLICATES_REMOVED: 0, SHARED_ID_MESSAGES: 0}
+    new_ids = list(message_ids)
+    has_source = [bool(str(value).strip()) for value in source_ids]
+    seen = Counter(mid for mid, sourced in zip(message_ids, has_source) if sourced)
+    groups: dict[str, list[int]] = {}
+    for pos, (mid, sourced) in enumerate(zip(message_ids, has_source)):
+        if sourced and seen[mid] > 1:
+            groups.setdefault(mid, []).append(pos)
+    if not groups:
+        return new_ids, [], stats
+
+    candidates = [pos for positions in groups.values() for pos in positions]
+    filled = dict(zip(candidates, filled_counts(candidates)))
+    drop: list[int] = []
+    for positions in groups.values():
+        authors = {
+            pos: pick_first_non_empty(author_profiles[pos], author_names[pos])
+            for pos in positions
+        }
+        link_keys = {pos: normalize_spaces(links[pos]) for pos in positions}
+        messages = _messages_of_group(positions, texts, dates, authors, link_keys)
+        source = source_ids[positions[0]]
+        anchor = min(messages, key=_anchor_order)
+        same_text_date = Counter(key[:2] for key in messages)
+        same_text_date_author = Counter(key[:3] for key in messages)
+        for key, rows in messages.items():
+            keep = max(rows, key=lambda pos: (filled[pos], -pos))
+            drop.extend(pos for pos in rows if pos != keep)
+            if key != anchor:
+                new_ids[keep] = stable_hash(
+                    _derived_id_source(
+                        source, key, same_text_date, same_text_date_author
+                    ),
+                    prefix="m_",
+                )
+        stats[DUPLICATES_REMOVED] += len(positions) - len(messages)
+        if len(messages) > 1:
+            stats[SHARED_ID_MESSAGES] += len(messages)
+    return new_ids, sorted(drop), stats
+
+
+def _messages_of_group(
+    positions: list[int],
+    texts: list[str],
+    dates: list[str],
+    authors: dict[int, str],
+    links: dict[int, str],
+) -> dict[tuple[str, str, str, str], list[int]]:
+    """Строки группы одного ID → сообщения: ключ (текст, дата, автор, ссылка).
+
+    Сначала сообщения различает текст с датой. Автор различает только строки
+    с одинаковыми текстом и датой, и только если среди них хотя бы два
+    разных непустых автора. Так копия из выгрузки без колонки автора
+    остаётся копией, даже если под той же ссылкой пишут несколько человек:
+    у её текста с датой автор один. Если же одинаковый текст с той же датой
+    написали двое, строку без автора не к кому отнести — она остаётся
+    отдельным сообщением: сомнение решается в пользу «сохранить». Ссылка
+    точно так же различает строки с одинаковыми текстом, датой и автором.
+    В ключе автор и ссылка пустые, когда ничего не различают.
+    """
+    by_text_date: dict[tuple[str, str], list[int]] = {}
+    for pos in positions:
+        by_text_date.setdefault((texts[pos], dates[pos]), []).append(pos)
+    messages: dict[tuple[str, str, str, str], list[int]] = {}
+    for (text, date), rows in by_text_date.items():
+        split_author = len({authors[pos] for pos in rows if authors[pos]}) > 1
+        by_author: dict[str, list[int]] = {}
+        for pos in rows:
+            by_author.setdefault(authors[pos] if split_author else "", []).append(pos)
+        for author, same in by_author.items():
+            split_link = len({links[pos] for pos in same if links[pos]}) > 1
+            for pos in same:
+                link = links[pos] if split_link else ""
+                messages.setdefault((text, date, author, link), []).append(pos)
+    return messages
+
+
+def _anchor_order(key: tuple[str, str, str, str]) -> tuple[bool, str, str, str, str]:
+    """Порядок, в котором сообщение группы получает исходный ID: первое — его.
+
+    Самое раннее по дате; дата хранится как «ГГГГ-ММ-ДД чч:мм:сс», и
+    сравнение таких строк совпадает с порядком времени. Сообщения без даты —
+    в конце, при равной дате решают текст, автор и ссылка. Номер строки не
+    участвует.
+    """
+    text, date, author, link = key
+    return (date == "", date, text, author, link)
+
+
+def _filled_counts(raw: pd.DataFrame, positions: list[int]) -> list[int]:
+    """Сколько непустых ячеек исходного файла у строк с этими номерами.
+
+    Колонки берутся по номеру, а не по имени: в выгрузке бывают одноимённые
+    колонки, и обращение по имени вернуло бы таблицу вместо колонки.
+    """
+    subset = raw.iloc[positions]
+    total = np.zeros(len(positions), dtype=int)
+    for column in range(subset.shape[1]):
+        values = subset.iloc[:, column].fillna("").astype(str).str.strip()
+        total += values.ne("").to_numpy(dtype=bool, na_value=False)
+    return total.tolist()
+
+
+def _derived_id_source(
+    source: str,
+    key: tuple[str, str, str, str],
+    same_text_date: Counter,
+    same_text_date_author: Counter,
+) -> str:
+    """Строка, из которой хешируется ID сообщения группы, кроме самого раннего.
+
+    Исходный ID, текст и дата. Автор входит, только если у другого
+    сообщения группы те же текст и дата, ссылка — только если совпадает и
+    автор: иначе ID менялся бы, когда в выгрузку добавится сообщение
+    другого автора или придёт копия без колонки автора. Счётчики — сколько
+    сообщений группы с такими текстом и датой (и автором): посчитаны один
+    раз на группу, чтобы группа из тысяч строк с одним ID не разбиралась
+    попарно. Разделитель — управляющий символ \\x1f: в текстах выгрузок и
+    датах его не бывает, так что разные сообщения не склеиваются в одну
+    строку. Если совпадение ID всё же случится, загрузка не оборвётся:
+    страховка row_id в platform_store оставит последнее и сообщит владельцу.
+    """
+    text, date, author, link = key
+    parts = [str(source), text, date]
+    if same_text_date[key[:2]] > 1:
+        parts.append(f"author={author}")
+    if same_text_date_author[key[:3]] > 1:
+        parts.append(f"link={link}")
+    return "\x1f".join(parts)
+
+
 def normalize_messages(
-    raw: pd.DataFrame, tag_cols: list[str]
+    raw: pd.DataFrame,
+    tag_cols: list[str],
+    *,
+    stats: dict[str, Any] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Сырая выгрузка → таблица сообщений и их тегов.
+
+    stats, если передан, получает счётчики повторов ID (resolve_repeated_ids):
+    сколько копий одного сообщения убрано и сколько разных сообщений делили
+    один ID или ссылку.
+    """
     df = raw.copy()
     for col in df.columns:
         df[col] = df[col].fillna("").astype(str)
@@ -128,11 +328,12 @@ def normalize_messages(
         "Ссылка",
         aliases=["URL", "Url", "url", "message_link", "Ссылка на сообщение"],
     )
-    source_id = id_series.where(id_series.str.strip() != "", link_series)
+    source_ids = id_series.where(id_series.str.strip() != "", link_series).tolist()
     df["message_id"] = [
         stable_hash(v if str(v).strip() else f"row_{i}", prefix="m_")
-        for i, v in enumerate(source_id.tolist())
+        for i, v in enumerate(source_ids)
     ]
+    link_values = link_series.tolist()
 
     blog_profile = get_text_series(
         df,
@@ -166,7 +367,7 @@ def normalize_messages(
             prefix="c_",
         )
         for i, (profile, title, link) in enumerate(
-            zip(blog_profile.tolist(), blog_title.tolist(), link_series.tolist())
+            zip(blog_profile.tolist(), blog_title.tolist(), link_values)
         )
     ]
 
@@ -180,14 +381,14 @@ def normalize_messages(
         "Автор",
         aliases=["Имя автора", "Пользователь", "author", "user_name", "username"],
     )
+    author_profiles = author_profile.tolist()
+    author_names = author_name.tolist()
     df["author_id"] = [
         stable_hash(
             pick_first_non_empty(profile, author, fallback=f"unknown_author_{i}"),
             prefix="a_",
         )
-        for i, (profile, author) in enumerate(
-            zip(author_profile.tolist(), author_name.tolist())
-        )
+        for i, (profile, author) in enumerate(zip(author_profiles, author_names))
     ]
 
     is_brand_analytics = is_brand_analytics_dataframe(df)
@@ -456,6 +657,27 @@ def normalize_messages(
     # нужна и разделу отзывов, и фильтрам ленты, а зависит только от колонок,
     # которые уже приехали. Считать её дважды незачем.
     messages["kind"] = classify_kinds(messages)
+
+    # Повторы ID разбираются над готовой таблицей: ID «по номеру строки»
+    # (сообщение без ID, неизвестный автор или чат) к этому моменту уже
+    # посчитаны по исходным номерам строк и от удаления копий не съезжают.
+    new_ids, drop, repeat_stats = resolve_repeated_ids(
+        message_ids=messages["message_id"].tolist(),
+        source_ids=source_ids,
+        texts=df["text_clean"].tolist(),
+        dates=df["date"].tolist(),
+        author_profiles=author_profiles,
+        author_names=author_names,
+        links=link_values,
+        filled_counts=lambda positions: _filled_counts(raw, positions),
+    )
+    if drop or repeat_stats[SHARED_ID_MESSAGES]:
+        messages["message_id"] = new_ids
+        keep = np.ones(len(messages), dtype=bool)
+        keep[drop] = False
+        messages = messages.iloc[keep].reset_index(drop=True)
+    if stats is not None:
+        stats.update(repeat_stats)
 
     tag_rows = []
     for message_id, tags in zip(messages["message_id"], messages["tags"]):

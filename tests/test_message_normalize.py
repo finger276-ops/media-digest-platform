@@ -19,7 +19,10 @@ normalize_messages превращает сырую выгрузку в табл�
   на текстах с границами слов, двойниками, заглавными и ё;
 - весь разбор сверяется с прежним (tests/message_normalize_reference.py) на
   случайных выгрузках обоих видов — Brand Analytics и без сюжетов — с
-  пропусками и неполными колонками (раздел 3).
+  пропусками и неполными колонками (раздел 3). В выгрузках нарочно есть
+  повторы ID («id-dup») и общей ссылки без ID: эталон с версии 4.12.7 несёт
+  своё, построчное, правило повторов ID, и сверка проверяет заодно и его —
+  таблицы и счётчики для отчёта о загрузке.
 
 Мутационные проверки (что ломает какой тест):
 - в normalize_spaces проверять только «  », без «\\t» -> «normalize_spaces
@@ -31,7 +34,13 @@ normalize_messages превращает сырую выгрузку в табл�
 - снять фоллбэк для сложных шаблонов (считать «не\\s+работа» ядром где
   угодно) -> «микротема совпадает с прежней» краснеет;
 - row_tags получает пустой словарь вместо строки -> «разбор совпадает с
-  прежним» краснеет.
+  прежним» краснеет;
+- в resolve_repeated_ids при равной заполненности оставлять последнюю
+  копию, а не первую -> «разбор совпадает с прежним» краснеет;
+- исходный ID — первому по файлу, а не самому раннему по дате; автор (или
+  ссылка) в производном ID всегда; автор различает сообщения по всей группе
+  одного ID, а не по строкам с тем же текстом и датой; ссылка не различает
+  никогда -> «разбор совпадает с прежним» краснеет в каждом случае.
 """
 
 import os
@@ -176,13 +185,14 @@ def random_raw(rng, n, brand_analytics):
 
 
 def compare(raw, tag_cols):
+    expected_stats, got_stats = {}, {}
     try:
-        expected = normalize_messages_reference(raw.copy(), tag_cols)
+        expected = normalize_messages_reference(raw.copy(), tag_cols, stats=expected_stats)
     except Exception as exc:  # noqa: BLE001 — сверяется ниже
         expected = exc
     before = raw.copy()
     try:
-        got = normalize_messages(raw, tag_cols)
+        got = normalize_messages(raw, tag_cols, stats=got_stats)
     except Exception as exc:  # noqa: BLE001 — сверяется ниже
         got = exc
     try:
@@ -198,9 +208,13 @@ def compare(raw, tag_cols):
         assert_frame_equal(got[1], expected[1], check_exact=True)
     except AssertionError as exc:
         return str(exc)[:400]
+    if got_stats != expected_stats:
+        return f"счётчики повторов: {got_stats} вместо {expected_stats}"
+    REPEATS.append(expected_stats)
     return ""
 
 
+REPEATS: list = []
 problems = []
 for seed in range(120):
     rng = random.Random(seed)
@@ -209,6 +223,14 @@ for seed in range(120):
     if problem:
         problems.append(f"seed {seed}: {problem}")
 check("разбор совпадает с прежним (120 выгрузок, оба вида)", not problems, "\n".join(problems[:3]))
+# Без этих двух проверок сверка могла бы пройти на выгрузках, где правилу
+# повторов просто нечего делать.
+check("в сверке есть выгрузки, где копии одного сообщения убраны",
+      sum(1 for s in REPEATS if s.get("duplicate_rows_removed")) >= 10,
+      str(sum(1 for s in REPEATS if s.get("duplicate_rows_removed"))))
+check("в сверке есть выгрузки с разными сообщениями под одним ID",
+      sum(1 for s in REPEATS if s.get("shared_id_messages")) >= 10,
+      str(sum(1 for s in REPEATS if s.get("shared_id_messages"))))
 
 print("4. Средняя выгрузка: совпадает и заметно быстрее")
 rng = random.Random(20260925)

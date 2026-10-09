@@ -70,6 +70,11 @@ CHUNK_SIZE = 400
 # не загрузят ещё раз.
 PERIOD_STATUS_UPLOADING = "uploading"
 
+# Ключ манифеста периода: сколько строк какой таблицы отбросила страховка от
+# повтора ключа (_last_record_per_row_id). Есть только у периодов, где она
+# сработала.
+ROWS_DROPPED_DUPLICATE_KEY = "rows_dropped_duplicate_key"
+
 LOGGER = logging.getLogger("platform.store")
 
 # Повтор записи при временном сбое. Запись периода — десятки запросов подряд,
@@ -603,7 +608,35 @@ def dataframe_to_payload_records(
                 "updated_at": now_iso(),
             }
         )
-    return records
+    return _last_record_per_row_id(records, table_name)
+
+
+def _last_record_per_row_id(
+    records: list[dict[str, Any]], table_name: str
+) -> list[dict[str, Any]]:
+    """Страховка: один row_id — одна запись.
+
+    Две записи с одним row_id в одной пачке upsert Postgres отвергает целиком
+    (21000: ON CONFLICT DO UPDATE command cannot affect row a second time) —
+    и загрузка обрывается; в разных пачках вторая молча затирает первую.
+    Повторы ID сообщений разбирает уже разбор выгрузки
+    (message_normalize.resolve_repeated_ids), а здесь — последняя линия для
+    любой таблицы: остаётся последняя запись, как и при записи по одной, и
+    ни одна пачка не может нести повтор ключа. В лог — только таблица и
+    число: строки — данные выгрузки. save_processed_tables вдобавок кладёт
+    число в манифест периода и сообщает владельцу (_report_dropped_rows).
+    """
+    last = {record["row_id"]: index for index, record in enumerate(records)}
+    if len(last) == len(records):
+        return records
+    LOGGER.warning(
+        "Таблица %s: строк с повторяющимся ключом %d — оставлена последняя из каждых",
+        table_name,
+        len(records) - len(last),
+    )
+    return [
+        record for index, record in enumerate(records) if last[record["row_id"]] == index
+    ]
 
 
 def save_processed_tables(
@@ -682,10 +715,14 @@ def save_processed_tables(
                 .execute(),
             )
     written: set[tuple[str, str]] = set()
+    dropped: dict[str, int] = {}
     for table_name in TABLES:
-        records = dataframe_to_payload_records(
-            tables.get(table_name, pd.DataFrame()), table_name, project_id, period_id
-        )
+        frame = tables.get(table_name, pd.DataFrame())
+        records = dataframe_to_payload_records(frame, table_name, project_id, period_id)
+        # dataframe_to_payload_records даёт запись на строку таблицы; меньше
+        # записей — значит, сработала страховка от повтора ключа.
+        if frame is not None and len(records) < len(frame):
+            dropped[table_name] = len(frame) - len(records)
         written.update((table_name, record["row_id"]) for record in records)
         # Размер пачки читается при вызове, а не из значения по умолчанию
         # chunked: тесты уменьшают CHUNK_SIZE, чтобы обрыв попадал между пачками.
@@ -696,6 +733,8 @@ def save_processed_tables(
                 .upsert(batch, on_conflict="project_id,period_id,table_name,row_id")
                 .execute(),
             )
+    if dropped:
+        _report_dropped_rows(period_payload, dropped)
     if keep_old_rows_until_written:
         if replace:
             _delete_stale_rows(client, project_id, period_id, written)
@@ -705,6 +744,38 @@ def save_processed_tables(
             .upsert(period_payload, on_conflict="period_id")
             .execute(),
         )
+    elif dropped:
+        # В прежнем порядке строка периода записана до строк — след о
+        # срабатывании страховки дописывается в неё отдельно.
+        _write_with_retry(
+            "периода",
+            lambda: client.table("platform_periods")
+            .upsert(period_payload, on_conflict="period_id")
+            .execute(),
+        )
+
+
+def _report_dropped_rows(period_payload: dict[str, Any], dropped: dict[str, int]) -> None:
+    """Страховка отбросила строки: след в сведениях о периоде и сигнал владельцу.
+
+    Разбор выгрузки уже разводит повторы ID, так что сюда повтор ключа
+    доходит только из-за ошибки в коде платформы, а не в файле. Одного
+    предупреждения в логе сервера мало: его никто не читает, а итог загрузки
+    и манифест при этом называют число сообщений до отбрасывания. Поэтому
+    число отброшенных строк по таблицам ложится в манифест периода
+    (ROWS_DROPPED_DUPLICATE_KEY), а владельцу уходит сигнал. Данных выгрузки
+    нет ни там, ни там — только таблицы и числа.
+    """
+    period_payload["manifest"] = {
+        **(period_payload.get("manifest") or {}),
+        ROWS_DROPPED_DUPLICATE_KEY: dict(dropped),
+    }
+    report_failure(
+        "запись периода: строки с повторяющимся ключом отброшены страховкой",
+        project_id=period_payload.get("project_id"),
+        period_id=period_payload.get("period_id"),
+        tables=", ".join(f"{table}: {count}" for table, count in dropped.items()),
+    )
 
 
 def _delete_stale_rows(

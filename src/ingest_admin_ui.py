@@ -21,6 +21,7 @@ from metric_cards_ui import metric_card, render_metric_row
 from services import ingest_queue as queue
 from services.cached_store import clear_platform_caches
 from services.formatting import SOURCE_SYSTEM_LABELS, source_system_title
+from services.import_report import repeated_id_lines
 from services.ingest import IngestError, file_sha256, ingest_file_bytes
 from services.roles import can_change_project_data
 
@@ -65,14 +66,35 @@ def _tasks_view(tasks: pd.DataFrame, *, is_admin: bool = False) -> pd.DataFrame:
             "Получено": column("created_at").map(_fmt_dt),
             "Обработано": column("finished_at").map(_fmt_dt),
             "Попытки": column("attempts", 0),
-            "Комментарий": column("error_message")
-            .fillna("")
-            .map(lambda text: _task_error_text(text, is_admin=is_admin))
-            .str.slice(0, 160),
+            "Комментарий": pd.Series(
+                [
+                    _task_comment(error, result, is_admin=is_admin)
+                    for error, result in zip(
+                        column("error_message").fillna("").tolist(),
+                        column("result", None).tolist(),
+                    )
+                ],
+                index=tasks.index,
+                dtype="object",
+            ).str.slice(0, 160),
             "task_id": column("task_id"),
         }
     )
     return view
+
+
+def _task_comment(error_message: Any, result: Any, *, is_admin: bool) -> str:
+    """Комментарий к задаче: текст ошибки, а у загруженной — повторы ID в файле.
+
+    Страница «Загрузка файла» говорит, сколько повторов сообщений убрано, а
+    у файла из автозагрузки этого никто не видел: итог задачи лежал только в
+    базе. Без строки аналитик не поймёт, почему сообщений в периоде меньше,
+    чем строк в файле.
+    """
+    text = _task_error_text(error_message, is_admin=is_admin)
+    if text or not isinstance(result, dict):
+        return text
+    return "; ".join(repeated_id_lines(result))
 
 
 def _process_task_in_ui(task: dict[str, Any], work_dir: str) -> dict[str, Any]:

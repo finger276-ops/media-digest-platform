@@ -185,6 +185,9 @@ jobs:
       - name: Безопасная запись загрузки (обрыв на любой пачке, повтор временных сбоев)
         run: python tests/test_upload_safe_write.py
 
+      - name: Повторы ID сообщения (копии схлопнуты, разные сохранены, без 21000)
+        run: python tests/test_duplicate_message_ids.py
+
       - name: Раздел «Источники» (площадки, авторы, новые площадки)
         run: python tests/test_sources.py
 

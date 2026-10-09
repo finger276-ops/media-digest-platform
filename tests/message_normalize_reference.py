@@ -4,6 +4,12 @@
 каком он был до ускорения (коммит e4cfe2c): df.apply(row_tags, axis=1),
 обход Series напрямую, микротема из tests/microtopics_reference.py. Заморожен
 намеренно: тест сверяет с ним новый разбор на случайных выгрузках.
+
+Единственное дополнение после заморозки — правило повторов ID (версия
+4.12.7, resolve_repeated_ids_reference ниже). Оно меняет результат разбора,
+поэтому без него эталон перестал бы совпадать с разбором на любой выгрузке с
+повтором. Правило написано здесь заново, в лоб — построчно, без кода из
+src: сверка на случайных выгрузках с повторами ID и ссылок проверяет и его.
 """
 
 from __future__ import annotations
@@ -49,8 +55,101 @@ def is_brand_analytics_dataframe(df: pd.DataFrame) -> bool:
     return False
 
 
+def _blank(value) -> bool:
+    try:
+        if pd.isna(value):
+            return True
+    except (TypeError, ValueError):
+        pass
+    return str(value).strip() == ""
+
+
+def resolve_repeated_ids_reference(
+    raw: pd.DataFrame,
+    messages: pd.DataFrame,
+    *,
+    source_id: pd.Series,
+    text: pd.Series,
+    date: pd.Series,
+    author_profile: pd.Series,
+    author_name: pd.Series,
+    link: pd.Series,
+) -> tuple[pd.DataFrame, dict[str, int]]:
+    """Правило повторов ID построчно.
+
+    Одно сообщение — тот же текст и дата; автор различает строки с теми же
+    текстом и датой, только если среди них два разных непустых автора;
+    ссылка — строки с теми же текстом, датой и автором, только если среди
+    них две разные непустые ссылки. От сообщения остаётся одна строка, самая
+    заполненная, при равенстве первая. Разные сообщения под одним ID
+    остаются все: самое раннее по дате (без даты — в конце, дальше текст,
+    автор, ссылка) — с исходным ID, остальные — с ID из исходного ID, текста
+    и даты, плюс автор, если у другого сообщения те же текст и дата, плюс
+    ссылка, если совпадает и автор. Строки без ID и ссылки не трогаются.
+    Каждая строка сравнивается со всеми строками своей группы — медленно, но
+    без хитростей.
+    """
+    stats = {"duplicate_rows_removed": 0, "shared_id_messages": 0}
+    ids = list(messages["message_id"])
+    by_id: dict[str, list[int]] = {}
+    for pos in range(len(messages)):
+        if str(source_id.iloc[pos]).strip():
+            by_id.setdefault(ids[pos], []).append(pos)
+    removed: set[int] = set()
+    changed = False
+    for group in by_id.values():
+        if len(group) < 2:
+            continue
+        changed = True
+        t = {p: text.iloc[p] for p in group}
+        d = {p: date.iloc[p] for p in group}
+        author = {p: pick_first_non_empty(author_profile.iloc[p], author_name.iloc[p]) for p in group}
+        url = {p: normalize_spaces(link.iloc[p]) for p in group}
+        key_of: dict[int, tuple] = {}
+        for p in group:
+            twins = [q for q in group if t[q] == t[p] and d[q] == d[p]]
+            if len(set(author[q] for q in twins if author[q])) >= 2:
+                a = author[p]
+                twins = [q for q in twins if author[q] == a]
+            else:
+                a = ""
+            u = url[p] if len(set(url[q] for q in twins if url[q])) >= 2 else ""
+            key_of[p] = (t[p], d[p], a, u)
+        keys = []
+        for p in group:
+            if key_of[p] not in keys:
+                keys.append(key_of[p])
+        anchor = sorted(keys, key=lambda k: (k[1] == "", k[1], k[0], k[2], k[3]))[0]
+        for key in keys:
+            rows = [p for p in group if key_of[p] == key]
+            filled = [
+                sum(0 if _blank(v) else 1 for v in raw.iloc[p].tolist()) for p in rows
+            ]
+            best = rows[filled.index(max(filled))]
+            for p in rows:
+                if p != best:
+                    removed.add(p)
+            if key != anchor:
+                parts = [str(source_id.iloc[group[0]]), key[0], key[1]]
+                if any(k[0] == key[0] and k[1] == key[1] for k in keys if k != key):
+                    parts.append("author=" + key[2])
+                if any(k[:3] == key[:3] for k in keys if k != key):
+                    parts.append("link=" + key[3])
+                ids[best] = stable_hash("\x1f".join(parts), prefix="m_")
+        stats["duplicate_rows_removed"] += len(group) - len(keys)
+        if len(keys) > 1:
+            stats["shared_id_messages"] += len(keys)
+    if changed:
+        messages = messages.copy()
+        messages["message_id"] = ids
+        messages = messages.iloc[
+            [p for p in range(len(messages)) if p not in removed]
+        ].reset_index(drop=True)
+    return messages, stats
+
+
 def normalize_messages_reference(
-    raw: pd.DataFrame, tag_cols: list[str]
+    raw: pd.DataFrame, tag_cols: list[str], *, stats: dict | None = None
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     df = raw.copy()
     for col in df.columns:
@@ -399,6 +498,19 @@ def normalize_messages_reference(
     # нужна и разделу отзывов, и фильтрам ленты, а зависит только от колонок,
     # которые уже приехали. Считать её дважды незачем.
     messages["kind"] = classify_kinds(messages)
+
+    messages, repeat_stats = resolve_repeated_ids_reference(
+        raw,
+        messages,
+        source_id=source_id,
+        text=df["text_clean"],
+        date=df["date"],
+        author_profile=author_profile,
+        author_name=author_name,
+        link=link_series,
+    )
+    if stats is not None:
+        stats.update(repeat_stats)
 
     tag_rows = []
     for message_id, tags in zip(messages["message_id"], messages["tags"]):

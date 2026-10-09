@@ -24,6 +24,8 @@ from typing import Any
 import pandas as pd
 
 from .formatting import source_system_title
+from .message_normalize import DUPLICATES_REMOVED, SHARED_ID_MESSAGES
+from .metrics_compute import format_int
 
 # Колонки, которые незачем показывать как непонятые: платформа добавляет их
 # сама либо использует не как данные. «Обработано» — маркер начала тегов: по
@@ -129,4 +131,32 @@ def normalization_lines(report: dict[str, Any]) -> list[str]:
             continue
         label = NORMALIZATION_LABELS.get(key, key)
         lines.append(f"{label}: {count}")
+    return lines
+
+
+def _count(stats: dict[str, Any], key: str) -> int:
+    try:
+        return int((stats or {}).get(key) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def repeated_id_lines(stats: dict[str, Any]) -> list[str]:
+    """Что платформа сделала с повторами ID сообщения или ссылки.
+
+    stats — итог загрузки или манифест периода (счётчики считает
+    services.message_normalize.resolve_repeated_ids). Строка появляется,
+    только если было что сообщить: без неё аналитик не поймёт, почему
+    сообщений в периоде меньше, чем строк в файле.
+    """
+    lines = []
+    removed = _count(stats, DUPLICATES_REMOVED)
+    if removed > 0:
+        lines.append(f"Повторы одного и того же сообщения убраны: {format_int(removed)}")
+    shared = _count(stats, SHARED_ID_MESSAGES)
+    if shared > 0:
+        lines.append(
+            f"Разные сообщения с одинаковым ID или ссылкой: {format_int(shared)} — "
+            "сохранены все"
+        )
     return lines
