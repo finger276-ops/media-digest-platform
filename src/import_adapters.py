@@ -16,7 +16,7 @@ import tempfile
 import zipfile
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any, Iterable, Iterator, Protocol
 
 import pandas as pd
 
@@ -51,6 +51,26 @@ class SourceFileError(ValueError):
     они не попадают (services/ingest.py). Наследник ValueError — старые
     except ValueError работают как раньше.
     """
+
+
+class ReadGuard(Protocol):
+    """Пределы чтения выгрузки: их задаёт вызывающий (services.ingest).
+
+    Адаптеры ничего не знают о пределах загрузки — им передают сторожа, и они
+    зовут его, пока файл ещё читается, а не после канонизации. Так отказ
+    приходит до того, как огромная таблица разрослась в памяти: чтение с
+    потолком строк, ширина по заголовку и проверка прочитанной таблицы.
+    Сторож отказывает исключением со своим текстом.
+    """
+
+    scan_rows: int  # сколько строк файла разрешено прочитать (до чистки пустых)
+
+    def check_width(self, columns: int) -> None:
+        """Колонок в таблице — по заголовку, до чтения данных."""
+
+    def check_table(self, raw: pd.DataFrame, complete: bool) -> None:
+        """Прочитанная и вычищенная таблица; complete=False — файл длиннее
+        потолка строк, прочитано только начало."""
 
 
 def _non_excel_content(path: Path) -> str | None:
@@ -466,8 +486,28 @@ def _find_csv_header(path: Path) -> tuple[int, str]:
     return best_idx, best_sep
 
 
-def _read_csv_any(path: Path) -> pd.DataFrame:
+def _csv_header_width(path: Path, header_idx: int, sep: str) -> int:
+    """Сколько колонок в строке заголовка CSV — не читая остальной файл."""
+    with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as f:
+        for _ in range(header_idx):
+            f.readline()
+        line = f.readline()
+    try:
+        return len(next(csv.reader([line], delimiter=sep)))
+    except (csv.Error, StopIteration):
+        return len(line.split(sep))
+
+
+def _read_csv_any(path: Path, guard: ReadGuard | None = None) -> pd.DataFrame:
     header_idx, sep = _find_csv_header(path)
+    # Пределы одной загрузки (services.ingest): ширина проверяется по строке
+    # заголовка, а таблица читается не дальше потолка строк — иначе файл с
+    # сотнями тысяч мелких строк разбирался бы целиком (минуты и гигабайт), и
+    # только потом выяснялось бы, что он не проходит по числу сообщений.
+    nrows = None
+    if guard is not None:
+        guard.check_width(_csv_header_width(path, header_idx, sep))
+        nrows = guard.scan_rows + 1
     try:
         df = pd.read_csv(
             path,
@@ -479,6 +519,7 @@ def _read_csv_any(path: Path) -> pd.DataFrame:
             engine="python",
             quoting=csv.QUOTE_MINIMAL,
             on_bad_lines="warn",
+            nrows=nrows,
         )
     except UnicodeDecodeError:
         df = pd.read_csv(
@@ -491,8 +532,13 @@ def _read_csv_any(path: Path) -> pd.DataFrame:
             engine="python",
             quoting=csv.QUOTE_MINIMAL,
             on_bad_lines="warn",
+            nrows=nrows,
         )
-    return _clean_dataframe(df)
+    complete = guard is None or len(df) <= guard.scan_rows
+    df = _clean_dataframe(df)
+    if guard is not None:
+        guard.check_table(df, complete)
+    return df
 
 
 def _find_excel_header(frame: pd.DataFrame) -> int:
@@ -524,7 +570,11 @@ def _find_excel_header(frame: pd.DataFrame) -> int:
     return best_idx
 
 
-def _read_excel_any(path: Path, sheet_name: str | int | None = None) -> pd.DataFrame:
+def _read_excel_any(
+    path: Path,
+    sheet_name: str | int | None = None,
+    guard: ReadGuard | None = None,
+) -> pd.DataFrame:
     """Read Excel and choose the best non-empty sheet.
 
     Monitoring exports often contain cover sheets, empty technical sheets or
@@ -533,11 +583,13 @@ def _read_excel_any(path: Path, sheet_name: str | int | None = None) -> pd.DataF
     has broken styles.xml, we automatically read a temporary repaired copy.
     """
     with _open_excel_file_resilient(path) as xls:
-        return _read_excel_sheets(xls, sheet_name)
+        return _read_excel_sheets(xls, sheet_name, guard)
 
 
 def _read_excel_sheets(
-    xls: pd.ExcelFile, sheet_name: str | int | None
+    xls: pd.ExcelFile,
+    sheet_name: str | int | None,
+    guard: ReadGuard | None = None,
 ) -> pd.DataFrame:
     """Выбрать лист с сообщениями и прочитать его.
 
@@ -578,6 +630,7 @@ def _read_excel_sheets(
     preferred_sheet_names = {"сообщения", "messages", "публикации", "mentions"}
     selected_sheet = None
     selected_header_idx = 0
+    selected_width = 0
     best_score = -1
 
     candidates = [sheet_name] if sheet_name is not None else sheets
@@ -618,6 +671,7 @@ def _read_excel_sheets(
         if score > best_score:
             selected_sheet = candidate
             selected_header_idx = row_idx
+            selected_width = preview.shape[1]
             best_score = score
 
     if selected_sheet is None:
@@ -626,14 +680,25 @@ def _read_excel_sheets(
             "Проверьте, что в Excel есть лист с колонками: дата, текст/сообщение, url/ссылка, автор или источник."
         )
 
+    # Пределы одной загрузки (см. _read_csv_any): ширину говорит предпросмотр
+    # листа, а данные читаются не дальше потолка строк. Лист в сотни тысяч
+    # отформатированных пустых строк иначе разбирался бы целиком.
+    nrows = None
+    if guard is not None:
+        guard.check_width(selected_width)
+        nrows = guard.scan_rows + 1
     df = pd.read_excel(
         xls,
         sheet_name=selected_sheet,
         header=selected_header_idx,
         dtype=str,
         keep_default_na=False,
+        nrows=nrows,
     )
+    complete = guard is None or len(df) <= guard.scan_rows
     df = _clean_dataframe(df)
+    if guard is not None:
+        guard.check_table(df, complete)
     if df.empty:
         raise SourceFileError(f"На листе Excel «{selected_sheet}» не найдено данных.")
     return df
@@ -1248,16 +1313,22 @@ def read_source_table(
     source_system: str = "auto",
     sheet_name: str | int | None = None,
     report: dict[str, Any] | None = None,
+    *,
+    guard: ReadGuard | None = None,
 ) -> pd.DataFrame:
+    """Прочитать выгрузку и привести к каноническому виду.
+
+    guard — пределы чтения (ReadGuard): без него файл читается целиком.
+    """
     path = Path(path)
     suffix = path.suffix.lower()
     # Сбор открывается до чтения файла: выправление ячеек происходит уже там,
     # и без этого счётчики отчёта не увидели бы ничего.
     with _recording_import():
         if suffix in {".xlsx", ".xls", ".xlsm"}:
-            raw = _read_excel_any(path, sheet_name=sheet_name)
+            raw = _read_excel_any(path, sheet_name=sheet_name, guard=guard)
         else:
-            raw = _read_csv_any(path)
+            raw = _read_csv_any(path, guard=guard)
         return canonicalize_table(
             raw, source_file=str(path), source_system=source_system, report=report
         )

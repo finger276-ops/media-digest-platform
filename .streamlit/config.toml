@@ -1,5 +1,13 @@
 [server]
 headless = true
+# Предел веса одного загружаемого файла, МБ, — для всех полей загрузки.
+# По умолчанию Streamlit пускает 200 МБ, а приложение на Streamlit Cloud —
+# один процесс на всех клиентов с памятью около гигабайта: одна тяжёлая
+# выгрузка перезапускала его у всех. Число совпадает с пределом веса в
+# src/services/upload_limits.py (DEFAULT_MAX_MB, проверяет
+# tests/test_upload_limits.py). Поднимать вместе с UPLOAD_MAX_MB и только
+# зная, что памяти хватит: README, «Версия 4.12.9».
+maxUploadSize = 20
 
 [browser]
 gatherUsageStats = false

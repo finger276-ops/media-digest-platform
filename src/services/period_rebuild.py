@@ -36,7 +36,12 @@ import platform_store as store
 
 from .audit_log import audit_reason
 from .cached_store import clear_platform_caches, delete_manual, save_manual
-from .ingest import IngestError, build_period_tables, read_canonical_bytes
+from .ingest import (
+    IngestError,
+    UploadTooLargeError,
+    build_period_tables,
+    read_canonical_bytes,
+)
 from .message_normalize import DUPLICATES_REMOVED, SHARED_ID_MESSAGES, UNDATED_MESSAGES
 
 # Порог совпадения состава: доля общих сообщений от объединения (Жаккар).
@@ -275,9 +280,19 @@ def rebuild_period(
         )
 
     source_filename = str(period.get("source_filename") or Path(storage_path).name)
-    canonical = read_canonical_bytes(
-        file_bytes, source_filename, str(manifest.get("source_system") or "auto")
-    )
+    try:
+        canonical = read_canonical_bytes(
+            file_bytes, source_filename, str(manifest.get("source_system") or "auto")
+        )
+    except UploadTooLargeError as exc:
+        # Период загружен из файла больше нынешних пределов (раньше их не
+        # было, или файл принёс воркер с поднятыми). Общий текст отказа
+        # говорит «загрузите частями» — а здесь человек нажал «Пересобрать».
+        raise RebuildError(
+            "Этот период загружен из файла больше нынешних пределов, поэтому "
+            f"пересобрать его нельзя. {exc} Когда загрузите части, удалите этот "
+            "период, иначе сообщения посчитаются дважды."
+        ) from exc
     if canonical is None or canonical.empty:
         raise RebuildError("В исходном файле не найдено ни одной строки сообщений.")
 

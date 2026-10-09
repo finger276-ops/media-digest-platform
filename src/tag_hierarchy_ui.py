@@ -32,6 +32,7 @@ from services.tag_hierarchy_store import (
     load_hierarchy_meta,
     save_tag_hierarchy,
 )
+from services.upload_limits import structure_file_problem
 
 
 def _read_structure_file(uploaded) -> pd.DataFrame:
@@ -105,6 +106,15 @@ def render_tag_hierarchy_block(project_id: str) -> None:
                 key=f"tag_structure_{project_id}",
             )
             if structure_file is None:
+                return
+
+            # Книга Excel в пару мегабайт разворачивается в сотни мегабайт
+            # данных, а читается целиком (и заново при каждом перезапуске
+            # страницы, пока файл выбран): структура — маленькая таблица, и
+            # большой файл останавливается до чтения.
+            problem = structure_file_problem(structure_file.getvalue())
+            if problem:
+                st.error(problem)
                 return
 
             # --- чтение и парсинг ---

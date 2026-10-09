@@ -72,6 +72,15 @@ jobs:
           SUPABASE_STORAGE_BUCKET: ${{ secrets.SUPABASE_STORAGE_BUCKET }}
           INGEST_NOTIFY_WEBHOOK: ${{ secrets.INGEST_NOTIFY_WEBHOOK }}
           INGEST_WORKER_ID: github-actions-${{ github.run_id }}
+          # Пределы одной загрузки (src/services/upload_limits.py). Пока
+          # переменные репозитория не заданы, действуют те же пределы, что в
+          # интерфейсе. Воркеру их можно поднять (Settings → Secrets and
+          # variables → Actions → Variables): у задачи своя машина, и
+          # приложение у клиентов от тяжёлого файла не перезапустится.
+          UPLOAD_MAX_MB: ${{ vars.UPLOAD_MAX_MB }}
+          UPLOAD_MAX_ROWS: ${{ vars.UPLOAD_MAX_ROWS }}
+          UPLOAD_MAX_TEXT_CHARS: ${{ vars.UPLOAD_MAX_TEXT_CHARS }}
+          UPLOAD_MAX_COLS: ${{ vars.UPLOAD_MAX_COLS }}
         run: |
           python scripts/ingest_worker.py \
             --max-tasks "${{ github.event.inputs.max_tasks || '10' }}" \

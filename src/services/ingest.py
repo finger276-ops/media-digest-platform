@@ -31,12 +31,14 @@ import platform_store as store
 from import_adapters import SourceFileError, read_source_table
 from io_utils import read_table
 from preprocess import run_preprocess_from_dataframe
+from . import upload_limits
 from .formatting import SOURCE_SYSTEM_LABELS
 from .message_normalize import DUPLICATES_REMOVED, SHARED_ID_MESSAGES, UNDATED_MESSAGES
 from .project_settings import (
     project_settings_from_row,
     story_build_settings_from_project_settings,
 )
+from .upload_limits import UploadLimits
 
 GENERATED_TABLES = [
     "events",
@@ -63,6 +65,17 @@ LOGGER = logging.getLogger("platform.ingest")
 
 class IngestError(RuntimeError):
     """Ошибка обработки выгрузки с понятным для аналитика текстом."""
+
+
+class UploadTooLargeError(IngestError):
+    """Выгрузка больше пределов одной загрузки (services/upload_limits.py).
+
+    Файл при этом не битый — он больше, чем платформа обрабатывает за раз.
+    Отдельный класс нужен странице загрузки: её общий ответ «не удалось
+    прочитать файл» с советом про листы здесь сбивал бы с толку. Наследник
+    IngestError: воркер автозагрузки такую задачу не повторяет, пересборка и
+    блок категории показывают текст как есть.
+    """
 
 
 def file_sha256(file_bytes: bytes) -> str:
@@ -115,15 +128,62 @@ def read_canonical_bytes(
     filename: str,
     source_system: str = "auto",
     report: dict[str, Any] | None = None,
+    *,
+    limits: UploadLimits | None = None,
 ) -> pd.DataFrame:
     """Прочитать выгрузку из байтов и привести к каноническому виду платформы.
 
     Если передать `report`, в него попадёт сводка разбора: сколько колонок
     распознано, какие остались непонятыми и что пришлось выправить. Нужна при
     ручной загрузке, чтобы чужой шаблон был виден сразу, а не через месяцы.
+
+    Выгрузка больше пределов одной загрузки (`limits`, по умолчанию —
+    upload_limits.current_limits()) — UploadTooLargeError. Через эту функцию
+    идут все пути: страница загрузки, блок категории, пересборка периода,
+    воркер автозагрузки и разбор очереди из интерфейса, — и пределы у всех
+    одни (у категории свои строки и знаки: upload_limits.category_limits).
     """
     if not file_bytes:
         raise IngestError("Пустой файл выгрузки.")
+    limits = limits or upload_limits.current_limits()
+    # Вес файла и распакованный размер книги — до pandas: чтение само по себе
+    # съедает память, и проверять после него было бы поздно.
+    problem = upload_limits.file_problem(file_bytes, limits)
+    if problem:
+        raise UploadTooLargeError(problem)
+    # Колонки, сообщения и знаки проверяет сторож — прямо в чтении, до
+    # канонизации: она раздувает таблицу до сотни колонок на каждую строку, и
+    # файл с сотнями тысяч мелких строк обрабатывался бы минутами, чтобы потом
+    # получить отказ.
+    return _read_canonical(file_bytes, filename, source_system, report, _UploadGuard(limits))
+
+
+class _UploadGuard:
+    """Пределы одной загрузки для чтения выгрузки (import_adapters.ReadGuard)."""
+
+    def __init__(self, limits: UploadLimits) -> None:
+        self.limits = limits
+        self.scan_rows = limits.scan_rows
+
+    def check_width(self, columns: int) -> None:
+        problem = upload_limits.width_problem(columns, self.limits)
+        if problem:
+            raise UploadTooLargeError(problem)
+
+    def check_table(self, raw: pd.DataFrame, complete: bool) -> None:
+        problem = upload_limits.table_problem(raw, self.limits, complete=complete)
+        if problem:
+            raise UploadTooLargeError(problem)
+
+
+def _read_canonical(
+    file_bytes: bytes,
+    filename: str,
+    source_system: str,
+    report: dict[str, Any] | None,
+    guard: _UploadGuard | None = None,
+) -> pd.DataFrame:
+    """Разбор байтов выгрузки; guard — пределы загрузки (read_canonical_bytes)."""
     suffix = safe_suffix(filename)
     tmp_path = ""
     try:
@@ -134,7 +194,11 @@ def read_canonical_bytes(
             tmp_path,
             source_system=normalize_source_system(source_system),
             report=report,
+            guard=guard,
         )
+    except UploadTooLargeError:
+        # Отказ по пределам — не ошибка чтения: его текст готов для человека.
+        raise
     except SourceFileError as exc:
         # Разбор сам объяснил, что не так с файлом («внутри веб-страница,
         # сохраните как .xlsx») — этот текст написан для человека.
@@ -374,8 +438,17 @@ def ingest_file_bytes(
     replace: bool = True,
     extra_manifest: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Полный цикл: байты файла → период в платформе."""
-    canonical = read_canonical_bytes(file_bytes, source_filename, source_system)
+    """Полный цикл: байты файла → период в платформе.
+
+    Сюда приходит автозагрузка (воркер и разбор очереди из интерфейса): файл
+    уже лежит в хранилище, а вручную аналитик его не выбирал.
+    """
+    try:
+        canonical = read_canonical_bytes(file_bytes, source_filename, source_system)
+    except UploadTooLargeError as exc:
+        # Совет «разбейте и загрузите частями» аналитику автозагрузки не по
+        # адресу: у него нет файла в руках, а повтор задачи даст тот же отказ.
+        raise UploadTooLargeError(f"{exc} {upload_limits.AUTOLOAD_ADVICE}") from exc
     return process_canonical(
         canonical,
         project_id=project_id,

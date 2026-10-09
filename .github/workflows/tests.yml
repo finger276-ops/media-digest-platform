@@ -191,6 +191,9 @@ jobs:
       - name: Даты выгрузки (ячейки Excel и ISO без перестановки дня и месяца, сообщения без даты в отчёте)
         run: python tests/test_date_parsing.py
 
+      - name: Пределы одной загрузки (вес файла и книги Excel до разбора, колонки, потолок чтения строк, знаки в ячейках, страницы)
+        run: python tests/test_upload_limits.py
+
       - name: Раздел «Источники» (площадки, авторы, новые площадки)
         run: python tests/test_sources.py
 

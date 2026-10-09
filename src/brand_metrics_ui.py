@@ -42,6 +42,7 @@ from services.cached_store import (
 )
 from services.ingest import IngestError, read_canonical_bytes
 from services.dashboard_data import cached_period_messages
+from services.upload_limits import category_limits, field_max_mb, upload_hint
 from services.metric_notes import (
     load_note_versions,
     load_notes,
@@ -871,16 +872,27 @@ def render_category_upload(
         format_func=source_system_title,
         key="category_source_system",
     )
+    # Файл категории читается тем же read_canonical_bytes, что и выгрузка
+    # проекта: вес и колонки — те же пределы, а строк и знаков можно больше
+    # (дальше только подсчёт по брендам). Частями её не загрузить: данные
+    # категории пишутся к периоду одним файлом, следующая часть заменила бы
+    # предыдущую, — поэтому и подпись, и отказ без совета «загрузите частями».
+    limits = category_limits()
+    max_mb = field_max_mb(limits)
     uploaded = st.file_uploader(
         "CSV или Excel по всей категории",
         type=["csv", "xlsx", "xls", "xlsm"],
         key="category_file",
+        max_upload_size=max_mb,
     )
+    st.caption(upload_hint(limits, max_mb=max_mb))
     if uploaded is None:
         return
 
     try:
-        table = read_canonical_bytes(uploaded.getvalue(), uploaded.name, source_system)
+        table = read_canonical_bytes(
+            uploaded.getvalue(), uploaded.name, source_system, limits=limits
+        )
     except IngestError as exc:
         st.error(str(exc))
         return

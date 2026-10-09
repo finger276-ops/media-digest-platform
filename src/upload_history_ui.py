@@ -35,8 +35,14 @@ from services.import_report import (
     undated_line,
     undated_needs_warning,
 )
-from services.ingest import IngestError, process_canonical, read_canonical_bytes
+from services.ingest import (
+    IngestError,
+    UploadTooLargeError,
+    process_canonical,
+    read_canonical_bytes,
+)
 from services.period_rebuild import can_rebuild, rebuild_period
+from services.upload_limits import current_limits, field_max_mb, upload_hint
 from services.metrics_compute import format_int
 from services.observability import report_failure
 from services.project_settings import (
@@ -333,15 +339,27 @@ def render_upload_page(
             list(SOURCE_SYSTEM_LABELS),
             format_func=lambda x: SOURCE_SYSTEM_LABELS.get(x, x),
         )
+        limits = current_limits()
+        max_mb = field_max_mb(limits)
         uploaded = st.file_uploader(
-            "CSV или Excel", type=["csv", "xlsx", "xls", "xlsm"]
+            "CSV или Excel", type=["csv", "xlsx", "xls", "xlsm"], max_upload_size=max_mb
         )
+        # Само поле пишет предел по-английски («20MB per file») и так же
+        # отказывает тяжёлому файлу — пределы повторены по-русски.
+        st.caption(upload_hint(limits, max_mb=max_mb))
         submitted = st.form_submit_button("Обработать и сохранить", type="primary")
 
     if not submitted:
         return
     if uploaded is None:
-        st.error("Загрузите файл.")
+        # Файл тяжелее предела поле загрузки не принимает: оно пишет об этом
+        # по-английски («File must be … or smaller») и остаётся пустым — со
+        # стороны страницы это неотличимо от «файл не выбран».
+        st.error(
+            "Файл не выбран. Если вы выбрали файл, но поле его не приняло, "
+            f"значит, он тяжелее {max_mb} МБ: разбейте выгрузку по неделям или "
+            "месяцам и загрузите частями."
+        )
         return
     if date_from and date_to and date_from > date_to:
         st.error("Дата начала не может быть позже даты окончания.")
@@ -353,6 +371,12 @@ def render_upload_page(
             canonical = read_uploaded_to_canonical(
                 uploaded, source_system, report=import_report
             )
+        except UploadTooLargeError as exc:
+            # Файл не битый, он больше, чем платформа обрабатывает за раз:
+            # текст говорит, что именно велико и как разбить выгрузку.
+            # Подробности исключения не нужны никому, даже владельцу.
+            show_error(str(exc))
+            return
         except Exception as exc:
             st.error("Не удалось прочитать файл.")
             st.info(
@@ -361,7 +385,11 @@ def render_upload_page(
             )
             show_error_details(exc)
             return
-    st.success(f"Файл прочитан: {len(canonical):,} строк".replace(",", " "))
+    # С именем файла: если рядом с принятым файлом поле отвергло другой
+    # (слишком тяжёлый), по имени видно, какой из них пошёл в обработку.
+    st.success(
+        f"Файл «{uploaded.name}» прочитан: {len(canonical):,} строк".replace(",", " ")
+    )
     render_import_report(import_report)
     with st.expander("Предпросмотр распознанных колонок", expanded=False):
         # Служебные колонки платформы (source_system, source_file…) — не
@@ -495,8 +523,11 @@ def _run_rebuild(project_id: str, period_ids: list[str], work_dir: str) -> None:
             with st.spinner("Обрабатываю исходный файл заново…"):
                 done.append(rebuild_period(project_id, period_id, work_dir=work_dir))
         except IngestError as exc:
-            # RebuildError и ошибки разбора файла написаны для человека.
-            failed.append((period_id, exc, str(exc)))
+            # RebuildError и ошибки разбора файла написаны для человека. Отказ
+            # по пределам загрузки — не сбой, подробности исключения к нему не
+            # нужны никому, даже владельцу.
+            too_large = isinstance(exc.__cause__, UploadTooLargeError)
+            failed.append((period_id, None if too_large else exc, str(exc)))
         except Exception as exc:  # noqa: BLE001 — один период не роняет остальные
             failed.append((period_id, exc, "Не удалось пересобрать период."))
     if progress is not None:
